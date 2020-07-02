@@ -28,6 +28,7 @@ extern crate anyhow;
 /// KVM implementation module
 pub mod kvm;
 
+pub mod hyperv;
 /// Hypevisor related module
 pub mod hypervisor;
 
