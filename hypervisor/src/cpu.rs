@@ -12,10 +12,11 @@
 use crate::aarch64::VcpuInit;
 use crate::{CpuState, MpState};
 
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+use crate::x86_64::{CpuId, LapicState, Xsave};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{
-    CpuId, ExtendedControlRegisters, FpuState, LapicState, MsrEntries, SpecialRegisters,
-    StandardRegisters, VcpuEvents, Xsave,
+    ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
 use thiserror::Error;
 
@@ -203,22 +204,22 @@ pub trait Vcpu: Send + Sync {
     /// Set the floating point state (FPU) of a vCPU
     ///
     fn set_fpu(&self, fpu: &FpuState) -> Result<()>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// X86 specific call to setup the CPUID registers.
     ///
     fn set_cpuid2(&self, cpuid: &CpuId) -> Result<()>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// X86 specific call to retrieve the CPUID registers.
     ///
     fn get_cpuid2(&self, num_entries: usize) -> Result<CpuId>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Returns the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
     ///
     fn get_lapic(&self) -> Result<LapicState>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Sets the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
     ///
@@ -233,20 +234,22 @@ pub trait Vcpu: Send + Sync {
     /// Setup the model-specific registers (MSR) for this vCPU.
     ///
     fn set_msrs(&self, msrs: &MsrEntries) -> Result<usize>;
+    #[cfg(feature = "kvm")]
     ///
     /// Returns the vcpu's current "multiprocessing state".
     ///
     fn get_mp_state(&self) -> Result<MpState>;
+    #[cfg(feature = "kvm")]
     ///
     /// Sets the vcpu's current "multiprocessing state".
     ///
     fn set_mp_state(&self, mp_state: MpState) -> Result<()>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// X86 specific call that returns the vcpu's current "xsave struct".
     ///
     fn get_xsave(&self) -> Result<Xsave>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// X86 specific call that sets the vcpu's current "xsave struct".
     ///
@@ -273,7 +276,7 @@ pub trait Vcpu: Send + Sync {
     /// of the vcpu.
     ///
     fn set_vcpu_events(&self, events: &VcpuEvents) -> Result<()>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Let the guest know that it has been paused, which prevents from
     /// potential soft lockups when being resumed.
@@ -294,11 +297,13 @@ pub trait Vcpu: Send + Sync {
     ///
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     fn get_one_reg(&self, reg_id: u64) -> Result<u64>;
+    #[cfg(feature = "kvm")]
     ///
     /// Retrieve the vCPU state.
     /// This function is necessary to snapshot the VM
     ///
     fn state(&self) -> Result<CpuState>;
+    #[cfg(feature = "kvm")]
     ///
     /// Set the vCPU state.
     /// This function is required when restoring the VM

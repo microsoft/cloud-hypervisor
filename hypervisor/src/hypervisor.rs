@@ -8,9 +8,10 @@
 //
 //
 use crate::vm::Vm;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::x86_64::{CpuId, MsrList};
 #[cfg(target_arch = "x86_64")]
+#[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
 use std::sync::Arc;
 
@@ -20,6 +21,11 @@ use thiserror::Error;
 ///
 ///
 pub enum HypervisorError {
+    ///
+    /// hypervisor creation error
+    ///
+    #[error("Failed to create the hypervisor: {0}")]
+    HypervisorCreate(#[source] anyhow::Error),
     ///
     /// Vm creation failure
     ///
@@ -78,37 +84,42 @@ pub trait Hypervisor: Send + Sync {
     /// Return a hypervisor-agnostic Vm trait object
     ///
     fn create_vm(&self) -> Result<Arc<dyn Vm>>;
+    #[cfg(feature = "kvm")]
     ///
     /// Get the API version of the hypervisor
     ///
     fn get_api_version(&self) -> i32;
+    #[cfg(feature = "kvm")]
     ///
     /// Returns the size of the memory mapping required to use the vcpu's structures
     ///
     fn get_vcpu_mmap_size(&self) -> Result<usize>;
+    #[cfg(feature = "kvm")]
     ///
     /// Gets the recommended maximum number of VCPUs per VM.
     ///
     fn get_max_vcpus(&self) -> Result<usize>;
+    #[cfg(feature = "kvm")]
     ///
     /// Gets the recommended number of VCPUs per VM.
     ///
     fn get_nr_vcpus(&self) -> Result<usize>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Checks if a particular `Cap` is available.
     ///
     fn check_capability(&self, c: Cap) -> bool;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Get the supported CpuID
     ///
     fn get_cpuid(&self) -> Result<CpuId>;
+    #[cfg(not(feature = "hyperv"))]
     ///
     /// Check particular extensions if any
     ///
     fn check_required_extensions(&self) -> Result<()>;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     ///
     /// Retrieve the list of MSRs supported by the hypervisor.
     ///

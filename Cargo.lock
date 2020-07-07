@@ -458,10 +458,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperv-bindings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "hyperv-ioctls"
+version = "0.1.0"
+dependencies = [
+ "hyperv-bindings",
+ "libc",
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "hypervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hyperv-bindings",
+ "hyperv-ioctls",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",

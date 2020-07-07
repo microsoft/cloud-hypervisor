@@ -25,9 +25,11 @@ extern crate thiserror;
 #[macro_use]
 extern crate anyhow;
 
+#[cfg(feature = "kvm")]
 /// KVM implementation module
 pub mod kvm;
 
+#[cfg(all(feature = "hyperv", target_arch = "x86_64"))]
 pub mod hyperv;
 /// Hypevisor related module
 pub mod hypervisor;
@@ -47,6 +49,9 @@ mod device;
 pub use crate::hypervisor::{Hypervisor, HypervisorError};
 pub use cpu::{HypervisorCpuError, Vcpu, VmExit};
 pub use device::{Device, HypervisorDeviceError};
+#[cfg(all(feature = "hyperv", target_arch = "x86_64"))]
+pub use hyperv::*;
+#[cfg(feature = "kvm")]
 pub use kvm::*;
 pub use vm::{DataMatch, HypervisorVmError, Vm};
 
