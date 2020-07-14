@@ -323,7 +323,7 @@ where
         Ok(())
     }
 }
-
+#[cfg(feature = "kvm")]
 pub mod kvm {
     use super::*;
     use hypervisor::kvm::KVM_MSI_VALID_DEVID;
@@ -388,6 +388,33 @@ pub mod kvm {
                     format!("Failed setting GSI routing: {}", e),
                 )
             })
+        }
+    }
+}
+
+#[cfg(feature = "hyperv")]
+pub mod hyperv {
+    use super::*;
+
+    pub struct hyperv_irq_routing_entry();
+
+    type HypervMsiInterruptGroup = MsiInterruptGroup<hyperv_irq_routing_entry>;
+    type HypervRoutingEntry = RoutingEntry<hyperv_irq_routing_entry>;
+    pub type HypervMsiInterruptManager = MsiInterruptManager<hyperv_irq_routing_entry>;
+
+    impl RoutingEntryExt for HypervRoutingEntry {
+        fn make_entry(
+            vm: &Arc<dyn hypervisor::Vm>,
+            gsi: u32,
+            config: &InterruptSourceConfig,
+        ) -> Result<Box<Self>> {
+            todo!()
+        }
+    }
+
+    impl MsiInterruptGroupOps for HypervMsiInterruptGroup {
+        fn set_gsi_routes(&self) -> Result<()> {
+            todo!()
         }
     }
 }

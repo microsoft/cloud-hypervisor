@@ -14,7 +14,11 @@ use crate::config::ConsoleOutputMode;
 use crate::config::DeviceConfig;
 use crate::config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VmConfig, VsockConfig};
 use crate::device_tree::{DeviceNode, DeviceTree};
+#[cfg(feature = "hyperv")]
+use crate::interrupt::{hyperv::HypervMsiInterruptManager, LegacyUserspaceInterruptManager};
+#[cfg(feature = "kvm")]
 use crate::interrupt::{kvm::KvmMsiInterruptManager, LegacyUserspaceInterruptManager};
+
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "pci_support")]
 use crate::PciDeviceInfo;
@@ -38,10 +42,14 @@ use devices::{
     interrupt_controller, interrupt_controller::InterruptController, legacy::Serial, BusDevice,
     HotPlugNotificationFlags,
 };
+#[cfg(feature = "kvm")]
 use hypervisor::kvm_ioctls;
+#[cfg(feature = "kvm")]
 use hypervisor::kvm_ioctls::*;
 #[cfg(feature = "mmio_support")]
 use hypervisor::vm::DataMatch;
+#[cfg(all(feature = "mmio_support", feature = "mmio_support"))]
+use hypervisor::IoEventAddress;
 use libc::TIOCGWINSZ;
 use libc::{MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, O_TMPFILE, PROT_READ, PROT_WRITE};
 #[cfg(feature = "pci_support")]
@@ -184,7 +192,7 @@ pub enum DeviceManagerError {
     AllocateIrq,
 
     /// Cannot configure the IRQ.
-    Irq(kvm_ioctls::Error),
+    Irq(vmm_sys_util::errno::Error),
 
     /// Cannot allocate PCI BARs
     #[cfg(feature = "pci_support")]
@@ -812,12 +820,20 @@ impl DeviceManager {
         // and then the legacy interrupt manager needs an IOAPIC. So we're
         // handling a linear dependency chain:
         // msi_interrupt_manager <- IOAPIC <- legacy_interrupt_manager.
-        let msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
-            Arc::new(KvmMsiInterruptManager::new(
-                Arc::clone(&address_manager.allocator),
-                vm,
-            ));
-
+        #[cfg(feature = "kvm")]
+        let msi_interrupt_manager: Arc<
+            dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>,
+        > = Arc::new(KvmMsiInterruptManager::new(
+            Arc::clone(&address_manager.allocator),
+            vm,
+        ));
+        #[cfg(feature = "hyperv")]
+        let msi_interrupt_manager: Arc<
+            dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>,
+        > = Arc::new(HypervMsiInterruptManager::new(
+            Arc::clone(&address_manager.allocator),
+            vm,
+        ));
         let device_manager = DeviceManager {
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),

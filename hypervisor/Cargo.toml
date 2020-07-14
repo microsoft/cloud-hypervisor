@@ -15,7 +15,7 @@ libc = "0.2.74"
 kvm-ioctls = { git = "https://github.com/cloud-hypervisor/kvm-ioctls", branch = "ch" }
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch", features = ["with-serde", "fam-wrappers"] }
 
-hyperv-bindings = {path = "../../hyperv-bindings", features = ["with-serde"] }
+hyperv-bindings = {path = "../../hyperv-bindings", features = ["with-serde", "fam-wrappers"] }
 hyperv-ioctls = {path = "../../hyperv-ioctls"}
 
 serde = {version = ">=1.0.27", features = ["rc"] }

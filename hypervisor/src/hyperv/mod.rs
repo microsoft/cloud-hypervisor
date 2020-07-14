@@ -78,10 +78,17 @@ impl hypervisor::Hypervisor for HypervHypervisor {
 
         Ok(Arc::new(HypervVm { fd: vm_fd }))
     }
+    ///
+    /// Get the supported CpuID
+    ///
+    fn get_cpuid(&self) -> hypervisor::Result<CpuId> {
+        Ok(CpuId::new(1 as usize))
+    }
 }
 /// Vcpu struct for Hyper-V
 pub struct HypervVcpu {
     fd: VcpuFd,
+    cpuid: CpuId,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -232,6 +239,52 @@ impl cpu::Vcpu for HypervVcpu {
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         Err(cpu::HypervisorCpuError::RunVcpu(anyhow!("VCPU error")))
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call to setup the CPUID registers.
+    ///
+    fn set_cpuid2(&self, cpuid: &CpuId) -> cpu::Result<()> {
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call to retrieve the CPUID registers.
+    ///
+    fn get_cpuid2(&self, num_entries: usize) -> cpu::Result<CpuId> {
+        Ok(self.cpuid.clone())
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Returns the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
+    ///
+    fn get_lapic(&self) -> cpu::Result<LapicState> {
+        Ok(LapicState::default())
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Sets the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
+    ///
+    fn set_lapic(&self, lapic: &LapicState) -> cpu::Result<()> {
+        Ok(())
+    }
+    fn set_state(&self, state: &CpuState) -> cpu::Result<()> {
+        Ok(())
+    }
+    fn state(&self) -> cpu::Result<CpuState> {
+        let regs = self.get_regs()?;
+        let sregs = self.get_sregs()?;
+        let xcrs = self.get_xcrs()?;
+        let fpu = self.get_fpu()?;
+        let vcpu_events = self.get_vcpu_events()?;
+
+        Ok(CpuState {
+            vcpu_events,
+            regs,
+            sregs,
+            fpu,
+            xcrs,
+        })
+    }
 }
 /// Wrapper over Hyperv VM ioctls.
 pub struct HypervVm {
@@ -282,7 +335,10 @@ impl vm::Vm for HypervVm {
             .fd
             .create_vcpu(id)
             .map_err(|e| vm::HypervisorVmError::CreateVcpu(e.into()))?;
-        let vcpu = HypervVcpu { fd: vc };
+        let vcpu = HypervVcpu {
+            fd: vc,
+            cpuid: CpuId::new(1 as usize),
+        };
         Ok(Arc::new(vcpu))
     }
     #[cfg(target_arch = "x86_64")]

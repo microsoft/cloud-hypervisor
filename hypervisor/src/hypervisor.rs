@@ -8,10 +8,10 @@
 //
 //
 use crate::vm::Vm;
+use crate::x86_64::CpuId;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-use crate::x86_64::{CpuId, MsrList};
-#[cfg(target_arch = "x86_64")]
-#[cfg(feature = "kvm")]
+use crate::x86_64::MsrList;
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use kvm_ioctls::Cap;
 use std::sync::Arc;
 
@@ -109,7 +109,7 @@ pub trait Hypervisor: Send + Sync {
     /// Checks if a particular `Cap` is available.
     ///
     fn check_capability(&self, c: Cap) -> bool;
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// Get the supported CpuID
     ///

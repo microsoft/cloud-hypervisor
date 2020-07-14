@@ -172,13 +172,12 @@ pub trait Vm: Send + Sync {
     #[cfg(target_arch = "x86_64")]
     fn enable_split_irq(&self) -> Result<()>;
     /// Retrieve guest clock.
-    #[cfg(target_arch = "x86_64")]
-    #[cfg(feature = "kvm")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     fn get_clock(&self) -> Result<ClockData>;
     /// Set guest clock.
-    #[cfg(target_arch = "x86_64")]
-    #[cfg(feature = "kvm")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     fn set_clock(&self, data: &ClockData) -> Result<()>;
+    #[cfg(feature = "kvm")]
     /// Checks if a particular `Cap` is available.
     fn check_extension(&self, c: Cap) -> bool;
     /// Create a device that is used for passthrough

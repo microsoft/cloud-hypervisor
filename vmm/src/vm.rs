@@ -254,7 +254,7 @@ pub struct Vm {
     #[cfg_attr(not(feature = "kvm"), allow(dead_code))]
     // The hypervisor abstracted virtual machine.
     vm: Arc<dyn hypervisor::Vm>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     saved_clock: Option<hypervisor::ClockData>,
 }
 
@@ -268,7 +268,9 @@ impl Vm {
         reset_evt: EventFd,
         vmm_path: PathBuf,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
-        _saved_clock: Option<hypervisor::ClockData>,
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))] _saved_clock: Option<
+            hypervisor::ClockData,
+        >,
     ) -> Result<Self> {
         config
             .lock()
@@ -322,7 +324,7 @@ impl Vm {
             memory_manager,
             #[cfg(target_arch = "x86_64")]
             vm,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             saved_clock: _saved_clock,
         })
     }
@@ -334,7 +336,7 @@ impl Vm {
         vmm_path: PathBuf,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
         let vm = hypervisor.create_vm().unwrap();
         #[cfg(target_arch = "x86_64")]
@@ -366,6 +368,7 @@ impl Vm {
             reset_evt,
             vmm_path,
             hypervisor,
+            #[cfg(feature = "kvm")]
             None,
         )?;
 
@@ -390,10 +393,10 @@ impl Vm {
         prefault: bool,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
         let vm = hypervisor.create_vm().unwrap();
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         vm.enable_split_irq().unwrap();
         let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
         let config = vm_snapshot.config.clone();
@@ -423,7 +426,7 @@ impl Vm {
             reset_evt,
             vmm_path,
             hypervisor,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             vm_snapshot.clock,
             #[cfg(target_arch = "aarch64")]
             None,
@@ -1196,7 +1199,7 @@ impl Pausable for Vm {
             .valid_transition(new_state)
             .map_err(|e| MigratableError::Pause(anyhow!("Invalid transition: {:?}", e)))?;
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         {
             let mut clock = self
                 .vm
@@ -1226,7 +1229,7 @@ impl Pausable for Vm {
             .map_err(|e| MigratableError::Resume(anyhow!("Invalid transition: {:?}", e)))?;
 
         self.cpu_manager.lock().unwrap().resume()?;
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         {
             if let Some(clock) = &self.saved_clock {
                 self.vm.set_clock(clock).map_err(|e| {
@@ -1246,7 +1249,7 @@ impl Pausable for Vm {
 #[derive(Serialize, Deserialize)]
 pub struct VmSnapshot {
     pub config: Arc<Mutex<VmConfig>>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     pub clock: Option<hypervisor::ClockData>,
 }
 
@@ -1267,7 +1270,7 @@ impl Snapshottable for Vm {
         let mut vm_snapshot = Snapshot::new(VM_SNAPSHOT_ID);
         let vm_snapshot_data = serde_json::to_vec(&VmSnapshot {
             config: self.get_config(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             clock: self.saved_clock,
         })
         .map_err(|e| MigratableError::Snapshot(e.into()))?;
