@@ -74,9 +74,17 @@ impl hypervisor::Hypervisor for HypervHypervisor {
             break;
         }
 
+        let msr_list = self.get_msr_list()?;
+        let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
+        let mut msrs = MsrEntries::new(num_msrs);
+        let indices = msr_list.as_slice();
+        let msr_entries = msrs.as_mut_slice();
+        for (pos, index) in indices.iter().enumerate() {
+            msr_entries[pos].index = *index;
+        }
         let vm_fd = Arc::new(fd);
 
-        Ok(Arc::new(HypervVm { fd: vm_fd }))
+        Ok(Arc::new(HypervVm { fd: vm_fd, msrs }))
     }
     ///
     /// Get the supported CpuID
@@ -98,6 +106,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
 pub struct HypervVcpu {
     fd: VcpuFd,
     cpuid: CpuId,
+    msrs: MsrEntries,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -289,8 +298,11 @@ impl cpu::Vcpu for HypervVcpu {
         let xcrs = self.get_xcrs()?;
         let fpu = self.get_fpu()?;
         let vcpu_events = self.get_vcpu_events()?;
+        let mut msrs = self.msrs.clone();
+        self.get_msrs(&mut msrs)?;
         let lapic = self.get_lapic()?;
         Ok(CpuState {
+            msrs,
             vcpu_events,
             regs,
             sregs,
@@ -303,6 +315,7 @@ impl cpu::Vcpu for HypervVcpu {
 /// Wrapper over Hyperv VM ioctls.
 pub struct HypervVm {
     fd: Arc<VmFd>,
+    msrs: MsrEntries,
 }
 ///
 /// Implementation of Vm trait for Hyperv
@@ -352,6 +365,7 @@ impl vm::Vm for HypervVm {
         let vcpu = HypervVcpu {
             fd: vc,
             cpuid: CpuId::new(1 as usize),
+            msrs: self.msrs.clone(),
         };
         Ok(Arc::new(vcpu))
     }

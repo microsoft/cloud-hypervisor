@@ -26,7 +26,7 @@ pub use {
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuHypervState {
-    //pub msrs: MsrEntries,
+    pub msrs: MsrEntries,
     pub vcpu_events: VcpuEvents,
     pub regs: StandardRegisters,
     pub sregs: SpecialRegisters,
