@@ -258,14 +258,18 @@ impl cpu::Vcpu for HypervVcpu {
     /// Returns the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
     ///
     fn get_lapic(&self) -> cpu::Result<LapicState> {
-        Ok(LapicState::default())
+        self.fd
+            .get_lapic()
+            .map_err(|e| cpu::HypervisorCpuError::GetlapicState(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the state of the LAPIC (Local Advanced Programmable Interrupt Controller).
     ///
     fn set_lapic(&self, lapic: &LapicState) -> cpu::Result<()> {
-        Ok(())
+        self.fd
+            .set_lapic(lapic)
+            .map_err(|e| cpu::HypervisorCpuError::SetLapicState(e.into()))
     }
     fn set_state(&self, state: &CpuState) -> cpu::Result<()> {
         Ok(())
@@ -276,13 +280,14 @@ impl cpu::Vcpu for HypervVcpu {
         let xcrs = self.get_xcrs()?;
         let fpu = self.get_fpu()?;
         let vcpu_events = self.get_vcpu_events()?;
-
+        let lapic = self.get_lapic()?;
         Ok(CpuState {
             vcpu_events,
             regs,
             sregs,
             fpu,
             xcrs,
+            lapic,
         })
     }
 }
