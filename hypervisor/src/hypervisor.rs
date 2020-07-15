@@ -9,7 +9,7 @@
 //
 use crate::vm::Vm;
 use crate::x86_64::CpuId;
-#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 use crate::x86_64::MsrList;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use kvm_ioctls::Cap;
@@ -119,7 +119,7 @@ pub trait Hypervisor: Send + Sync {
     /// Check particular extensions if any
     ///
     fn check_required_extensions(&self) -> Result<()>;
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// Retrieve the list of MSRs supported by the hypervisor.
     ///

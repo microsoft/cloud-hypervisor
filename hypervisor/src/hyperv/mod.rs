@@ -84,6 +84,15 @@ impl hypervisor::Hypervisor for HypervHypervisor {
     fn get_cpuid(&self) -> hypervisor::Result<CpuId> {
         Ok(CpuId::new(1 as usize))
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Retrieve the list of MSRs supported by KVM.
+    ///
+    fn get_msr_list(&self) -> hypervisor::Result<MsrList> {
+        self.hyperv
+            .get_msr_index_list()
+            .map_err(|e| hypervisor::HypervisorError::GetMsrList(e.into()))
+    }
 }
 /// Vcpu struct for Hyper-V
 pub struct HypervVcpu {

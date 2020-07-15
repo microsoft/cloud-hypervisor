@@ -19,9 +19,10 @@ pub use {
     hyperv_bindings::hv_userspace_memory_region as MemoryRegion,
     hyperv_bindings::msr_entry as MsrEntry, hyperv_bindings::CpuId,
     hyperv_bindings::FloatingPointUnit as FpuState, hyperv_bindings::LapicState,
-    hyperv_bindings::Msrs as MsrEntries, hyperv_bindings::Msrs, hyperv_bindings::SegmentRegister,
-    hyperv_bindings::SpecialRegisters, hyperv_bindings::StandardRegisters,
-    hyperv_bindings::VcpuEvents, hyperv_bindings::Xcrs as ExtendedControlRegisters,
+    hyperv_bindings::MsrList, hyperv_bindings::Msrs as MsrEntries, hyperv_bindings::Msrs,
+    hyperv_bindings::SegmentRegister, hyperv_bindings::SpecialRegisters,
+    hyperv_bindings::StandardRegisters, hyperv_bindings::VcpuEvents,
+    hyperv_bindings::Xcrs as ExtendedControlRegisters,
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuHypervState {
