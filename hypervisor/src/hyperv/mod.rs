@@ -379,3 +379,7 @@ impl vm::Vm for HypervVm {
         mem
     }
 }
+
+pub use hv_cpuid_entry2 as CpuIdEntry;
+
+pub const CPUID_FLAG_VALID_INDEX: u32 = 0;
