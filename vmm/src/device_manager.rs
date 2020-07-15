@@ -48,7 +48,7 @@ use hypervisor::kvm_ioctls;
 use hypervisor::kvm_ioctls::*;
 #[cfg(feature = "mmio_support")]
 use hypervisor::vm::DataMatch;
-#[cfg(all(feature = "mmio_support", feature = "mmio_support"))]
+#[cfg(all(feature = "mmio_support", feature = "hyperv"))]
 use hypervisor::IoEventAddress;
 use libc::TIOCGWINSZ;
 use libc::{MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, O_TMPFILE, PROT_READ, PROT_WRITE};
