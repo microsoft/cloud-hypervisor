@@ -124,66 +124,54 @@ impl cpu::Vcpu for HypervVcpu {
     /// Returns the vCPU general purpose registers.
     ///
     fn get_regs(&self) -> cpu::Result<StandardRegisters> {
-        unsafe {
-            self.fd
-                .get_regs()
-                .map_err(|e| cpu::HypervisorCpuError::GetStandardRegs(e.into()))
-        }
+        self.fd
+            .get_regs()
+            .map_err(|e| cpu::HypervisorCpuError::GetStandardRegs(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the vCPU general purpose registers.
     ///
     fn set_regs(&self, regs: &StandardRegisters) -> cpu::Result<()> {
-        unsafe {
-            self.fd
-                .set_regs(regs)
-                .map_err(|e| cpu::HypervisorCpuError::SetStandardRegs(e.into()))
-        }
+        self.fd
+            .set_regs(regs)
+            .map_err(|e| cpu::HypervisorCpuError::SetStandardRegs(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Returns the vCPU special registers.
     ///
     fn get_sregs(&self) -> cpu::Result<SpecialRegisters> {
-        unsafe {
-            self.fd
-                .get_sregs()
-                .map_err(|e| cpu::HypervisorCpuError::GetSpecialRegs(e.into()))
-        }
+        self.fd
+            .get_sregs()
+            .map_err(|e| cpu::HypervisorCpuError::GetSpecialRegs(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the vCPU special registers.
     ///
     fn set_sregs(&self, sregs: &SpecialRegisters) -> cpu::Result<()> {
-        unsafe {
-            self.fd
-                .set_sregs(sregs)
-                .map_err(|e| cpu::HypervisorCpuError::SetSpecialRegs(e.into()))
-        }
+        self.fd
+            .set_sregs(sregs)
+            .map_err(|e| cpu::HypervisorCpuError::SetSpecialRegs(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Returns the floating point state (FPU) from the vCPU.
     ///
     fn get_fpu(&self) -> cpu::Result<FpuState> {
-        unsafe {
-            self.fd
-                .get_fpu()
-                .map_err(|e| cpu::HypervisorCpuError::GetFloatingPointRegs(e.into()))
-        }
+        self.fd
+            .get_fpu()
+            .map_err(|e| cpu::HypervisorCpuError::GetFloatingPointRegs(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Set the floating point state (FPU) of a vCPU.
     ///
     fn set_fpu(&self, fpu: &FpuState) -> cpu::Result<()> {
-        unsafe {
-            self.fd
-                .set_fpu(fpu)
-                .map_err(|e| cpu::HypervisorCpuError::SetFloatingPointRegs(e.into()))
-        }
+        self.fd
+            .set_fpu(fpu)
+            .map_err(|e| cpu::HypervisorCpuError::SetFloatingPointRegs(e.into()))
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -191,11 +179,9 @@ impl cpu::Vcpu for HypervVcpu {
     /// Returns the model-specific registers (MSR) for this vCPU.
     ///
     fn get_msrs(&self, msrs: &mut MsrEntries) -> cpu::Result<usize> {
-        unsafe {
-            self.fd
-                .get_msrs(msrs)
-                .map_err(|e| cpu::HypervisorCpuError::GetMsrEntries(e.into()))
-        }
+        self.fd
+            .get_msrs(msrs)
+            .map_err(|e| cpu::HypervisorCpuError::GetMsrEntries(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
@@ -203,11 +189,9 @@ impl cpu::Vcpu for HypervVcpu {
     /// Returns the number of MSR entries actually written.
     ///
     fn set_msrs(&self, msrs: &MsrEntries) -> cpu::Result<usize> {
-        unsafe {
-            self.fd
-                .set_msrs(msrs)
-                .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
-        }
+        self.fd
+            .set_msrs(msrs)
+            .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -215,11 +199,9 @@ impl cpu::Vcpu for HypervVcpu {
     /// X86 specific call that returns the vcpu's current "xcrs".
     ///
     fn get_xcrs(&self) -> cpu::Result<ExtendedControlRegisters> {
-        unsafe {
-            self.fd
-                .get_xcrs()
-                .map_err(|e| cpu::HypervisorCpuError::GetXcsr(e.into()))
-        }
+        self.fd
+            .get_xcrs()
+            .map_err(|e| cpu::HypervisorCpuError::GetXcsr(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
@@ -236,11 +218,9 @@ impl cpu::Vcpu for HypervVcpu {
     /// states of the vcpu.
     ///
     fn get_vcpu_events(&self) -> cpu::Result<VcpuEvents> {
-        unsafe {
-            self.fd
-                .get_vcpu_events()
-                .map_err(|e| cpu::HypervisorCpuError::GetVcpuEvents(e.into()))
-        }
+        self.fd
+            .get_vcpu_events()
+            .map_err(|e| cpu::HypervisorCpuError::GetVcpuEvents(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
@@ -248,11 +228,9 @@ impl cpu::Vcpu for HypervVcpu {
     /// of the vcpu.
     ///
     fn set_vcpu_events(&self, events: &VcpuEvents) -> cpu::Result<()> {
-        unsafe {
-            self.fd
-                .set_vcpu_events(events)
-                .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
-        }
+        self.fd
+            .set_vcpu_events(events)
+            .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
     }
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         Err(cpu::HypervisorCpuError::RunVcpu(anyhow!("VCPU error")))
@@ -388,11 +366,9 @@ impl vm::Vm for HypervVm {
 
     /// Creates/modifies a guest physical memory slot.
     fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
-        unsafe {
-            self.fd
-                .map_user_memory(user_memory_region)
-                .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()));
-        }
+        self.fd
+            .map_user_memory(user_memory_region)
+            .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()));
         Ok(())
     }
     fn make_user_memory_region(
