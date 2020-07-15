@@ -388,6 +388,11 @@ impl vm::Vm for HypervVm {
 
     /// Creates/modifies a guest physical memory slot.
     fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+        unsafe {
+            self.fd
+                .map_user_memory(user_memory_region)
+                .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()));
+        }
         Ok(())
     }
     fn make_user_memory_region(
@@ -398,9 +403,13 @@ impl vm::Vm for HypervVm {
         userspace_addr: u64,
         readonly: bool,
     ) -> MemoryRegion {
+        let mut fl = HV_MAP_GPA_KERNEL_EXECUTABLE | HV_MAP_GPA_WRITABLE | HV_MAP_GPA_READABLE;
+        if readonly {
+            fl = HV_MAP_GPA_READABLE;
+        }
         let mem = hv_userspace_memory_region {
-            flags: 0,
-            guest_pfn: 0x1,
+            flags: fl,
+            guest_pfn: guest_phys_addr >> 3,
             memory_size: memory_size,
             userspace_addr: userspace_addr as u64,
         };
