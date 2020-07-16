@@ -368,7 +368,7 @@ impl vm::Vm for HypervVm {
     fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
         self.fd
             .map_user_memory(user_memory_region)
-            .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()));
+            .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()))?;
         Ok(())
     }
     fn make_user_memory_region(
