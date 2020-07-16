@@ -24,6 +24,8 @@ extern crate serde_json;
 extern crate thiserror;
 #[macro_use]
 extern crate anyhow;
+#[macro_use]
+extern crate log;
 
 #[cfg(feature = "kvm")]
 /// KVM implementation module

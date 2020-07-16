@@ -1,4 +1,4 @@
-// Copyright © 2019 Intel Corporation
+// Copyright © 2019 Intel Coreoration
 //
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 //
@@ -24,6 +24,92 @@ use vmm_sys_util::eventfd::EventFd;
 pub use x86_64::VcpuHypervState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
+
+// Wei: for emulating irqfd and ioeventfd
+use std::collections::HashMap;
+use std::fs::File;
+use std::io;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::sync::Mutex;
+use std::thread;
+
+struct IrqfdCtrlEpollHandler {
+    irqfd: EventFd,  /* Registered by caller */
+    kill: EventFd,   /* Created by us, signal thread exit */
+    epoll_fd: RawFd, /* epoll fd */
+}
+
+fn register_listener(
+    epoll_fd: RawFd,
+    fd: RawFd,
+    ev_type: epoll::Events,
+    data: u64,
+) -> std::result::Result<(), io::Error> {
+    epoll::ctl(
+        epoll_fd,
+        epoll::ControlOptions::EPOLL_CTL_ADD,
+        fd,
+        epoll::Event::new(ev_type, data),
+    )
+}
+
+const KILL_EVENT: u16 = 1;
+const IRQFD_EVENT: u16 = 2;
+
+impl IrqfdCtrlEpollHandler {
+    fn run_ctrl(&mut self) {
+        self.epoll_fd = epoll::create(true).unwrap();
+        let epoll_file = unsafe { File::from_raw_fd(self.epoll_fd) };
+
+        register_listener(
+            epoll_file.as_raw_fd(),
+            self.kill.as_raw_fd(),
+            epoll::Events::EPOLLIN,
+            u64::from(KILL_EVENT),
+        )
+        .unwrap();
+
+        register_listener(
+            epoll_file.as_raw_fd(),
+            self.irqfd.as_raw_fd(),
+            epoll::Events::EPOLLIN,
+            u64::from(IRQFD_EVENT),
+        )
+        .unwrap();
+
+        let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 2];
+
+        'epoll: loop {
+            let num_events = match epoll::wait(epoll_file.as_raw_fd(), -1, &mut events[..]) {
+                Ok(res) => res,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    panic!("irqfd epoll ???");
+                }
+            };
+
+            for event in events.iter().take(num_events) {
+                let ev_type = event.data as u16;
+
+                match ev_type {
+                    KILL_EVENT => {
+                        break 'epoll;
+                    }
+                    IRQFD_EVENT => {
+                        debug!("IRQFD_EVENT received, inject to guest");
+                        let _ = self.irqfd.read().unwrap();
+                        todo!("Call AssertVirtualInterrupt here");
+                    }
+                    _ => {
+                        error!("Unknown event");
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Wrapper over Hyperv system ioctls.
 pub struct HypervHypervisor {
@@ -84,7 +170,13 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         }
         let vm_fd = Arc::new(fd);
 
-        Ok(Arc::new(HypervVm { fd: vm_fd, msrs }))
+        let irqfds = Mutex::new(HashMap::new());
+
+        Ok(Arc::new(HypervVm {
+            fd: vm_fd,
+            msrs,
+            irqfds,
+        }))
     }
     ///
     /// Get the supported CpuID
@@ -294,6 +386,8 @@ impl cpu::Vcpu for HypervVcpu {
 pub struct HypervVm {
     fd: Arc<VmFd>,
     msrs: MsrEntries,
+    // Emulate irqfd
+    irqfds: Mutex<HashMap<u32, (EventFd, EventFd)>>,
 }
 ///
 /// Implementation of Vm trait for Hyperv
@@ -324,12 +418,30 @@ impl vm::Vm for HypervVm {
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
+        let dup_fd = fd.try_clone().unwrap();
+        let kill_fd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+
+        let mut ctrl_handler = IrqfdCtrlEpollHandler {
+            kill: kill_fd.try_clone().unwrap(),
+            irqfd: fd.try_clone().unwrap(),
+            epoll_fd: 0,
+        };
+
+        thread::Builder::new()
+            .name(format!("irqfd_{}", gsi))
+            .spawn(move || ctrl_handler.run_ctrl())
+            .unwrap();
+
+        self.irqfds.lock().unwrap().insert(gsi, (dup_fd, kill_fd));
+
         Ok(())
     }
     ///
     /// Unregisters an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
+    fn unregister_irqfd(&self, _fd: &EventFd, gsi: u32) -> vm::Result<()> {
+        let (_, kill_fd) = self.irqfds.lock().unwrap().remove(&gsi).unwrap();
+        kill_fd.write(1).unwrap();
         Ok(())
     }
     ///

@@ -480,12 +480,14 @@ name = "hypervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "epoll",
  "hyperv-bindings",
  "hyperv-ioctls",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
  "linux-loader",
+ "log 0.4.11",
  "serde",
  "serde_derive",
  "serde_json",
