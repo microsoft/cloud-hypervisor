@@ -171,7 +171,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         let vm_fd = Arc::new(fd);
 
         let irqfds = Mutex::new(HashMap::new());
-        let ioeventfds = RwLock::new(HashMap::new());
+        let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(HypervVm {
             fd: vm_fd,
@@ -201,6 +201,7 @@ pub struct HypervVcpu {
     fd: VcpuFd,
     cpuid: CpuId,
     msrs: MsrEntries,
+    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -391,7 +392,7 @@ pub struct HypervVm {
     // Emulate irqfd
     irqfds: Mutex<HashMap<u32, (EventFd, EventFd)>>,
     // Emulate ioeventfd
-    ioeventfds: RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>,
+    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 ///
 /// Implementation of Vm trait for Hyperv
@@ -460,6 +461,7 @@ impl vm::Vm for HypervVm {
             fd: vc,
             cpuid: CpuId::new(1 as usize),
             msrs: self.msrs.clone(),
+            ioeventfds: self.ioeventfds.clone(),
         };
         Ok(Arc::new(vcpu))
     }
