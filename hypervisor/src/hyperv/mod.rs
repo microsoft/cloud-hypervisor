@@ -371,25 +371,26 @@ impl vm::Vm for HypervVm {
             .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()))?;
         Ok(())
     }
+
     fn make_user_memory_region(
         &self,
-        slot: u32,
+        _slot: u32,
         guest_phys_addr: u64,
         memory_size: u64,
         userspace_addr: u64,
         readonly: bool,
     ) -> MemoryRegion {
-        let mut fl = HV_MAP_GPA_KERNEL_EXECUTABLE | HV_MAP_GPA_WRITABLE | HV_MAP_GPA_READABLE;
-        if readonly {
-            fl = HV_MAP_GPA_READABLE;
+        let mut flags = HV_MAP_GPA_READABLE;
+        if !readonly {
+            flags |= HV_MAP_GPA_KERNEL_EXECUTABLE | HV_MAP_GPA_WRITABLE;
         }
-        let mem = hv_userspace_memory_region {
-            flags: fl,
+
+        hv_userspace_memory_region {
+            flags,
             guest_pfn: guest_phys_addr >> 3,
-            memory_size: memory_size,
+            memory_size,
             userspace_addr: userspace_addr as u64,
-        };
-        mem
+        }
     }
 }
 
