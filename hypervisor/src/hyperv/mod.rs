@@ -328,7 +328,33 @@ impl cpu::Vcpu for HypervVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
     }
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
-        Err(cpu::HypervisorCpuError::RunVcpu(anyhow!("VCPU error")))
+        // Safe because this is just only done during initialization.
+        // TODO don't zero it everytime we enter this function.
+        let hv_message: hv_message = unsafe { std::mem::zeroed() };
+        match self.fd.run(hv_message) {
+            Ok(x) => match x.header.message_type {
+                hv_message_type_HVMSG_X64_HALT => {
+                    debug!("HALT");
+                    Ok(cpu::VmExit::Reset)
+                }
+                exit => {
+                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit {:?}",
+                        exit
+                    )))
+                }
+            },
+
+            Err(e) => match e.errno() {
+                libc::EAGAIN | libc::EINTR => Ok(cpu::VmExit::Ignore),
+                _ => {
+                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "VCPU error {:?}",
+                        e
+                    )))
+                }
+            },
+        }
     }
     #[cfg(target_arch = "x86_64")]
     ///
