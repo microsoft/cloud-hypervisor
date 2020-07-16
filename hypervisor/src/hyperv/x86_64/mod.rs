@@ -42,6 +42,7 @@ pub enum VcpuExit {}
 pub struct MpState {}
 pub struct Xsave {}
 
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Copy)]
 pub enum IoEventAddress {
     /// Representation of an programmable I/O address.
     Pio(u64),

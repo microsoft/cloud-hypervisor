@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::thread;
 
 struct IrqfdCtrlEpollHandler {
@@ -171,11 +171,13 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         let vm_fd = Arc::new(fd);
 
         let irqfds = Mutex::new(HashMap::new());
+        let ioeventfds = RwLock::new(HashMap::new());
 
         Ok(Arc::new(HypervVm {
             fd: vm_fd,
             msrs,
             irqfds,
+            ioeventfds,
         }))
     }
     ///
@@ -388,6 +390,8 @@ pub struct HypervVm {
     msrs: MsrEntries,
     // Emulate irqfd
     irqfds: Mutex<HashMap<u32, (EventFd, EventFd)>>,
+    // Emulate ioeventfd
+    ioeventfds: RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>,
 }
 ///
 /// Implementation of Vm trait for Hyperv
@@ -469,10 +473,17 @@ impl vm::Vm for HypervVm {
         addr: &IoEventAddress,
         datamatch: Option<DataMatch>,
     ) -> vm::Result<()> {
+        let dup_fd = fd.try_clone().unwrap();
+
+        self.ioeventfds
+            .write()
+            .unwrap()
+            .insert(*addr, (datamatch, dup_fd));
         Ok(())
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
+        self.ioeventfds.write().unwrap().remove(addr).unwrap();
         Ok(())
     }
 
