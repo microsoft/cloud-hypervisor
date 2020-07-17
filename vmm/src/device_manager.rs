@@ -19,6 +19,9 @@ use crate::interrupt::{hyperv::HypervMsiInterruptManager, LegacyUserspaceInterru
 #[cfg(feature = "kvm")]
 use crate::interrupt::{kvm::KvmMsiInterruptManager, LegacyUserspaceInterruptManager};
 
+#[cfg(feature = "hyperv")]
+use hypervisor::hyperv::DeviceFd;
+
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "pci_support")]
 use crate::PciDeviceInfo;

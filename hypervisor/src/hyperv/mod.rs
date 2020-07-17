@@ -557,6 +557,12 @@ impl vm::Vm for HypervVm {
         }
     }
 
+    fn create_passthrough_device(&self) -> vm::Result<DeviceFd> {
+        Err(vm::HypervisorVmError::CreatePassthroughDevice(anyhow!(
+            "No passthrough support"
+        )))
+    }
+
     fn set_gsi_routing(&self, irq_routing: &Vec<IrqRouting>) -> vm::Result<()> {
         let mut routes = self.gsi_routes.write().unwrap();
 
