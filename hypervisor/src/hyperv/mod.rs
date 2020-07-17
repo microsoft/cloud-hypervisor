@@ -32,6 +32,8 @@ struct IrqfdCtrlEpollHandler {
     irqfd: EventFd,  /* Registered by caller */
     kill: EventFd,   /* Created by us, signal thread exit */
     epoll_fd: RawFd, /* epoll fd */
+    gsi: u32,
+    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
 }
 
 fn register_listener(
@@ -95,7 +97,15 @@ impl IrqfdCtrlEpollHandler {
                     IRQFD_EVENT => {
                         debug!("IRQFD_EVENT received, inject to guest");
                         let _ = self.irqfd.read().unwrap();
-                        todo!("Call AssertVirtualInterrupt here");
+                        let gsi_routes = self.gsi_routes.read().unwrap();
+
+                        if let Some(e) = gsi_routes.get(&self.gsi) {
+                            // GSI routing contains MSI information.
+                            // We still need to translate that to APIC ID etc
+                            todo!("Call AssertVirtualInterrupt here");
+                        } else {
+                            debug!("No routing info found for GSI {}", self.gsi);
+                        }
                     }
                     _ => {
                         error!("Unknown event");
@@ -456,6 +466,8 @@ impl vm::Vm for HypervVm {
             kill: kill_fd.try_clone().unwrap(),
             irqfd: fd.try_clone().unwrap(),
             epoll_fd: 0,
+            gsi,
+            gsi_routes: self.gsi_routes.clone(),
         };
 
         thread::Builder::new()
