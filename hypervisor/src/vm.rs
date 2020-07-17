@@ -148,7 +148,6 @@ pub trait Vm: Send + Sync {
     ) -> Result<()>;
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> Result<()>;
-    #[cfg(feature = "kvm")]
     /// Sets the GSI routing table entries, overwriting any previously set
     fn set_gsi_routing(&self, entries: &[IrqRoutingEntry]) -> Result<()>;
     /// Creates a memory region structure that can be used with set_user_memory_region

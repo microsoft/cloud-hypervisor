@@ -395,21 +395,7 @@ pub mod kvm {
 #[cfg(feature = "hyperv")]
 pub mod hyperv {
     use super::*;
-
-    pub struct HypervIrqRoutingMsi {
-        pub address_lo: u32,
-        pub address_hi: u32,
-        pub data: u32,
-    }
-
-    pub enum HypervIrqRouting {
-        Msi(HypervIrqRoutingMsi),
-    }
-
-    pub struct HypervIrqRoutingEntry {
-        pub gsi: u32,
-        pub route: HypervIrqRouting,
-    }
+    use hypervisor::hyperv::*;
 
     type HypervMsiInterruptGroup = MsiInterruptGroup<HypervIrqRoutingEntry>;
     type HypervRoutingEntry = RoutingEntry<HypervIrqRoutingEntry>;
@@ -447,7 +433,22 @@ pub mod hyperv {
 
     impl MsiInterruptGroupOps for HypervMsiInterruptGroup {
         fn set_gsi_routes(&self) -> Result<()> {
-            todo!()
+            let gsi_msi_routes = self.gsi_msi_routes.lock().unwrap();
+            let mut entry_vec: Vec<HypervIrqRoutingEntry> = Vec::new();
+            for (_, entry) in gsi_msi_routes.iter() {
+                if entry.masked {
+                    continue;
+                }
+
+                entry_vec.push(entry.route);
+            }
+
+            self.vm.set_gsi_routing(&entry_vec).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed setting GSI routing: {}", e),
+                )
+            })
         }
     }
 }

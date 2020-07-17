@@ -538,8 +538,32 @@ impl vm::Vm for HypervVm {
             userspace_addr: userspace_addr as u64,
         }
     }
+
+    fn set_gsi_routing(&self, irq_routing: &Vec<IrqRouting>) -> vm::Result<()> {
+        Ok(())
+    }
 }
 
 pub use hv_cpuid_entry2 as CpuIdEntry;
+
+#[derive(Copy, Clone)]
+pub struct HypervIrqRoutingMsi {
+    pub address_lo: u32,
+    pub address_hi: u32,
+    pub data: u32,
+}
+
+#[derive(Copy, Clone)]
+pub enum HypervIrqRouting {
+    Msi(HypervIrqRoutingMsi),
+}
+
+#[derive(Copy, Clone)]
+pub struct HypervIrqRoutingEntry {
+    pub gsi: u32,
+    pub route: HypervIrqRouting,
+}
+
+pub type IrqRouting = HypervIrqRoutingEntry;
 
 pub const CPUID_FLAG_VALID_INDEX: u32 = 0;
