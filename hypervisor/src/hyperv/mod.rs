@@ -167,12 +167,14 @@ impl hypervisor::Hypervisor for HypervHypervisor {
 
         let irqfds = Mutex::new(HashMap::new());
         let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
+        let gsi_routes = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(HypervVm {
             fd: vm_fd,
             msrs,
             irqfds,
             ioeventfds,
+            gsi_routes,
         }))
     }
     ///
@@ -197,6 +199,7 @@ pub struct HypervVcpu {
     cpuid: CpuId,
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
+    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -414,6 +417,8 @@ pub struct HypervVm {
     irqfds: Mutex<HashMap<u32, (EventFd, EventFd)>>,
     // Emulate ioeventfd
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
+    // GSI routing information
+    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
 }
 ///
 /// Implementation of Vm trait for Hyperv
@@ -483,6 +488,7 @@ impl vm::Vm for HypervVm {
             cpuid: CpuId::new(1 as usize),
             msrs: self.msrs.clone(),
             ioeventfds: self.ioeventfds.clone(),
+            gsi_routes: self.gsi_routes.clone(),
         };
         Ok(Arc::new(vcpu))
     }
@@ -540,6 +546,14 @@ impl vm::Vm for HypervVm {
     }
 
     fn set_gsi_routing(&self, irq_routing: &Vec<IrqRouting>) -> vm::Result<()> {
+        let mut routes = self.gsi_routes.write().unwrap();
+
+        routes.drain();
+
+        for r in irq_routing {
+            routes.insert(r.gsi, *r);
+        }
+
         Ok(())
     }
 }
