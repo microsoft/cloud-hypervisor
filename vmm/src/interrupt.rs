@@ -396,19 +396,52 @@ pub mod kvm {
 pub mod hyperv {
     use super::*;
 
-    pub struct hyperv_irq_routing_entry();
+    pub struct HypervIrqRoutingMsi {
+        pub address_lo: u32,
+        pub address_hi: u32,
+        pub data: u32,
+    }
 
-    type HypervMsiInterruptGroup = MsiInterruptGroup<hyperv_irq_routing_entry>;
-    type HypervRoutingEntry = RoutingEntry<hyperv_irq_routing_entry>;
-    pub type HypervMsiInterruptManager = MsiInterruptManager<hyperv_irq_routing_entry>;
+    pub enum HypervIrqRouting {
+        Msi(HypervIrqRoutingMsi),
+    }
+
+    pub struct HypervIrqRoutingEntry {
+        pub gsi: u32,
+        pub route: HypervIrqRouting,
+    }
+
+    type HypervMsiInterruptGroup = MsiInterruptGroup<HypervIrqRoutingEntry>;
+    type HypervRoutingEntry = RoutingEntry<HypervIrqRoutingEntry>;
+    pub type HypervMsiInterruptManager = MsiInterruptManager<HypervIrqRoutingEntry>;
 
     impl RoutingEntryExt for HypervRoutingEntry {
         fn make_entry(
-            vm: &Arc<dyn hypervisor::Vm>,
+            _vm: &Arc<dyn hypervisor::Vm>,
             gsi: u32,
             config: &InterruptSourceConfig,
         ) -> Result<Box<Self>> {
-            todo!()
+            if let InterruptSourceConfig::MsiIrq(cfg) = &config {
+                let route = HypervIrqRoutingEntry {
+                    gsi,
+                    route: HypervIrqRouting::Msi(HypervIrqRoutingMsi {
+                        address_lo: cfg.low_addr,
+                        address_hi: cfg.high_addr,
+                        data: cfg.data,
+                    }),
+                };
+                let entry = HypervRoutingEntry {
+                    route,
+                    masked: false,
+                };
+
+                return Ok(Box::new(entry));
+            }
+
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Interrupt config type not supported",
+            ))
         }
     }
 
