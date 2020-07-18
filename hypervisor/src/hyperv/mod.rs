@@ -563,7 +563,7 @@ impl vm::Vm for HypervVm {
         )))
     }
 
-    fn set_gsi_routing(&self, irq_routing: &Vec<IrqRouting>) -> vm::Result<()> {
+    fn set_gsi_routing(&self, irq_routing: &[IrqRoutingEntry]) -> vm::Result<()> {
         let mut routes = self.gsi_routes.write().unwrap();
 
         routes.drain();
@@ -596,6 +596,6 @@ pub struct HypervIrqRoutingEntry {
     pub route: HypervIrqRouting,
 }
 
-pub type IrqRouting = HypervIrqRoutingEntry;
+pub type IrqRoutingEntry = HypervIrqRoutingEntry;
 
 pub const CPUID_FLAG_VALID_INDEX: u32 = 0;
