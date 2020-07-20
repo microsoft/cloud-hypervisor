@@ -15,9 +15,10 @@ use crate::config::DeviceConfig;
 use crate::config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VmConfig, VsockConfig};
 use crate::device_tree::{DeviceNode, DeviceTree};
 #[cfg(feature = "hyperv")]
-use crate::interrupt::{hyperv::HypervMsiInterruptManager, LegacyUserspaceInterruptManager};
+use crate::interrupt::hyperv::HypervMsiInterruptManager as MsiInterruptManager;
 #[cfg(feature = "kvm")]
-use crate::interrupt::{kvm::KvmMsiInterruptManager, LegacyUserspaceInterruptManager};
+use crate::interrupt::kvm::KvmMsiInterruptManager as MsiInterruptManager;
+use crate::interrupt::LegacyUserspaceInterruptManager;
 
 #[cfg(feature = "hyperv")]
 use hypervisor::hyperv::DeviceFd;
@@ -823,20 +824,11 @@ impl DeviceManager {
         // and then the legacy interrupt manager needs an IOAPIC. So we're
         // handling a linear dependency chain:
         // msi_interrupt_manager <- IOAPIC <- legacy_interrupt_manager.
-        #[cfg(feature = "kvm")]
-        let msi_interrupt_manager: Arc<
-            dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>,
-        > = Arc::new(KvmMsiInterruptManager::new(
-            Arc::clone(&address_manager.allocator),
-            vm,
-        ));
-        #[cfg(feature = "hyperv")]
-        let msi_interrupt_manager: Arc<
-            dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>,
-        > = Arc::new(HypervMsiInterruptManager::new(
-            Arc::clone(&address_manager.allocator),
-            vm,
-        ));
+        let msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
+            Arc::new(MsiInterruptManager::new(
+                Arc::clone(&address_manager.allocator),
+                vm,
+            ));
         let device_manager = DeviceManager {
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),
