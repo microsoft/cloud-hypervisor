@@ -29,9 +29,10 @@ use std::sync::{Mutex, RwLock};
 use std::thread;
 
 struct IrqfdCtrlEpollHandler {
-    irqfd: EventFd,  /* Registered by caller */
-    kill: EventFd,   /* Created by us, signal thread exit */
-    epoll_fd: RawFd, /* epoll fd */
+    vm: Arc<dyn vm::Vm>, /* For issuing hypercall */
+    irqfd: EventFd,      /* Registered by caller */
+    kill: EventFd,       /* Created by us, signal thread exit */
+    epoll_fd: RawFd,     /* epoll fd */
     gsi: u32,
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
 }
@@ -100,9 +101,7 @@ impl IrqfdCtrlEpollHandler {
                         let gsi_routes = self.gsi_routes.read().unwrap();
 
                         if let Some(e) = gsi_routes.get(&self.gsi) {
-                            // GSI routing contains MSI information.
-                            // We still need to translate that to APIC ID etc
-                            todo!("Call AssertVirtualInterrupt here");
+                            assert_virtual_interrupt(&self.vm, &e);
                         } else {
                             debug!("No routing info found for GSI {}", self.gsi);
                         }
@@ -114,6 +113,101 @@ impl IrqfdCtrlEpollHandler {
             }
         }
     }
+}
+
+// Translate from architectural defined delivery mode to Hyper-V type
+// See Intel SDM vol3 10.11.2
+fn get_interrupt_type(delivery_mode: u8) -> Option<HV_INTERRUPT_TYPE> {
+    match delivery_mode {
+        0 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeFixed),
+        1 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeLowestPriority),
+        2 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeSmi),
+        4 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeNmi),
+        5 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeInit),
+        7 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeExtInt),
+        _ => None,
+    }
+}
+
+// See Intel SDM vol3 10.11.1
+// We assume APIC ID and Hyper-V Vcpu ID are the same value
+// This holds true for HvLite
+fn get_destination(message_address: u32) -> u64 {
+    ((message_address >> 12) & 0xff).into()
+}
+
+fn get_destination_mode(message_address: u32) -> bool {
+    if (message_address >> 2) & 0x1 == 0x1 {
+        return true;
+    }
+
+    false
+}
+
+fn get_redirection_hint(message_address: u32) -> bool {
+    if (message_address >> 3) & 0x1 == 0x1 {
+        return true;
+    }
+
+    false
+}
+
+fn get_vector(message_data: u32) -> u8 {
+    (message_data & 0xff) as u8
+}
+
+// True means level triggered
+fn get_trigger_mode(message_data: u32) -> bool {
+    if (message_data >> 15) & 0x1 == 0x1 {
+        return true;
+    }
+
+    false
+}
+
+fn get_delivery_mode(message_data: u32) -> u8 {
+    ((message_data & 0x700) >> 8) as u8
+}
+
+// Only meaningful with level triggered interrupts
+// True => High active
+// False => Low active
+fn get_level(message_data: u32) -> bool {
+    if (message_data >> 14) & 0x1 == 0x1 {
+        return true;
+    }
+
+    false
+}
+
+fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
+    // GSI routing contains MSI information.
+    // We still need to translate that to APIC ID etc
+
+    if let HypervIrqRouting::Msi(msi) = e.route {
+        debug!("Inject {:?}", e);
+        /* Make an assumption here ... */
+        if msi.address_hi != 0 {
+            panic!("MSI high address part is not zero");
+        }
+
+        let typ = get_interrupt_type(get_delivery_mode(msi.data)).unwrap();
+        let apic_id = get_destination(msi.address_lo);
+        let vector = get_vector(msi.data);
+        let level_triggered = get_trigger_mode(msi.data);
+        let logical_destination_mode = get_destination_mode(msi.data);
+
+        vm.request_virtual_interrupt(
+            typ as u8,
+            apic_id,
+            vector.into(),
+            level_triggered,
+            logical_destination_mode,
+            false,
+        );
+    }
+
+    debug!("Unsupported IRQ routing configuration: {:?}", e);
 }
 
 /// Wrapper over Hyperv system ioctls.
@@ -430,6 +524,7 @@ pub struct HypervVm {
     // GSI routing information
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
 }
+
 ///
 /// Implementation of Vm trait for Hyperv
 /// Example:
@@ -458,11 +553,12 @@ impl vm::Vm for HypervVm {
     ///
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32, vm: Arc<dyn vm::Vm>) -> vm::Result<()> {
         let dup_fd = fd.try_clone().unwrap();
         let kill_fd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
 
         let mut ctrl_handler = IrqfdCtrlEpollHandler {
+            vm,
             kill: kill_fd.try_clone().unwrap(),
             irqfd: fd.try_clone().unwrap(),
             epoll_fd: 0,
@@ -574,23 +670,42 @@ impl vm::Vm for HypervVm {
 
         Ok(())
     }
+
+    fn request_virtual_interrupt(
+        &self,
+        interrupt_type: u8,
+        apic_id: u64,
+        vector: u32,
+        level_triggered: bool,
+        logical_destination_mode: bool,
+        long_mode: bool,
+    ) -> vm::Result<()> {
+        self.request_virtual_interrupt(
+            interrupt_type,
+            apic_id,
+            vector,
+            level_triggered,
+            logical_destination_mode,
+            long_mode,
+        )
+    }
 }
 
 pub use hv_cpuid_entry2 as CpuIdEntry;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct HypervIrqRoutingMsi {
     pub address_lo: u32,
     pub address_hi: u32,
     pub data: u32,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum HypervIrqRouting {
     Msi(HypervIrqRoutingMsi),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct HypervIrqRoutingEntry {
     pub gsi: u32,
     pub route: HypervIrqRouting,

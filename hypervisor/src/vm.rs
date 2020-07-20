@@ -181,4 +181,16 @@ pub trait Vm: Send + Sync {
     fn check_extension(&self, c: Cap) -> bool;
     /// Create a device that is used for passthrough
     fn create_passthrough_device(&self) -> Result<Arc<dyn Device>>;
+    /// XXX temp workaround for Hyper-V, never used on KVM
+    fn request_virtual_interrupt(
+        &self,
+        _interrupt_type: u8,
+        _apic_id: u64,
+        _vector: u32,
+        _level_triggered: bool,
+        _logical_destination_mode: bool,
+        _long_mode: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
