@@ -20,6 +20,8 @@ pub use x86_64::VcpuHypervState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
 
+use crate::device;
+
 // Wei: for emulating irqfd and ioeventfd
 use std::collections::HashMap;
 use std::fs::File;
@@ -653,7 +655,7 @@ impl vm::Vm for HypervVm {
         }
     }
 
-    fn create_passthrough_device(&self) -> vm::Result<DeviceFd> {
+    fn create_passthrough_device(&self) -> vm::Result<Arc<dyn device::Device>> {
         Err(vm::HypervisorVmError::CreatePassthroughDevice(anyhow!(
             "No passthrough support"
         )))
