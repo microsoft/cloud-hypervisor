@@ -640,9 +640,9 @@ impl vm::Vm for HypervVm {
         userspace_addr: u64,
         readonly: bool,
     ) -> MemoryRegion {
-        let mut flags = HV_MAP_GPA_READABLE;
+        let mut flags = HV_MAP_GPA_READABLE | HV_MAP_GPA_EXECUTABLE;
         if !readonly {
-            flags |= HV_MAP_GPA_KERNEL_EXECUTABLE | HV_MAP_GPA_WRITABLE;
+            flags |= HV_MAP_GPA_WRITABLE;
         }
 
         hv_userspace_memory_region {
