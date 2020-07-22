@@ -256,6 +256,9 @@ impl hypervisor::cpu::VcpuRun for Vcpu {
         self.io_bus.read(u64::from(addr), data);
     }
     fn pio_out(&self, addr: u64, data: &[u8]) {
+        if addr as u16 == DEBUG_IOPORT && data.len() == 1 {
+            self.log_debug_ioport(data[0]);
+        }
         self.io_bus.write(u64::from(addr), data);
     }
 }
