@@ -149,6 +149,16 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to notify guest its clock was paused: {0}")]
     NotifyGuestClockPaused(#[source] anyhow::Error),
+    ///
+    /// Setting debug register error
+    ///
+    #[error("Failed to set debug registers: {0}")]
+    SetDebugRegs(#[source] anyhow::Error),
+    ///
+    /// Getting debug register error
+    ///
+    #[error("Failed to get debug registers: {0}")]
+    GetDebugRegs(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]

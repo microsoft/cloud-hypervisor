@@ -493,6 +493,16 @@ impl cpu::Vcpu for HypervVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetLapicState(e.into()))
     }
     fn set_state(&self, state: &CpuState) -> cpu::Result<()> {
+        self.set_msrs(&state.msrs)?;
+        self.set_vcpu_events(&state.vcpu_events)?;
+        self.set_regs(&state.regs)?;
+        self.set_sregs(&state.sregs)?;
+        self.set_fpu(&state.fpu)?;
+        self.set_xcrs(&state.xcrs)?;
+        self.set_lapic(&state.lapic)?;
+        self.fd
+            .set_dregs(&state.dbg)
+            .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()));
         Ok(())
     }
     fn state(&self) -> cpu::Result<CpuState> {
@@ -504,6 +514,10 @@ impl cpu::Vcpu for HypervVcpu {
         let mut msrs = self.msrs.clone();
         self.get_msrs(&mut msrs)?;
         let lapic = self.get_lapic()?;
+        let dbg = self
+            .fd
+            .get_dregs()
+            .map_err(|e| cpu::HypervisorCpuError::GetDebugRegs(e.into()))?;
         Ok(CpuState {
             msrs,
             vcpu_events,
@@ -512,6 +526,7 @@ impl cpu::Vcpu for HypervVcpu {
             fpu,
             xcrs,
             lapic,
+            dbg,
         })
     }
 }
