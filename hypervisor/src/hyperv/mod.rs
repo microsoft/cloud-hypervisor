@@ -454,8 +454,7 @@ impl cpu::Vcpu for HypervVcpu {
                         panic!("Rep IN/OUT not supported");
                     }
                     let len = unsafe { access_info.__bindgen_anon_1.access_size() };
-                    /* XXX the first bit means read/write? */
-                    let is_write = unsafe { access_info.as_uint8 } & 1 != 0;
+                    let is_write = info.header.intercept_access_type == 1;
                     let port = info.port_number;
                     let mut data: Vec<u8> = Vec::with_capacity(256);
                     debug!(
