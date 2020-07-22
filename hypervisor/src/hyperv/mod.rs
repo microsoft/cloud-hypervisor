@@ -471,6 +471,19 @@ impl cpu::Vcpu for HypervVcpu {
                         debug!("data {:?}", data);
                     }
 
+                    /* Advance RIP */
+                    let mut rip_reg_val: [hv_register_value; 1] = [hv_register_value {
+                        reg64: info.header.rip + 1,
+                    }];
+                    let mut rip_reg_name: [hv_register_name; 1] =
+                        [hv_register_name_hv_x64_register_rip];
+                    let rip_reg_arg = hv_vp_registers {
+                        count: 1,
+                        values: rip_reg_val.as_mut_ptr(),
+                        names: rip_reg_name.as_mut_ptr(),
+                    };
+                    self.fd.set_reg(rip_reg_arg).unwrap();
+
                     Ok(cpu::VmExit::Ignore)
                 }
                 exit => {
