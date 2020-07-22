@@ -30,6 +30,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Mutex, RwLock};
 use std::thread;
 
+pub const PAGE_SHIFT: usize = 12;
+
 struct IrqfdCtrlEpollHandler {
     vm: Arc<dyn vm::Vm>, /* For issuing hypercall */
     irqfd: EventFd,      /* Registered by caller */
@@ -709,7 +711,7 @@ impl vm::Vm for HypervVm {
 
         hv_userspace_memory_region {
             flags,
-            guest_pfn: guest_phys_addr >> 3,
+            guest_pfn: guest_phys_addr >> PAGE_SHIFT,
             memory_size,
             userspace_addr: userspace_addr as u64,
         }
