@@ -465,11 +465,14 @@ impl cpu::Vcpu for HypervVcpu {
 
                     if is_write {
                         debug!("data {:?}", info.rax);
-                        todo!();
+                        data[0] = info.rax as u8;
+                        vr.pio_out(port.into(), &data);
                     } else {
-                        /* Here we return to the upper layer, will need to resume */
-                        todo!();
+                        vr.pio_in(port.into(), &mut data);
+                        debug!("data {:?}", data);
                     }
+
+                    Ok(cpu::VmExit::Ignore)
                 }
                 exit => {
                     return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
