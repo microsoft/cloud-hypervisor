@@ -628,7 +628,10 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
-    fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
+    fn run(
+        &self,
+        _vr: &dyn cpu::VcpuRun,
+    ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         match self.fd.run() {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]

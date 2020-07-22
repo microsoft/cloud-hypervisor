@@ -245,6 +245,21 @@ pub struct Vcpu {
     saved_state: Option<CpuState>,
 }
 
+impl hypervisor::cpu::VcpuRun for Vcpu {
+    fn mmio_read(&self, addr: u64, data: &mut [u8]) {
+        self.mmio_bus.read(addr, data);
+    }
+    fn mmio_write(&self, addr: u64, data: &[u8]) {
+        self.mmio_bus.write(addr, data);
+    }
+    fn pio_in(&self, addr: u64, data: &mut [u8]) {
+        self.io_bus.read(u64::from(addr), data);
+    }
+    fn pio_out(&self, addr: u64, data: &[u8]) {
+        self.io_bus.write(u64::from(addr), data);
+    }
+}
+
 impl Vcpu {
     /// Constructs a new VCPU for `vm`.
     ///
@@ -317,7 +332,7 @@ impl Vcpu {
     /// Note that the state of the VCPU and associated VM must be setup first for this to do
     /// anything useful.
     pub fn run(&self) -> Result<bool> {
-        match self.vcpu.run() {
+        match self.vcpu.run(self) {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]
                 VmExit::IoIn(addr, data) => {

@@ -43,7 +43,7 @@ pub mod vm;
 pub mod arch;
 
 /// CPU related module
-mod cpu;
+pub mod cpu;
 
 /// Device related module
 mod device;

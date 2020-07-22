@@ -321,5 +321,12 @@ pub trait Vcpu: Send + Sync {
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
-    fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError>;
+    fn run(&self, vr: &dyn VcpuRun) -> std::result::Result<VmExit, HypervisorCpuError>;
+}
+
+pub trait VcpuRun {
+    fn mmio_read(&self, addr: u64, data: &mut [u8]);
+    fn mmio_write(&self, addr: u64, data: &[u8]);
+    fn pio_in(&self, addr: u64, data: &mut [u8]);
+    fn pio_out(&self, addr: u64, data: &[u8]);
 }

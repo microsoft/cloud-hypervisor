@@ -431,7 +431,10 @@ impl cpu::Vcpu for HypervVcpu {
             .set_vcpu_events(events)
             .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
     }
-    fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
+    fn run(
+        &self,
+        vr: &dyn cpu::VcpuRun,
+    ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         // Safe because this is just only done during initialization.
         // TODO don't zero it everytime we enter this function.
         let hv_message: hv_message = unsafe { std::mem::zeroed() };
@@ -454,6 +457,7 @@ impl cpu::Vcpu for HypervVcpu {
                     /* XXX the first bit means read/write? */
                     let is_write = unsafe { access_info.as_uint8 } & 1 != 0;
                     let port = info.port_number;
+                    let mut data: Vec<u8> = Vec::with_capacity(256);
                     debug!(
                         "port {:x?} insn byte count {:?} len {:?} write {:?}",
                         port, info.instruction_byte_count, len, is_write
