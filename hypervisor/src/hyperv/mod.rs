@@ -697,14 +697,17 @@ impl vm::Vm for HypervVm {
         logical_destination_mode: bool,
         long_mode: bool,
     ) -> vm::Result<()> {
-        self.request_virtual_interrupt(
-            interrupt_type,
-            apic_id,
-            vector,
-            level_triggered,
-            logical_destination_mode,
-            long_mode,
-        )
+        self.fd
+            .request_virtual_interrupt(
+                interrupt_type.into(),
+                apic_id,
+                vector,
+                level_triggered,
+                logical_destination_mode,
+                long_mode,
+            )
+            .map_err(|e| vm::HypervisorVmError::RequestVirtualInterrupt(e.into()))?;
+        Ok(())
     }
 }
 

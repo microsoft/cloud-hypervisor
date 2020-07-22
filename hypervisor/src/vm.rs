@@ -116,6 +116,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to create passthrough device: {0}")]
     CreatePassthroughDevice(#[source] anyhow::Error),
+    ///
+    /// Failed to request virtual interrupt
+    ///
+    #[error("Failed to request virtual interupt: {0}")]
+    RequestVirtualInterrupt(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
