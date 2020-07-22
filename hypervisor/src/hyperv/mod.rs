@@ -456,7 +456,7 @@ impl cpu::Vcpu for HypervVcpu {
                     let len = unsafe { access_info.__bindgen_anon_1.access_size() };
                     let is_write = info.header.intercept_access_type == 1;
                     let port = info.port_number;
-                    let mut data: Vec<u8> = Vec::with_capacity(256);
+                    let mut data: [u8; 32] = [0; 32];
                     debug!(
                         "port {:x?} insn byte count {:?} len {:?} write {:?}",
                         port, info.instruction_byte_count, len, is_write
