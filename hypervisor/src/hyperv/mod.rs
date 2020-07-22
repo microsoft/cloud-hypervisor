@@ -441,6 +441,32 @@ impl cpu::Vcpu for HypervVcpu {
                     debug!("HALT");
                     Ok(cpu::VmExit::Reset)
                 }
+                hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT => {
+                    let info = x.to_ioport_info();
+                    let access_info = info.access_info;
+                    if unsafe { access_info.__bindgen_anon_1.string_op() } == 1 {
+                        panic!("String IN/OUT not supported");
+                    }
+                    if unsafe { access_info.__bindgen_anon_1.rep_prefix() } == 1 {
+                        panic!("Rep IN/OUT not supported");
+                    }
+                    let len = unsafe { access_info.__bindgen_anon_1.access_size() };
+                    /* XXX the first bit means read/write? */
+                    let is_write = unsafe { access_info.as_uint8 } & 1 != 0;
+                    let port = info.port_number;
+                    debug!(
+                        "port {:x?} insn byte count {:?} len {:?} write {:?}",
+                        port, info.instruction_byte_count, len, is_write
+                    );
+
+                    if is_write {
+                        debug!("data {:?}", info.rax);
+                        todo!();
+                    } else {
+                        /* Here we return to the upper layer, will need to resume */
+                        todo!();
+                    }
+                }
                 exit => {
                     return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit {:?}",
