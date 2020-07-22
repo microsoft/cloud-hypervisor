@@ -306,13 +306,18 @@ impl BusDevice for PciConfigIo {
                 data[i - start] = (value >> (i * 8)) as u8;
             }
         } else {
-            for d in data {
+            for d in data.iter_mut() {
                 *d = 0xff;
             }
         }
+        debug!(
+            "pci config io read offset {:?} value {:x?} data {:x?}",
+            offset, value, data
+        );
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
+        debug!("pci config io write offset {:?} data {:x?}", offset, data);
         // `offset` is relative to 0xcf8
         match offset {
             o @ 0..=3 => self.set_config_address(o, data),
