@@ -465,13 +465,13 @@ impl cpu::Vcpu for HypervVcpu {
                     let port = info.port_number;
                     let mut data: [u8; 4] = [0; 4];
                     let mut ret_rax = info.rax;
-                    debug!(
-                        "port {:x?} insn byte count {:?} len {:?} write {:?}",
-                        port, info.instruction_byte_count, len, is_write
-                    );
+                    // debug!(
+                    //     "port {:x?} insn byte count {:?} len {:?} write {:?}",
+                    //     port, info.instruction_byte_count, len, is_write
+                    // );
 
                     if is_write {
-                        debug!("data {:x?}", info.rax);
+                        // debug!("data {:x?}", info.rax);
                         data[0] = info.rax as u8;
                         data[1] = (info.rax >> 8) as u8;
                         data[2] = (info.rax >> 16) as u8;
@@ -479,7 +479,7 @@ impl cpu::Vcpu for HypervVcpu {
                         vr.pio_out(port.into(), &data[0..len]);
                     } else {
                         vr.pio_in(port.into(), &mut data[0..len]);
-                        debug!("data {:x?}", &data[0..len]);
+                        // debug!("data {:x?}", &data[0..len]);
                         let v = data[0] as u32
                             | (data[1] as u32) << 8
                             | (data[2] as u32) << 16
@@ -492,7 +492,7 @@ impl cpu::Vcpu for HypervVcpu {
 
                     let insn_len = info.header.instruction_length() as u64;
 
-                    debug!("RIP {:x?} len {}", info.header.rip, insn_len);
+                    // debug!("RIP {:x?} len {}", info.header.rip, insn_len);
                     /* Advance RIP and update RAX */
                     let mut reg_vals: [hv_register_value; 2] = [
                         hv_register_value {
