@@ -455,36 +455,54 @@ impl cpu::Vcpu for HypervVcpu {
                     if unsafe { access_info.__bindgen_anon_1.rep_prefix() } == 1 {
                         panic!("Rep IN/OUT not supported");
                     }
-                    let len = unsafe { access_info.__bindgen_anon_1.access_size() };
+                    let len = unsafe { access_info.__bindgen_anon_1.access_size() } as usize;
                     let is_write = info.header.intercept_access_type == 1;
                     let port = info.port_number;
-                    let mut data: [u8; 32] = [0; 32];
+                    let mut data: [u8; 4] = [0; 4];
+                    let mut ret_rax = info.rax;
                     debug!(
                         "port {:x?} insn byte count {:?} len {:?} write {:?}",
                         port, info.instruction_byte_count, len, is_write
                     );
 
                     if is_write {
-                        debug!("data {:?}", info.rax);
+                        debug!("data {:x?}", info.rax);
                         data[0] = info.rax as u8;
-                        vr.pio_out(port.into(), &data);
+                        data[1] = (info.rax >> 8) as u8;
+                        data[2] = (info.rax >> 16) as u8;
+                        data[3] = (info.rax >> 24) as u8;
+                        vr.pio_out(port.into(), &data[0..len]);
                     } else {
-                        vr.pio_in(port.into(), &mut data);
-                        debug!("data {:?}", data);
+                        vr.pio_in(port.into(), &mut data[0..len]);
+                        debug!("data {:x?}", &data[0..len]);
+                        let v = data[0] as u32
+                            | (data[1] as u32) << 8
+                            | (data[2] as u32) << 16
+                            | (data[3] as u32) << 24;
+                        /* Preserve high bits in EAX but clear out high bits in RAX */
+                        let mask = 0xffffffff >> (32 - len * 8);
+                        let eax = (info.rax as u32 & !mask) | (v & mask);
+                        ret_rax = eax as u64;
                     }
 
-                    /* Advance RIP */
-                    let mut rip_reg_val: [hv_register_value; 1] = [hv_register_value {
-                        reg64: info.header.rip + 1,
-                    }];
-                    let mut rip_reg_name: [hv_register_name; 1] =
-                        [hv_register_name_hv_x64_register_rip];
-                    let rip_reg_arg = hv_vp_registers {
-                        count: 1,
-                        values: rip_reg_val.as_mut_ptr(),
-                        names: rip_reg_name.as_mut_ptr(),
+                    debug!("RIP {:x?}", info.header.rip);
+                    /* Advance RIP and update RAX */
+                    let mut reg_vals: [hv_register_value; 2] = [
+                        hv_register_value {
+                            reg64: info.header.rip + 1,
+                        },
+                        hv_register_value { reg64: ret_rax },
+                    ];
+                    let mut reg_names: [hv_register_name; 2] = [
+                        hv_register_name_hv_x64_register_rip,
+                        hv_register_name_hv_x64_register_rax,
+                    ];
+                    let reg_arg = hv_vp_registers {
+                        count: 2,
+                        values: reg_vals.as_mut_ptr(),
+                        names: reg_names.as_mut_ptr(),
                     };
-                    self.fd.set_reg(rip_reg_arg).unwrap();
+                    self.fd.set_reg(reg_arg).unwrap();
 
                     Ok(cpu::VmExit::Ignore)
                 }
