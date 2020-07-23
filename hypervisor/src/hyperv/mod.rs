@@ -526,7 +526,18 @@ impl cpu::Vcpu for HypervVcpu {
                         insn_len,
                     );
 
-                    /* TODO: also need to emulate ioeventfd */
+                    /* First let's check ioeventfds */
+                    {
+                        /* Limit the scope such that we don't hold the lock longer than necessary */
+                        let ioeventfds = self.ioeventfds.read().unwrap();
+                        let addr = IoEventAddress::Mmio(info.guest_physical_address);
+
+                        if let Some((datamatch, efd)) = ioeventfds.get(&addr) {
+                            debug!("Found {:x?} {:x?} {}", addr, datamatch, efd.as_raw_fd());
+                            efd.write(1);
+                            return Ok(cpu::VmExit::Ignore);
+                        }
+                    }
 
                     let mut emul = emulator::Emulator::new();
                     let mut emulator_input = emulator::Input::Start;
