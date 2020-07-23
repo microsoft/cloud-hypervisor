@@ -485,11 +485,13 @@ impl cpu::Vcpu for HypervVcpu {
                         ret_rax = eax as u64;
                     }
 
-                    debug!("RIP {:x?}", info.header.rip);
+                    let insn_len = info.header.instruction_length() as u64;
+
+                    debug!("RIP {:x?} len {}", info.header.rip, insn_len);
                     /* Advance RIP and update RAX */
                     let mut reg_vals: [hv_register_value; 2] = [
                         hv_register_value {
-                            reg64: info.header.rip + 1,
+                            reg64: info.header.rip + insn_len,
                         },
                         hv_register_value { reg64: ret_rax },
                     ];
