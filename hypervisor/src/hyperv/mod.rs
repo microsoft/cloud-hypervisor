@@ -508,6 +508,17 @@ impl cpu::Vcpu for HypervVcpu {
 
                     Ok(cpu::VmExit::Ignore)
                 }
+                hv_message_type_HVMSG_UNMAPPED_GPA => {
+                    let info = x.to_memory_info();
+                    debug!(
+                        "gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
+                        info.guest_virtual_address,
+                        info.guest_physical_address,
+                        info.instruction_bytes,
+                        info.instruction_byte_count,
+                    );
+                    todo!();
+                }
                 exit => {
                     return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit {:?}",
