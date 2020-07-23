@@ -45,11 +45,13 @@ pub enum Error {
 
 type Result<T> = result::Result<T, Error>;
 
+#[derive(Debug)]
 pub struct Value {
     pub length: u8,
     pub value: u128,
 }
 
+#[derive(Debug)]
 pub enum Input<'a> {
     Start,
     Continue,
@@ -58,6 +60,7 @@ pub enum Input<'a> {
     Memory(Value),
 }
 
+#[derive(Debug)]
 pub enum Output {
     GetInstructionStream,
     ReadRegister64(Register64),

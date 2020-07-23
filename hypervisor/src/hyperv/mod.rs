@@ -14,6 +14,11 @@ use vm::DataMatch;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 
+use std::convert::TryInto;
+
+#[cfg(target_arch = "x86_64")]
+use x86_64::emulator;
+
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::VcpuHypervState as CpuState;
@@ -510,14 +515,92 @@ impl cpu::Vcpu for HypervVcpu {
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
                     let info = x.to_memory_info();
+                    let insn_len = info.instruction_byte_count as usize;
+                    assert!(insn_len > 0 && insn_len <= 16);
                     debug!(
-                        "gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
+                        "RIP {:x?} gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
+                        info.header.rip,
                         info.guest_virtual_address,
                         info.guest_physical_address,
                         info.instruction_bytes,
-                        info.instruction_byte_count,
+                        insn_len,
                     );
-                    todo!();
+
+                    /* TODO: also need to emulate ioeventfd */
+
+                    let mut emul = emulator::Emulator::new();
+                    let mut emulator_input = emulator::Input::Start;
+
+                    loop {
+                        match emul.run(&emulator_input).unwrap() {
+                            emulator::Output::GetInstructionStream => {
+                                emulator_input = emulator::Input::Instructions(
+                                    &info.instruction_bytes[0..insn_len],
+                                );
+                            }
+                            emulator::Output::ReadRegister64(name) => {
+                                let reg_name = emu_reg64_to_hv_reg64(name);
+                                let mut reg_name: [hv_register_name; 1] = [reg_name];
+                                let mut reg_val: [hv_register_value; 1] =
+                                    [hv_register_value { reg64: 0 }];
+                                let regs_arg = hv_vp_registers {
+                                    count: 1,
+                                    names: reg_name.as_mut_ptr(),
+                                    values: reg_val.as_mut_ptr(),
+                                };
+                                self.fd.get_reg(regs_arg).unwrap();
+                                let value = unsafe { reg_val[0].reg64 };
+                                debug!("emulator read {:?} {:x?}", name, value);
+                                emulator_input = emulator::Input::Register64(name, value);
+                            }
+                            emulator::Output::WriteRegister64(name, value) => {
+                                let reg_name = emu_reg64_to_hv_reg64(name);
+                                let mut reg_name: [hv_register_name; 1] = [reg_name];
+                                let mut reg_val: [hv_register_value; 1] =
+                                    [hv_register_value { reg64: value }];
+                                let regs_arg = hv_vp_registers {
+                                    count: 1,
+                                    names: reg_name.as_mut_ptr(),
+                                    values: reg_val.as_mut_ptr(),
+                                };
+                                debug!("emulator write {:?} {:x?}", name, value);
+                                self.fd.set_reg(regs_arg).unwrap();
+                                emulator_input = emulator::Input::Continue;
+                            }
+                            emulator::Output::ReadMemory(size) => {
+                                assert!(size <= 4);
+                                let mut data: [u8; 4] = [0; 4];
+                                vr.mmio_read(info.guest_physical_address, &mut data);
+                                let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
+                                debug!(
+                                    "emulator read mem {:x?} {:x?}",
+                                    info.guest_physical_address, reg_value
+                                );
+                                emulator_input = emulator::Input::Memory(emulator::Value {
+                                    length: 4,
+                                    value: reg_value as u128,
+                                });
+                            }
+                            emulator::Output::WriteMemory(value) => {
+                                let reg_value = value.value.to_le_bytes();
+                                debug!(
+                                    "emulator write mem {:x?} {:x?}",
+                                    info.guest_physical_address, reg_value
+                                );
+                                vr.mmio_write(
+                                    info.guest_physical_address,
+                                    &reg_value[0..value.length as usize],
+                                );
+                                emulator_input = emulator::Input::Continue;
+                            }
+                            emulator::Output::Done => break,
+                            x => {
+                                panic!("Unhandled emulator output {:?}", x);
+                            }
+                        }
+                    }
+
+                    Ok(cpu::VmExit::Ignore)
                 }
                 exit => {
                     return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
@@ -608,6 +691,31 @@ impl cpu::Vcpu for HypervVcpu {
         })
     }
 }
+
+fn emu_reg64_to_hv_reg64(name: emulator::Register64) -> hv_register_name {
+    match name {
+        emulator::Register64::Rax => hv_register_name_hv_x64_register_rax,
+        emulator::Register64::Rcx => hv_register_name_hv_x64_register_rcx,
+        emulator::Register64::Rdx => hv_register_name_hv_x64_register_rdx,
+        emulator::Register64::Rbx => hv_register_name_hv_x64_register_rbx,
+        emulator::Register64::Rsp => hv_register_name_hv_x64_register_rsp,
+        emulator::Register64::Rbp => hv_register_name_hv_x64_register_rbp,
+        emulator::Register64::Rsi => hv_register_name_hv_x64_register_rsi,
+        emulator::Register64::Rdi => hv_register_name_hv_x64_register_rdi,
+        emulator::Register64::R8 => hv_register_name_hv_x64_register_r8,
+        emulator::Register64::R9 => hv_register_name_hv_x64_register_r9,
+        emulator::Register64::R10 => hv_register_name_hv_x64_register_r10,
+        emulator::Register64::R11 => hv_register_name_hv_x64_register_r11,
+        emulator::Register64::R12 => hv_register_name_hv_x64_register_r12,
+        emulator::Register64::R13 => hv_register_name_hv_x64_register_r13,
+        emulator::Register64::R14 => hv_register_name_hv_x64_register_r14,
+        emulator::Register64::R15 => hv_register_name_hv_x64_register_r15,
+        emulator::Register64::Rip => hv_register_name_hv_x64_register_rip,
+        emulator::Register64::Cr0 => hv_register_name_hv_x64_register_cr0,
+        emulator::Register64::Efer => hv_register_name_hv_x64_register_efer,
+    }
+}
+
 /// Wrapper over Hyperv VM ioctls.
 pub struct HypervVm {
     fd: Arc<VmFd>,
