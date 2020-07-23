@@ -23,6 +23,7 @@ use vmm_sys_util::eventfd::EventFd;
 ///
 /// I/O events data matches (32 or 64 bits).
 ///
+#[derive(Debug)]
 pub enum DataMatch {
     DataMatch32(u32),
     DataMatch64(u64),

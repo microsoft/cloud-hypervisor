@@ -466,6 +466,7 @@ impl DeviceRelocation for AddressManager {
         pci_dev: &mut dyn PciDevice,
         region_type: PciBarRegionType,
     ) -> std::result::Result<(), std::io::Error> {
+        debug!("move_bar");
         match region_type {
             PciBarRegionType::IORegion => {
                 #[cfg(target_arch = "x86_64")]
@@ -588,6 +589,7 @@ impl DeviceRelocation for AddressManager {
             }
 
             let bar_addr = virtio_pci_dev.config_bar_addr();
+            debug!("bar_addr {:x?}", bar_addr);
             if bar_addr == new_base {
                 for (event, addr) in virtio_pci_dev.ioeventfds(old_base) {
                     let io_addr = IoEventAddress::Mmio(addr);

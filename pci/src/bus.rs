@@ -286,6 +286,7 @@ impl PciConfigIo {
             _ => return,
         };
         self.config_address = (self.config_address & !mask) | value;
+        debug!("set config address to {:x?}", self.config_address);
     }
 }
 

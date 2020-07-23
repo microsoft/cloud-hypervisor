@@ -696,6 +696,13 @@ impl vm::Vm for HypervVm {
     ) -> vm::Result<()> {
         let dup_fd = fd.try_clone().unwrap();
 
+        debug!(
+            "register_ioevent fd {} addr {:x?} datamatch {:?}",
+            fd.as_raw_fd(),
+            addr,
+            datamatch
+        );
+
         self.ioeventfds
             .write()
             .unwrap()
@@ -704,6 +711,7 @@ impl vm::Vm for HypervVm {
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
+        debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
         self.ioeventfds.write().unwrap().remove(addr).unwrap();
         Ok(())
     }
