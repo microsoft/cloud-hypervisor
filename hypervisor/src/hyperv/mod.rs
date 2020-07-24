@@ -581,7 +581,10 @@ impl cpu::Vcpu for HypervVcpu {
                             emulator::Output::ReadMemory(size) => {
                                 assert!(size <= 4);
                                 let mut data: [u8; 4] = [0; 4];
-                                vr.mmio_read(info.guest_physical_address, &mut data);
+                                vr.mmio_read(
+                                    info.guest_physical_address,
+                                    &mut data[0..size as usize],
+                                );
                                 let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
                                 debug!(
                                     "emulator read mem {:x?} {:x?}",
