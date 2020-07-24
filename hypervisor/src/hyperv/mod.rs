@@ -600,6 +600,7 @@ impl cpu::Vcpu for HypervVcpu {
                                     //     datamatch,
                                     //     efd.as_raw_fd()
                                     // );
+                                    /* TODO: use datamatch to provide the correct semantics */
                                     efd.write(1).unwrap();
                                 } else {
                                     vr.mmio_write(
