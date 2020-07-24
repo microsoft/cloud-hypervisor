@@ -517,14 +517,14 @@ impl cpu::Vcpu for HypervVcpu {
                     let info = x.to_memory_info();
                     let insn_len = info.instruction_byte_count as usize;
                     assert!(insn_len > 0 && insn_len <= 16);
-                    debug!(
-                        "RIP {:x?} gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
-                        info.header.rip,
-                        info.guest_virtual_address,
-                        info.guest_physical_address,
-                        info.instruction_bytes,
-                        insn_len,
-                    );
+                    // debug!(
+                    //     "RIP {:x?} gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
+                    //     info.header.rip,
+                    //     info.guest_virtual_address,
+                    //     info.guest_physical_address,
+                    //     info.instruction_bytes,
+                    //     insn_len,
+                    // );
 
                     let mut emul = emulator::Emulator::new();
                     let mut emulator_input = emulator::Input::Start;
@@ -548,7 +548,7 @@ impl cpu::Vcpu for HypervVcpu {
                                 };
                                 self.fd.get_reg(regs_arg).unwrap();
                                 let value = unsafe { reg_val[0].reg64 };
-                                debug!("emulator read {:?} {:x?}", name, value);
+                                // debug!("emulator read {:?} {:x?}", name, value);
                                 emulator_input = emulator::Input::Register64(name, value);
                             }
                             emulator::Output::WriteRegister64(name, value) => {
@@ -561,7 +561,7 @@ impl cpu::Vcpu for HypervVcpu {
                                     names: reg_name.as_mut_ptr(),
                                     values: reg_val.as_mut_ptr(),
                                 };
-                                debug!("emulator write {:?} {:x?}", name, value);
+                                // debug!("emulator write {:?} {:x?}", name, value);
                                 self.fd.set_reg(regs_arg).unwrap();
                                 emulator_input = emulator::Input::Continue;
                             }
@@ -573,10 +573,10 @@ impl cpu::Vcpu for HypervVcpu {
                                     &mut data[0..size as usize],
                                 );
                                 let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
-                                debug!(
-                                    "emulator read mem {:x?} {:x?}",
-                                    info.guest_physical_address, reg_value
-                                );
+                                // debug!(
+                                //     "emulator read mem {:x?} {:x?}",
+                                //     info.guest_physical_address, reg_value
+                                // );
                                 emulator_input = emulator::Input::Memory(emulator::Value {
                                     length: 4,
                                     value: reg_value as u128,
@@ -584,22 +584,22 @@ impl cpu::Vcpu for HypervVcpu {
                             }
                             emulator::Output::WriteMemory(value) => {
                                 let reg_value = value.value.to_le_bytes();
-                                debug!(
-                                    "emulator write mem {:x?} {:x?}",
-                                    info.guest_physical_address, reg_value
-                                );
+                                // debug!(
+                                //     "emulator write mem {:x?} {:x?}",
+                                //     info.guest_physical_address, reg_value
+                                // );
 
                                 let addr = IoEventAddress::Mmio(info.guest_physical_address);
 
                                 if let Some((datamatch, efd)) =
                                     self.ioeventfds.read().unwrap().get(&addr)
                                 {
-                                    debug!(
-                                        "Found {:x?} {:x?} {}",
-                                        addr,
-                                        datamatch,
-                                        efd.as_raw_fd()
-                                    );
+                                    // debug!(
+                                    //     "Found {:x?} {:x?} {}",
+                                    //     addr,
+                                    //     datamatch,
+                                    //     efd.as_raw_fd()
+                                    // );
                                     efd.write(1).unwrap();
                                 } else {
                                     vr.mmio_write(
