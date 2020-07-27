@@ -905,6 +905,7 @@ impl vm::Vm for HypervVm {
         routes.drain();
 
         for r in irq_routing {
+            debug!("gsi routing {:x?}", r);
             routes.insert(r.gsi, *r);
         }
 
