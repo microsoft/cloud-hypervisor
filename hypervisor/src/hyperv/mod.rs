@@ -194,7 +194,7 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
     // We still need to translate that to APIC ID etc
 
     if let HypervIrqRouting::Msi(msi) = e.route {
-        debug!("Inject {:?}", e);
+        debug!("Inject {:x?}", e);
         /* Make an assumption here ... */
         if msi.address_hi != 0 {
             panic!("MSI high address part is not zero");
@@ -205,6 +205,11 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
         let vector = get_vector(msi.data);
         let level_triggered = get_trigger_mode(msi.data);
         let logical_destination_mode = get_destination_mode(msi.data);
+
+        debug!(
+            "{:x} {:x} {:x} {} {}",
+            typ, apic_id, vector, level_triggered, logical_destination_mode
+        );
 
         vm.request_virtual_interrupt(
             typ as u8,
@@ -219,7 +224,7 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
         return;
     }
 
-    debug!("Unsupported IRQ routing configuration: {:?}", e);
+    debug!("Unsupported IRQ routing configuration: {:x?}", e);
 }
 
 /// Wrapper over Hyperv system ioctls.
