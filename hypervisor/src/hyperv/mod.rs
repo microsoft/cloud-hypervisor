@@ -610,12 +610,12 @@ impl cpu::Vcpu for HypervVcpu {
                                     // );
                                     /* TODO: use datamatch to provide the correct semantics */
                                     efd.write(1).unwrap();
-                                } else {
-                                    vr.mmio_write(
-                                        info.guest_physical_address,
-                                        &reg_value[0..value.length as usize],
-                                    );
                                 }
+
+                                vr.mmio_write(
+                                    info.guest_physical_address,
+                                    &reg_value[0..value.length as usize],
+                                );
 
                                 emulator_input = emulator::Input::Continue;
                             }
