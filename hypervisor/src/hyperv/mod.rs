@@ -213,7 +213,10 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
             level_triggered,
             logical_destination_mode,
             false,
-        );
+        )
+        .unwrap();
+
+        return;
     }
 
     debug!("Unsupported IRQ routing configuration: {:?}", e);
