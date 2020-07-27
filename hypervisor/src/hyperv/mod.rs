@@ -795,6 +795,8 @@ impl vm::Vm for HypervVm {
             gsi_routes: self.gsi_routes.clone(),
         };
 
+        debug!("register_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
+
         thread::Builder::new()
             .name(format!("irqfd_{}", gsi))
             .spawn(move || ctrl_handler.run_ctrl())
@@ -808,6 +810,7 @@ impl vm::Vm for HypervVm {
     /// Unregisters an event that will, when signaled, trigger the `gsi` IRQ.
     ///
     fn unregister_irqfd(&self, _fd: &EventFd, gsi: u32) -> vm::Result<()> {
+        debug!("unregister_irqfd fd {} gsi {}", _fd.as_raw_fd(), gsi);
         let (_, kill_fd) = self.irqfds.lock().unwrap().remove(&gsi).unwrap();
         kill_fd.write(1).unwrap();
         Ok(())
