@@ -692,7 +692,7 @@ impl cpu::Vcpu for HypervVcpu {
         self.set_lapic(&state.lapic)?;
         self.fd
             .set_dregs(&state.dbg)
-            .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()));
+            .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()))?;
         Ok(())
     }
     fn state(&self) -> cpu::Result<CpuState> {
