@@ -193,38 +193,35 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
     // GSI routing contains MSI information.
     // We still need to translate that to APIC ID etc
 
-    if let HypervIrqRouting::Msi(msi) = e.route {
-        debug!("Inject {:x?}", e);
-        /* Make an assumption here ... */
-        if msi.address_hi != 0 {
-            panic!("MSI high address part is not zero");
-        }
+    debug!("Inject {:x?}", e);
 
-        let typ = get_interrupt_type(get_delivery_mode(msi.data)).unwrap();
-        let apic_id = get_destination(msi.address_lo);
-        let vector = get_vector(msi.data);
-        let level_triggered = get_trigger_mode(msi.data);
-        let logical_destination_mode = get_destination_mode(msi.address_lo);
+    let HypervIrqRouting::Msi(msi) = e.route;
 
-        debug!(
-            "{:x} {:x} {:x} {} {}",
-            typ, apic_id, vector, level_triggered, logical_destination_mode
-        );
-
-        vm.request_virtual_interrupt(
-            typ as u8,
-            apic_id,
-            vector.into(),
-            level_triggered,
-            logical_destination_mode,
-            false,
-        )
-        .unwrap();
-
-        return;
+    /* Make an assumption here ... */
+    if msi.address_hi != 0 {
+        panic!("MSI high address part is not zero");
     }
 
-    debug!("Unsupported IRQ routing configuration: {:x?}", e);
+    let typ = get_interrupt_type(get_delivery_mode(msi.data)).unwrap();
+    let apic_id = get_destination(msi.address_lo);
+    let vector = get_vector(msi.data);
+    let level_triggered = get_trigger_mode(msi.data);
+    let logical_destination_mode = get_destination_mode(msi.address_lo);
+
+    debug!(
+        "{:x} {:x} {:x} {} {}",
+        typ, apic_id, vector, level_triggered, logical_destination_mode
+    );
+
+    vm.request_virtual_interrupt(
+        typ as u8,
+        apic_id,
+        vector.into(),
+        level_triggered,
+        logical_destination_mode,
+        false,
+    )
+    .unwrap();
 }
 
 /// Wrapper over Hyperv system ioctls.
