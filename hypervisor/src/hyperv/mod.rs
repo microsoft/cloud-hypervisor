@@ -623,9 +623,6 @@ impl cpu::Vcpu for HypervVcpu {
                                 emulator_input = emulator::Input::Continue;
                             }
                             emulator::Output::Done => break,
-                            x => {
-                                panic!("Unhandled emulator output {:?}", x);
-                            }
                         }
                     }
 
