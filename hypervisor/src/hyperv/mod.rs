@@ -204,7 +204,7 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
         let apic_id = get_destination(msi.address_lo);
         let vector = get_vector(msi.data);
         let level_triggered = get_trigger_mode(msi.data);
-        let logical_destination_mode = get_destination_mode(msi.data);
+        let logical_destination_mode = get_destination_mode(msi.address_lo);
 
         debug!(
             "{:x} {:x} {:x} {} {}",
