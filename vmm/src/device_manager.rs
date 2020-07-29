@@ -44,8 +44,6 @@ use devices::{
     HotPlugNotificationFlags,
 };
 #[cfg(feature = "kvm")]
-use hypervisor::kvm_ioctls;
-#[cfg(feature = "kvm")]
 use hypervisor::kvm_ioctls::*;
 #[cfg(feature = "mmio_support")]
 use hypervisor::vm::DataMatch;

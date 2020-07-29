@@ -19,7 +19,6 @@ use vm::DataMatch;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
-
 use std::convert::TryInto;
 
 #[cfg(target_arch = "x86_64")]

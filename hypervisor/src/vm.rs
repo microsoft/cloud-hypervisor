@@ -14,7 +14,10 @@ use crate::cpu::Vcpu;
 use crate::device::Device;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::ClockData;
-use crate::{CreateDevice, IoEventAddress, IrqRoutingEntry, MemoryRegion};
+#[cfg(feature = "kvm")]
+use crate::CreateDevice;
+use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
+#[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
 use std::sync::Arc;
 use thiserror::Error;

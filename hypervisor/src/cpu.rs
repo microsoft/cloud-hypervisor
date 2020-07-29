@@ -10,14 +10,15 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::VcpuInit;
-use crate::{CpuState, MpState};
-
 #[cfg(target_arch = "x86_64")]
-use crate::x86_64::{CpuId, LapicState, Xsave};
+use crate::x86_64::{CpuId, LapicState};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
+use crate::CpuState;
+#[cfg(feature = "kvm")]
+use crate::{MpState, Xsave};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
