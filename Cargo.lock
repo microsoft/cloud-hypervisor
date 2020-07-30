@@ -464,7 +464,6 @@ dependencies = [
  "serde",
  "serde_derive",
  "vmm-sys-util",
- "zerocopy",
 ]
 
 [[package]]

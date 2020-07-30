@@ -19,7 +19,6 @@ use crate::interrupt::hyperv::HypervMsiInterruptManager as MsiInterruptManager;
 #[cfg(feature = "kvm")]
 use crate::interrupt::kvm::KvmMsiInterruptManager as MsiInterruptManager;
 use crate::interrupt::LegacyUserspaceInterruptManager;
-
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "pci_support")]
 use crate::PciDeviceInfo;
@@ -404,35 +403,49 @@ pub fn get_win_size() -> (u16, u16) {
     (ws.cols, ws.rows)
 }
 
+enum ConsoleInput {
+    Serial,
+    VirtioConsole,
+}
 #[derive(Default)]
 pub struct Console {
     // Serial port on 0x3f8
     serial: Option<Arc<Mutex<Serial>>>,
-    console_input: Option<Arc<virtio_devices::ConsoleInput>>,
-    input_enabled: bool,
+    virtio_console_input: Option<Arc<virtio_devices::ConsoleInput>>,
+    input: Option<ConsoleInput>,
 }
 
 impl Console {
     pub fn queue_input_bytes(&self, out: &[u8]) -> vmm_sys_util::errno::Result<()> {
-        if self.serial.is_some() {
-            self.serial
-                .as_ref()
-                .unwrap()
-                .lock()
-                .expect("Failed to process stdin event due to poisoned lock")
-                .queue_input_bytes(out)?;
-        }
+        match self.input {
+            Some(ConsoleInput::Serial) => {
+                if self.serial.is_some() {
+                    self.serial
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .expect("Failed to process stdin event due to poisoned lock")
+                        .queue_input_bytes(out)?;
+                }
+            }
 
-        if self.console_input.is_some() {
-            self.console_input.as_ref().unwrap().queue_input_bytes(out);
+            Some(ConsoleInput::VirtioConsole) => {
+                if self.virtio_console_input.is_some() {
+                    self.virtio_console_input
+                        .as_ref()
+                        .unwrap()
+                        .queue_input_bytes(out);
+                }
+            }
+            None => {}
         }
 
         Ok(())
     }
 
     pub fn update_console_size(&self, cols: u16, rows: u16) {
-        if self.console_input.is_some() {
-            self.console_input
+        if self.virtio_console_input.is_some() {
+            self.virtio_console_input
                 .as_ref()
                 .unwrap()
                 .update_console_size(cols, rows)
@@ -440,7 +453,7 @@ impl Console {
     }
 
     pub fn input_enabled(&self) -> bool {
-        self.input_enabled
+        self.input.is_some()
     }
 }
 
@@ -1496,10 +1509,10 @@ impl DeviceManager {
             ConsoleOutputMode::Off => None,
         };
         let (col, row) = get_win_size();
-        let console_input = if let Some(writer) = console_writer {
+        let virtio_console_input = if let Some(writer) = console_writer {
             let id = String::from(CONSOLE_DEVICE_NAME);
 
-            let (virtio_console_device, console_input) =
+            let (virtio_console_device, virtio_console_input) =
                 virtio_devices::Console::new(id.clone(), writer, col, row, console_config.iommu)
                     .map_err(DeviceManagerError::CreateVirtioConsole)?;
             let virtio_console_device = Arc::new(Mutex::new(virtio_console_device));
@@ -1517,16 +1530,23 @@ impl DeviceManager {
                 .unwrap()
                 .insert(id.clone(), device_node!(id, virtio_console_device));
 
-            Some(console_input)
+            Some(virtio_console_input)
+        } else {
+            None
+        };
+
+        let input = if serial_config.mode.input_enabled() {
+            Some(ConsoleInput::Serial)
+        } else if console_config.mode.input_enabled() {
+            Some(ConsoleInput::VirtioConsole)
         } else {
             None
         };
 
         Ok(Arc::new(Console {
             serial,
-            console_input,
-            input_enabled: serial_config.mode.input_enabled()
-                || console_config.mode.input_enabled(),
+            virtio_console_input,
+            input,
         }))
     }
 
