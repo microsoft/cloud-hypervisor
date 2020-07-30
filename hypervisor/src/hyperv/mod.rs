@@ -24,6 +24,9 @@ use std::convert::TryInto;
 #[cfg(target_arch = "x86_64")]
 use x86_64::emulator;
 
+#[cfg(target_arch = "x86_64")]
+use x86_64::hv1;
+
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::VcpuHypervState as CpuState;
@@ -625,6 +628,47 @@ impl cpu::Vcpu for HypervVcpu {
                         }
                     }
 
+                    Ok(cpu::VmExit::Ignore)
+                }
+                hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
+                    let info = x.to_cpuid_info();
+                    let (rax, rbx, rcx, rdx) = match info.rax {
+                        1 => (
+                            info.default_result_rax as u32,
+                            info.default_result_rbx as u32,
+                            info.default_result_rcx as u32 | (1 << 31),
+                            info.default_result_rdx as u32,
+                        ),
+                        0x40000000..=0x400000ff => hv1::process_cpuid(info.rax as u32),
+                        _ => (
+                            info.default_result_rax as u32,
+                            info.default_result_rbx as u32,
+                            info.default_result_rcx as u32,
+                            info.default_result_rdx as u32,
+                        ),
+                    };
+                    let mut reg_vals: [hv_register_value; 5] = [
+                        hv_register_value {
+                            reg64: info.header.rip + 2,
+                        },
+                        hv_register_value { reg64: rax.into() },
+                        hv_register_value { reg64: rbx.into() },
+                        hv_register_value { reg64: rcx.into() },
+                        hv_register_value { reg64: rdx.into() },
+                    ];
+                    let mut reg_names: [hv_register_name; 5] = [
+                        hv_register_name_hv_x64_register_rip,
+                        hv_register_name_hv_x64_register_rax,
+                        hv_register_name_hv_x64_register_rbx,
+                        hv_register_name_hv_x64_register_rcx,
+                        hv_register_name_hv_x64_register_rdx,
+                    ];
+                    let reg_arg = hv_vp_registers {
+                        count: 5,
+                        values: reg_vals.as_mut_ptr(),
+                        names: reg_names.as_mut_ptr(),
+                    };
+                    self.fd.set_reg(reg_arg).unwrap();
                     Ok(cpu::VmExit::Ignore)
                 }
                 exit => {

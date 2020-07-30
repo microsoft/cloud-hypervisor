@@ -91,3 +91,4 @@ pub fn boot_msr_entries() -> MsrEntries {
 }
 
 pub mod emulator;
+pub mod hv1;
