@@ -322,6 +322,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
 /// Vcpu struct for Hyper-V
 pub struct HypervVcpu {
     fd: VcpuFd,
+    vp_index: u8,
     cpuid: CpuId,
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
@@ -868,6 +869,7 @@ impl vm::Vm for HypervVm {
             .map_err(|e| vm::HypervisorVmError::CreateVcpu(e.into()))?;
         let vcpu = HypervVcpu {
             fd: vc,
+            vp_index: id,
             cpuid: CpuId::new(1 as usize),
             msrs: self.msrs.clone(),
             ioeventfds: self.ioeventfds.clone(),
