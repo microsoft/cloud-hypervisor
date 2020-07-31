@@ -182,7 +182,6 @@ impl BusDevice for AcpiPMTimerDevice {
         let counter: u32 = (counter & 0xffff_ffff) as u32;
 
         data.copy_from_slice(&counter.to_le_bytes());
-        // debug!("acpi pmtimer read {}", counter)
     }
 
     fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) {}

@@ -30,11 +30,9 @@ impl BusDevice for I8042Device {
             // avoid hang in pit_calibrate_tsc() in Linux kernel.
             data[0] = 0x20;
         }
-        debug!("i8042 read {:?} {:?}", offset, data);
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
-        debug!("i8042 write {:?} {:?}", offset, data);
         if data.len() == 1 && data[0] == 0xfe && offset == 3 {
             debug!("i8042 reset signalled");
             if let Err(e) = self.reset_evt.write(1) {
