@@ -87,7 +87,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-arm64";
     #[cfg(target_arch = "aarch64")]
-    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64";
+    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64-custom";
 
     const DIRECT_KERNEL_BOOT_CMDLINE: &str = "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw";
 
@@ -641,10 +641,22 @@ mod tests {
         }
 
         fn api_create_body(&self, cpu_count: u8) -> String {
+            #[cfg(target_arch = "x86_64")]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
                      cpu_count,
                      self.fw_path.as_str(),
+                     self.network.host_ip,
+                     self.network.guest_mac,
+                     self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
+                     self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
+            }
+            #[cfg(target_arch = "aarch64")]
+            format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
+                     cpu_count,
+                     cpu_count,
+                     direct_kernel_boot_path().unwrap().to_str().unwrap(),
+                     DIRECT_KERNEL_BOOT_CMDLINE,
                      self.network.host_ip,
                      self.network.guest_mac,
                      self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
@@ -1550,7 +1562,9 @@ mod tests {
 
             // ACPI is not built with mmio, hence we can't test the resize
             // feature for mmio.
+            // ACPI is currently x86_64 only, we skip this for AArch64.
             #[cfg(not(feature = "mmio"))]
+            #[cfg(target_arch = "x86_64")]
             {
                 guest
                     .ssh_command(
@@ -1802,6 +1816,9 @@ mod tests {
             guest.check_vsock(socket.as_str());
 
             #[cfg(not(feature = "mmio"))]
+            // AArch64 currently does not support reboot, and therefore we
+            // skip the reboot test here.
+            #[cfg(target_arch = "x86_64")]
             {
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
@@ -2620,31 +2637,26 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_on_default_cache_size() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, false)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_on_cache_size_1_gib() {
             test_virtio_fs(true, Some(0x4000_0000), "none", &prepare_virtiofsd, false)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_off() {
             test_virtio_fs(false, None, "none", &prepare_virtiofsd, false)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_on_default_cache_size_w_vhost_user_fs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_vhost_user_fs_daemon, false)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_on_cache_size_1_gib_w_vhost_user_fs_daemon() {
             test_virtio_fs(
                 true,
@@ -2656,7 +2668,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_dax_off_w_vhost_user_fs_daemon() {
             test_virtio_fs(false, None, "none", &prepare_vhost_user_fs_daemon, false)
         }
@@ -3557,7 +3568,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_vsock() {
             _test_virtio_vsock(false)
         }
@@ -3569,7 +3579,6 @@ mod tests {
         }
 
         #[cfg_attr(not(feature = "mmio"), test)]
-        #[cfg(target_arch = "x86_64")]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         fn test_api_create_boot() {

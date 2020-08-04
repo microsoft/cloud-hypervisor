@@ -30,7 +30,7 @@ use crate::migration::{get_vm_snapshot, recv_vm_snapshot};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
 use libc::EFD_NONBLOCK;
-use seccomp::{SeccompFilter, SeccompLevel};
+use seccomp::{SeccompAction, SeccompFilter};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fs::File;
 use std::io;
@@ -214,14 +214,14 @@ pub fn start_vmm_thread(
     api_event: EventFd,
     api_sender: Sender<ApiRequest>,
     api_receiver: Receiver<ApiRequest>,
-    seccomp_level: &SeccompLevel,
+    seccomp_action: &SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
 ) -> Result<thread::JoinHandle<Result<()>>> {
     let http_api_event = api_event.try_clone().map_err(Error::EventFdClone)?;
 
     // Retrieve seccomp filter
     let vmm_seccomp_filter =
-        get_seccomp_filter(seccomp_level, Thread::Vmm).map_err(Error::CreateSeccompFilter)?;
+        get_seccomp_filter(seccomp_action, Thread::Vmm).map_err(Error::CreateSeccompFilter)?;
 
     // Find the path that the "/proc/<pid>/exe" symlink points to. Must be done before spawning
     // a thread as Rust does not put the child threads in the same thread group which prevents the
@@ -229,20 +229,27 @@ pub fn start_vmm_thread(
     // alternative is to run always with CAP_SYS_PTRACE but that is not a good idea.
     let self_path = format!("/proc/{}/exe", std::process::id());
     let vmm_path = std::fs::read_link(PathBuf::from(self_path)).map_err(Error::ExePathReadLink)?;
+    let vmm_seccomp_action = seccomp_action.clone();
     let thread = thread::Builder::new()
         .name("vmm".to_string())
         .spawn(move || {
             // Apply seccomp filter for VMM thread.
             SeccompFilter::apply(vmm_seccomp_filter).map_err(Error::ApplySeccompFilter)?;
 
-            let mut vmm = Vmm::new(vmm_version.to_string(), api_event, vmm_path, hypervisor)?;
+            let mut vmm = Vmm::new(
+                vmm_version.to_string(),
+                api_event,
+                vmm_path,
+                vmm_seccomp_action,
+                hypervisor,
+            )?;
 
             vmm.control_loop(Arc::new(api_receiver))
         })
         .map_err(Error::VmmThreadSpawn)?;
 
     // The VMM thread is started, we can start serving HTTP requests
-    api::start_http_thread(http_path, http_api_event, api_sender, seccomp_level)?;
+    api::start_http_thread(http_path, http_api_event, api_sender, seccomp_action)?;
 
     Ok(thread)
 }
@@ -256,6 +263,7 @@ pub struct Vmm {
     vm: Option<Vm>,
     vm_config: Option<Arc<Mutex<VmConfig>>>,
     vmm_path: PathBuf,
+    seccomp_action: SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
 }
 
@@ -264,6 +272,7 @@ impl Vmm {
         vmm_version: String,
         api_evt: EventFd,
         vmm_path: PathBuf,
+        seccomp_action: SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
@@ -295,6 +304,7 @@ impl Vmm {
             vm: None,
             vm_config: None,
             vmm_path,
+            seccomp_action,
             hypervisor,
         })
     }
@@ -311,6 +321,7 @@ impl Vmm {
                     exit_evt,
                     reset_evt,
                     self.vmm_path.clone(),
+                    &self.seccomp_action,
                     self.hypervisor.clone(),
                 )?;
                 self.vm = Some(vm);
@@ -381,6 +392,7 @@ impl Vmm {
             self.vmm_path.clone(),
             source_url,
             restore_cfg.prefault,
+            &self.seccomp_action,
             self.hypervisor.clone(),
         )?;
         self.vm = Some(vm);
@@ -430,6 +442,7 @@ impl Vmm {
                 exit_evt,
                 reset_evt,
                 self.vmm_path.clone(),
+                &self.seccomp_action,
                 self.hypervisor.clone(),
             )?);
         }

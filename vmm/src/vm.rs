@@ -45,6 +45,7 @@ use linux_loader::loader::elf::Error::InvalidElfMagicNumber;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 use linux_loader::loader::KernelLoader;
+use seccomp::SeccompAction;
 use signal_hook::{iterator::Signals, SIGINT, SIGTERM, SIGWINCH};
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -267,6 +268,7 @@ impl Vm {
         exit_evt: EventFd,
         reset_evt: EventFd,
         vmm_path: PathBuf,
+        seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))] _saved_clock: Option<
             hypervisor::ClockData,
@@ -285,6 +287,7 @@ impl Vm {
             &exit_evt,
             &reset_evt,
             vmm_path,
+            seccomp_action.clone(),
         )
         .map_err(Error::DeviceManager)?;
 
@@ -334,6 +337,7 @@ impl Vm {
         exit_evt: EventFd,
         reset_evt: EventFd,
         vmm_path: PathBuf,
+        seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -367,6 +371,7 @@ impl Vm {
             exit_evt,
             reset_evt,
             vmm_path,
+            seccomp_action,
             hypervisor,
             #[cfg(feature = "kvm")]
             None,
@@ -384,6 +389,7 @@ impl Vm {
         Ok(new_vm)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_from_snapshot(
         snapshot: &Snapshot,
         exit_evt: EventFd,
@@ -391,6 +397,7 @@ impl Vm {
         vmm_path: PathBuf,
         source_url: &str,
         prefault: bool,
+        seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -425,6 +432,7 @@ impl Vm {
             exit_evt,
             reset_evt,
             vmm_path,
+            seccomp_action,
             hypervisor,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             vm_snapshot.clock,

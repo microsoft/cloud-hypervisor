@@ -148,6 +148,8 @@ dependencies = [
 name = "block_util"
 version = "0.1.0"
 dependencies = [
+ "io-uring",
+ "libc",
  "log 0.4.11",
  "serde",
  "serde_derive",
@@ -155,6 +157,7 @@ dependencies = [
  "virtio-bindings",
  "vm-memory",
  "vm-virtio",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -510,6 +513,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-uring"
+version = "0.3.5"
+source = "git+https://github.com/tokio-rs/io-uring.git?branch=0.4#c00d968b038263a02a72d6510edaf438b0c7b4f3"
+dependencies = [
+ "bitflags 1.2.1",
+ "libc",
+]
+
+[[package]]
 name = "ipnetwork"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -537,7 +549,7 @@ dependencies = [
 [[package]]
 name = "kvm-bindings"
 version = "0.2.0"
-source = "git+https://github.com/cloud-hypervisor/kvm-bindings?branch=ch#3a6780089e0e2d69aaf77666524e81801c814bdd"
+source = "git+https://github.com/cloud-hypervisor/kvm-bindings?branch=ch#6453253aff8b804796bce547c7a23e09464b7491"
 dependencies = [
  "serde",
  "serde_derive",
@@ -1199,9 +1211,9 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
 name = "syn"
-version = "1.0.36"
+version = "1.0.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cdb98bcb1f9d81d07b536179c269ea15999b5d14ea958196413869445bb5250"
+checksum = "239f255b9e3429350f188c27b807fc9920a15eb9145230ff1a7d054c08fec319"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1541,11 +1553,13 @@ dependencies = [
  "byteorder",
  "devices",
  "epoll",
+ "io-uring",
  "libc",
  "log 0.4.11",
  "net_gen",
  "net_util",
  "pci",
+ "seccomp",
  "serde",
  "serde_derive",
  "serde_json",
@@ -1624,6 +1638,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "arch",
+ "block_util",
  "clap",
  "credibility",
  "devices",

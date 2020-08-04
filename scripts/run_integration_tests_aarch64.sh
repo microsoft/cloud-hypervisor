@@ -40,30 +40,23 @@ update_workloads() {
         popd
     fi
 
-    FOCAL_OS_IMAGE_DOWNLOAD_NAME="focal-server-cloudimg-arm64.img"
-    FOCAL_OS_IMAGE_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_IMAGE_DOWNLOAD_NAME"
-    FOCAL_OS_DOWNLOAD_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_IMAGE_DOWNLOAD_NAME"
-    if [ ! -f "$FOCAL_OS_DOWNLOAD_IMAGE" ]; then
-        pushd $WORKLOADS_DIR
-        time wget --quiet $FOCAL_OS_IMAGE_DOWNLOAD_URL || exit 1
-        popd
-    fi
-
-    FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-arm64.raw"
+    FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-arm64-custom.raw"
+    FOCAL_OS_RAW_IMAGE_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_RAW_IMAGE_NAME"
     FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
     if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
         pushd $WORKLOADS_DIR
-        time qemu-img convert -p -f qcow2 -O raw $FOCAL_OS_IMAGE_DOWNLOAD_NAME $FOCAL_OS_RAW_IMAGE_NAME || exit 1
+        time wget --quiet $FOCAL_OS_RAW_IMAGE_DOWNLOAD_URL || exit 1
         popd
     fi
 
     # Convert the raw image to qcow2 image to remove compressed blocks from the disk. Therefore letting the
     # qcow2 format image can be directly used in the integration test.
-    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME="focal-server-cloudimg-arm64.qcow2"
+    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME="focal-server-cloudimg-arm64-custom.qcow2"
+    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     if [ ! -f "$FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE" ]; then
         pushd $WORKLOADS_DIR
-        time qemu-img convert -p -f raw -O qcow2 $FOCAL_OS_RAW_IMAGE_NAME $FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE || exit 1
+        time wget --quiet $FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL || exit 1
         popd
     fi
 
@@ -112,19 +105,20 @@ update_workloads() {
         popd
     }
 
+    SRCDIR=$PWD
     if [ ! -d "$LINUX_CUSTOM_DIR" ]; then
         pushd $WORKLOADS_DIR
-        time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "virtio-fs-virtio-iommu-virtio-mem-5.6-rc4" $LINUX_CUSTOM_DIR
+        time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "virtio-fs-virtio-iommu-5.8-rc4" $LINUX_CUSTOM_DIR
+        cp $SRCDIR/resources/linux-config-aarch64 $LINUX_CUSTOM_DIR/.config
         popd
     else
         pushd $LINUX_CUSTOM_DIR
         git fetch
-        git checkout -f
+        git checkout -f "virtio-fs-virtio-iommu-5.8-rc4"
+        cp $SRCDIR/resources/linux-config-aarch64 $LINUX_CUSTOM_DIR/.config
         popd
     fi
 
-    SRCDIR=$PWD
-    cp $SRCDIR/resources/linux-config-aarch64 $LINUX_CUSTOM_DIR/.config
     build_custom_linux_kernel
 
     VIRTIOFSD="$WORKLOADS_DIR/virtiofsd"
@@ -171,6 +165,14 @@ update_workloads() {
     flock -x 12 && update_workloads
 ) 12>$WORKLOADS_LOCK
 
+# Check if there is any error in the execution of `update_workloads`.
+# If there is any error, then kill the shell. Otherwise the script will continue
+# running even if the `update_workloads` function was failed.
+RES=$?
+if [ $RES -ne 0 ]; then
+    exit 1
+fi
+
 # Create tap interface without multipe queues support for vhost_user_net test.
 sudo ip tuntap add name vunet-tap0 mode tap
 # Create tap interface with multipe queues support for vhost_user_net test.
@@ -183,8 +185,6 @@ if [[ "${BUILD_TARGET}" == "aarch64-unknown-linux-musl" ]]; then
 TARGET_CC="musl-gcc"
 CFLAGS="-I /usr/include/aarch64-linux-musl/ -idirafter /usr/include/"
 fi
-
-sed -i 's/"with-serde",\ //g' hypervisor/Cargo.toml
 
 cargo build --all --release --no-default-features --features pci,kvm --target $BUILD_TARGET
 strip target/$BUILD_TARGET/release/cloud-hypervisor
