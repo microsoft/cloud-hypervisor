@@ -34,6 +34,8 @@ use arch::layout;
 use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
+#[cfg(feature = "io_uring")]
+use block_util::block_io_uring_is_supported;
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
@@ -56,6 +58,7 @@ use pci::{
     VfioPciDevice,
 };
 use qcow::{self, ImageType, QcowFile};
+use seccomp::SeccompAction;
 #[cfg(feature = "pci_support")]
 use std::any::Any;
 use std::collections::HashMap;
@@ -803,6 +806,9 @@ pub struct DeviceManager {
 
     #[cfg(target_arch = "aarch64")]
     id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
+
+    // seccomp action
+    seccomp_action: SeccompAction,
 }
 
 impl DeviceManager {
@@ -813,6 +819,7 @@ impl DeviceManager {
         _exit_evt: &EventFd,
         #[cfg_attr(target_arch = "aarch64", allow(unused_variables))] reset_evt: &EventFd,
         vmm_path: PathBuf,
+        seccomp_action: SeccompAction,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         let device_tree = Arc::new(Mutex::new(DeviceTree::new()));
 
@@ -873,6 +880,7 @@ impl DeviceManager {
             reset_evt: reset_evt.try_clone().map_err(DeviceManagerError::EventFd)?,
             #[cfg(target_arch = "aarch64")]
             id_to_dev_info: HashMap::new(),
+            seccomp_action,
         };
 
         #[cfg(feature = "acpi")]
@@ -1665,70 +1673,126 @@ impl DeviceManager {
                 )
                 .map_err(DeviceManagerError::Disk)?;
 
-            let mut raw_img = qcow::RawFile::new(image, disk_cfg.direct);
+            let mut raw_img = qcow::RawFile::new(image.try_clone().unwrap(), disk_cfg.direct);
 
             let image_type = qcow::detect_image_type(&mut raw_img)
                 .map_err(DeviceManagerError::DetectImageType)?;
-            match image_type {
+            let (virtio_device, migratable_device) = match image_type {
                 ImageType::Raw => {
-                    let dev = virtio_devices::Block::new(
-                        id.clone(),
-                        raw_img,
-                        disk_cfg
-                            .path
-                            .as_ref()
-                            .ok_or(DeviceManagerError::NoDiskPath)?
-                            .clone(),
-                        disk_cfg.readonly,
-                        disk_cfg.iommu,
-                        disk_cfg.num_queues,
-                        disk_cfg.queue_size,
-                    )
-                    .map_err(DeviceManagerError::CreateVirtioBlock)?;
+                    #[cfg(feature = "io_uring")]
+                    {
+                        // Use asynchronous backend relying on io_uring if the
+                        // syscalls are supported.
+                        if block_io_uring_is_supported() {
+                            let dev = Arc::new(Mutex::new(
+                                virtio_devices::BlockIoUring::new(
+                                    id.clone(),
+                                    image,
+                                    disk_cfg
+                                        .path
+                                        .as_ref()
+                                        .ok_or(DeviceManagerError::NoDiskPath)?
+                                        .clone(),
+                                    disk_cfg.readonly,
+                                    disk_cfg.iommu,
+                                    disk_cfg.num_queues,
+                                    disk_cfg.queue_size,
+                                )
+                                .map_err(DeviceManagerError::CreateVirtioBlock)?,
+                            ));
 
-                    let block = Arc::new(Mutex::new(dev));
+                            (
+                                Arc::clone(&dev) as VirtioDeviceArc,
+                                dev as Arc<Mutex<dyn Migratable>>,
+                            )
+                        } else {
+                            let dev = Arc::new(Mutex::new(
+                                virtio_devices::Block::new(
+                                    id.clone(),
+                                    raw_img,
+                                    disk_cfg
+                                        .path
+                                        .as_ref()
+                                        .ok_or(DeviceManagerError::NoDiskPath)?
+                                        .clone(),
+                                    disk_cfg.readonly,
+                                    disk_cfg.iommu,
+                                    disk_cfg.num_queues,
+                                    disk_cfg.queue_size,
+                                    self.seccomp_action.clone(),
+                                )
+                                .map_err(DeviceManagerError::CreateVirtioBlock)?,
+                            ));
 
-                    // Fill the device tree with a new node. In case of restore, we
-                    // know there is nothing to do, so we can simply override the
-                    // existing entry.
-                    self.device_tree
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), device_node!(id, block));
+                            (
+                                Arc::clone(&dev) as VirtioDeviceArc,
+                                dev as Arc<Mutex<dyn Migratable>>,
+                            )
+                        }
+                    }
 
-                    Ok((Arc::clone(&block) as VirtioDeviceArc, disk_cfg.iommu, id))
+                    #[cfg(not(feature = "io_uring"))]
+                    {
+                        let dev = Arc::new(Mutex::new(
+                            virtio_devices::Block::new(
+                                id.clone(),
+                                raw_img,
+                                disk_cfg
+                                    .path
+                                    .as_ref()
+                                    .ok_or(DeviceManagerError::NoDiskPath)?
+                                    .clone(),
+                                disk_cfg.readonly,
+                                disk_cfg.iommu,
+                                disk_cfg.num_queues,
+                                disk_cfg.queue_size,
+                                self.seccomp_action.clone(),
+                            )
+                            .map_err(DeviceManagerError::CreateVirtioBlock)?,
+                        ));
+
+                        (
+                            Arc::clone(&dev) as VirtioDeviceArc,
+                            dev as Arc<Mutex<dyn Migratable>>,
+                        )
+                    }
                 }
                 ImageType::Qcow2 => {
                     let qcow_img =
                         QcowFile::from(raw_img).map_err(DeviceManagerError::QcowDeviceCreate)?;
-                    let dev = virtio_devices::Block::new(
-                        id.clone(),
-                        qcow_img,
-                        disk_cfg
-                            .path
-                            .as_ref()
-                            .ok_or(DeviceManagerError::NoDiskPath)?
-                            .clone(),
-                        disk_cfg.readonly,
-                        disk_cfg.iommu,
-                        disk_cfg.num_queues,
-                        disk_cfg.queue_size,
+                    let dev = Arc::new(Mutex::new(
+                        virtio_devices::Block::new(
+                            id.clone(),
+                            qcow_img,
+                            disk_cfg
+                                .path
+                                .as_ref()
+                                .ok_or(DeviceManagerError::NoDiskPath)?
+                                .clone(),
+                            disk_cfg.readonly,
+                            disk_cfg.iommu,
+                            disk_cfg.num_queues,
+                            disk_cfg.queue_size,
+                            self.seccomp_action.clone(),
+                        )
+                        .map_err(DeviceManagerError::CreateVirtioBlock)?,
+                    ));
+
+                    (
+                        Arc::clone(&dev) as VirtioDeviceArc,
+                        dev as Arc<Mutex<dyn Migratable>>,
                     )
-                    .map_err(DeviceManagerError::CreateVirtioBlock)?;
-
-                    let block = Arc::new(Mutex::new(dev));
-
-                    // Fill the device tree with a new node. In case of restore, we
-                    // know there is nothing to do, so we can simply override the
-                    // existing entry.
-                    self.device_tree
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), device_node!(id, block));
-
-                    Ok((Arc::clone(&block) as VirtioDeviceArc, disk_cfg.iommu, id))
                 }
-            }
+            };
+            // Fill the device tree with a new node. In case of restore, we
+            // know there is nothing to do, so we can simply override the
+            // existing entry.
+            self.device_tree
+                .lock()
+                .unwrap()
+                .insert(id.clone(), device_node!(id, migratable_device));
+
+            Ok((virtio_device, disk_cfg.iommu, id))
         }
     }
 

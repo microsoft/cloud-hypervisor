@@ -31,6 +31,8 @@ use std::io;
 mod device;
 pub mod balloon;
 pub mod block;
+#[cfg(feature = "io_uring")]
+pub mod block_io_uring;
 mod console;
 pub mod epoll_helper;
 mod iommu;
@@ -39,12 +41,15 @@ pub mod net;
 pub mod net_util;
 mod pmem;
 mod rng;
+pub mod seccomp_filters;
 pub mod transport;
 pub mod vhost_user;
 pub mod vsock;
 
 pub use self::balloon::*;
 pub use self::block::*;
+#[cfg(feature = "io_uring")]
+pub use self::block_io_uring::*;
 pub use self::console::*;
 pub use self::device::*;
 pub use self::epoll_helper::*;
@@ -93,6 +98,8 @@ pub enum ActivateError {
     VhostUserBlkSetup(vhost_user::Error),
     /// Failed to reset vhost-user daemon.
     VhostUserReset(vhost_user::Error),
+    /// Cannot create seccomp filter
+    CreateSeccompFilter(seccomp::SeccompError),
 }
 
 pub type ActivateResult = std::result::Result<(), ActivateError>;
