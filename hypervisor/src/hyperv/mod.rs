@@ -672,6 +672,69 @@ impl cpu::Vcpu for HypervVcpu {
                     self.fd.set_reg(reg_arg).unwrap();
                     Ok(cpu::VmExit::Ignore)
                 }
+                hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
+                    let info = x.to_msr_info();
+                    let insn_len = info.header.instruction_length() as u64;
+                    let mut general_protection_fault: bool = false;
+                    if info.header.intercept_access_type == HV_INTERCEPT_ACCESS_READ as u8 {
+                        let msr_value: u64 = match info.msr_number {
+                            hv1::X86X_IA32_MSR_PLATFORM_ID => Some(0),
+                            0x40000000..=0x4fffffff => {
+                                hv1::process_msr_read(self.vp_index as u32, info.rax as u32)
+                            }
+                            _ => None,
+                        }
+                        .unwrap_or_else(|| {
+                            debug!(
+                                "{:x}: unrecognized msr read {:x}",
+                                info.header.rip, info.msr_number
+                            );
+                            general_protection_fault = true;
+                            0
+                        });
+                        if !general_protection_fault {
+                            let rax = msr_value & 0xffffffff;
+                            let rdx = msr_value >> 32;
+                            let mut reg_vals: [hv_register_value; 3] = [
+                                hv_register_value {
+                                    reg64: info.header.rip + insn_len,
+                                },
+                                hv_register_value { reg64: rax.into() },
+                                hv_register_value { reg64: rdx.into() },
+                            ];
+                            let mut reg_names: [hv_register_name; 3] = [
+                                hv_register_name_hv_x64_register_rip,
+                                hv_register_name_hv_x64_register_rax,
+                                hv_register_name_hv_x64_register_rdx,
+                            ];
+                            let reg_arg = hv_vp_registers {
+                                count: 3,
+                                values: reg_vals.as_mut_ptr(),
+                                names: reg_names.as_mut_ptr(),
+                            };
+                            self.fd.set_reg(reg_arg).unwrap();
+                        }
+                    }
+                    if general_protection_fault {
+                        // inject a general protection fault
+                        let reg: u32 = 1 | 0 << 1 | 1 << 8 | 0xd << 16;
+                        let inp: hv_u128 = hv_u128 {
+                            high_part: 0,
+                            low_part: reg.into(),
+                        };
+                        let mut reg_vals: [hv_register_value; 1] =
+                            [hv_register_value { reg128: inp }];
+                        let mut reg_names: [hv_register_name; 1] =
+                            [hv_register_name_hv_register_pending_event0];
+                        let reg_arg = hv_vp_registers {
+                            count: 1,
+                            values: reg_vals.as_mut_ptr(),
+                            names: reg_names.as_mut_ptr(),
+                        };
+                        self.fd.set_reg(reg_arg).unwrap();
+                    }
+                    Ok(cpu::VmExit::Ignore)
+                }
                 exit => {
                     return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit {:?}",

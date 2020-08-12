@@ -3,6 +3,7 @@
 // Copyright © 2020, Microsoft Corporation
 //
 use hyperv_bindings::*;
+pub const X86X_IA32_MSR_PLATFORM_ID: u32 = 0x17;
 pub fn process_cpuid(rax: u32) -> (u32, u32, u32, u32) {
     match rax {
         HV_CPUID_FUNCTION_HV_VENDOR_AND_MAX_FUNCTION => (
@@ -27,4 +28,15 @@ pub fn process_cpuid(rax: u32) -> (u32, u32, u32, u32) {
         HV_CPUID_FUNCTION_MS_HV_IMPLEMENTATION_LIMITS => (0, 0, 0, 0),
         _ => (0, 0, 0, 0),
     }
+}
+
+pub fn process_msr_read(vp_index: u32, n: u32) -> Option<u64> {
+    Some(match n {
+        HV_X64_MSR_GUEST_OS_ID => 0,            // GUEST ID, meaning full ID
+        HV_X64_MSR_VP_INDEX => vp_index as u64, // VP index
+        _ => {
+            warn!("Unhandled MSR read: {}", n);
+            return None;
+        }
+    })
 }
