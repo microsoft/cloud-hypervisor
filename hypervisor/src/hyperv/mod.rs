@@ -282,6 +282,21 @@ impl hypervisor::Hypervisor for HypervHypervisor {
             break;
         }
 
+        /* Install enlightenment intercepts */
+        let intercept_args = hv_install_intercept_args {
+            access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+            intercept_type: hv_intercept_type_hv_intercept_type_x64_global_cpuid,
+            intercept_parameter: hv_intercept_parameters { as_uint64 : 0x0 },
+        };
+        fd.install_intercept(intercept_args).unwrap();
+
+        let intercept_args = hv_install_intercept_args {
+            access_type: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
+            intercept_type: hv_intercept_type_hv_intercept_type_x64_msr,
+            intercept_parameter: hv_intercept_parameters { as_uint64 : 0x0 },
+        };
+        fd.install_intercept(intercept_args).unwrap();
+
         let msr_list = self.get_msr_list()?;
         let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
         let mut msrs = MsrEntries::new(num_msrs);
@@ -615,6 +630,7 @@ impl cpu::Vcpu for HypervVcpu {
                         1 => (
                             info.default_result_rax as u32,
                             info.default_result_rbx as u32,
+                            /* hypervisor present bit */
                             info.default_result_rcx as u32 | (1 << 31),
                             info.default_result_rdx as u32,
                         ),
@@ -640,11 +656,12 @@ impl cpu::Vcpu for HypervVcpu {
                     let info = x.to_msr_info();
                     let insn_len = info.header.instruction_length() as u64;
                     let mut general_protection_fault: bool = false;
-                    if info.header.intercept_access_type == HV_INTERCEPT_ACCESS_READ as u8 {
+                    if info.header.intercept_access_type == 0 as u8 {
+                        debug!("msr read: {:x}", info.msr_number);
                         let msr_value: u64 = match info.msr_number {
                             hv1::X86X_IA32_MSR_PLATFORM_ID => Some(0),
                             0x40000000..=0x4fffffff => {
-                                hv1::process_msr_read(self.vp_index as u32, info.rax as u32)
+                                hv1::process_msr_read(self.vp_index as u32, info.msr_number as u32)
                             }
                             _ => None,
                         }
@@ -659,28 +676,43 @@ impl cpu::Vcpu for HypervVcpu {
                         if !general_protection_fault {
                             let rax = msr_value & 0xffffffff;
                             let rdx = msr_value >> 32;
-                            let arr_reg_name_value = [
-                                (
-                                    hv_register_name_hv_x64_register_rip,
-                                    info.header.rip + insn_len,
-                                ),
-                                (hv_register_name_hv_x64_register_rax, rax as u64),
-                                (hv_register_name_hv_x64_register_rdx, rdx as u64),
-                            ];
-                            set_registers_64!(self.fd, arr_reg_name_value);
+                            set_registers_64!(
+                                    self.fd,
+                                    &[(hv_register_name_hv_x64_register_rip, info.header.rip + insn_len),
+                                      (hv_register_name_hv_x64_register_rax, rax as u64),
+                                      (hv_register_name_hv_x64_register_rdx, rdx as u64),
+                                    ]);
+                        }
+                    } else {
+                        debug!("msr write: {:x}", info.msr_number);
+                        let v = info.rax & 0xffffffff | info.rdx << 32;
+                        match info.msr_number {
+                            0x40000000..=0x4fffffff => hv1::process_msr_write(self.vp_index as u32, info.msr_number, v),
+                            _ => None
+                        }
+                        .unwrap_or_else(|| {
+                            debug!(
+                                "{:x}: unrecognized msr write {:x} rax {:x} rdx {:x}",
+                                info.header.rip, info.msr_number, info.rax, info.rdx
+                            );
+                            general_protection_fault = true;
+                        });
+                        if !general_protection_fault {
+                            set_registers_64!(self.fd,
+                                              &[(hv_register_name_hv_x64_register_rip, info.header.rip + insn_len)]);
                         }
                     }
                     if general_protection_fault {
-                        // inject a general protection fault
-                        let reg: u32 = 1 | 0 << 1 | 1 << 8 | 0xd << 16;
-                        let inp: hv_u128 = hv_u128 {
-                            high_part: 0,
-                            low_part: reg.into(),
-                        };
-                        let reg_vals: [hv_register_value; 1] = [hv_register_value { reg128: inp }];
-                        let reg_names: [hv_register_name; 1] =
-                            [hv_register_name_hv_register_pending_event0];
-                        self.fd.set_reg(&reg_names, &reg_vals).unwrap();
+                        // inject a general protection fault by setting event pending register
+                        let mut reg = hv_x64_pending_exception_event { as_uint64: [0;2]};
+                        unsafe {
+                            reg.__bindgen_anon_1.set_event_pending(1);
+                            // reg.__bindgen_anon_1.set_event_type(0);
+                            reg.__bindgen_anon_1.set_deliver_error_code(1);
+                            reg.__bindgen_anon_1.set_vector(0xd); // gpf
+                        }
+                        self.fd.set_reg(&[hv_register_name_hv_register_pending_event0],
+                                        &[hv_register_value { pending_exception_event: reg }]).unwrap();
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
