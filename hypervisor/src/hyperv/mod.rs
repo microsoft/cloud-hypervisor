@@ -13,7 +13,8 @@ use crate::cpu;
 use crate::hypervisor;
 use crate::vm;
 pub use hyperv_bindings::*;
-use hyperv_ioctls::{Hyperv, VcpuFd, VmFd};
+use hyperv_ioctls::{set_registers_64, Hyperv, VcpuFd, VmFd};
+
 use std::sync::Arc;
 use vm::DataMatch;
 // x86_64 dependencies
@@ -508,23 +509,14 @@ impl cpu::Vcpu for HypervVcpu {
 
                     // debug!("RIP {:x?} len {}", info.header.rip, insn_len);
                     /* Advance RIP and update RAX */
-                    let mut reg_vals: [hv_register_value; 2] = [
-                        hv_register_value {
-                            reg64: info.header.rip + insn_len,
-                        },
-                        hv_register_value { reg64: ret_rax },
+                    let arr_reg_name_value = [
+                        (
+                            hv_register_name_hv_x64_register_rip,
+                            info.header.rip + insn_len,
+                        ),
+                        (hv_register_name_hv_x64_register_rax, ret_rax),
                     ];
-                    let mut reg_names: [hv_register_name; 2] = [
-                        hv_register_name_hv_x64_register_rip,
-                        hv_register_name_hv_x64_register_rax,
-                    ];
-                    let reg_arg = hv_vp_registers {
-                        count: 2,
-                        values: reg_vals.as_mut_ptr(),
-                        names: reg_names.as_mut_ptr(),
-                    };
-                    self.fd.set_reg(reg_arg).unwrap();
-
+                    set_registers_64!(self.fd, arr_reg_name_value);
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
@@ -552,31 +544,17 @@ impl cpu::Vcpu for HypervVcpu {
                             }
                             emulator::Output::ReadRegister64(name) => {
                                 let reg_name = emu_reg64_to_hv_reg64(name);
-                                let mut reg_name: [hv_register_name; 1] = [reg_name];
-                                let mut reg_val: [hv_register_value; 1] =
-                                    [hv_register_value { reg64: 0 }];
-                                let regs_arg = hv_vp_registers {
-                                    count: 1,
-                                    names: reg_name.as_mut_ptr(),
-                                    values: reg_val.as_mut_ptr(),
-                                };
-                                self.fd.get_reg(regs_arg).unwrap();
+                                let reg_name: [hv_register_name; 1] = [reg_name];
+                                let reg_val = self.fd.get_reg(&reg_name).unwrap();
                                 let value = unsafe { reg_val[0].reg64 };
                                 // debug!("emulator read {:?} {:x?}", name, value);
                                 emulator_input = emulator::Input::Register64(name, value);
                             }
                             emulator::Output::WriteRegister64(name, value) => {
                                 let reg_name = emu_reg64_to_hv_reg64(name);
-                                let mut reg_name: [hv_register_name; 1] = [reg_name];
-                                let mut reg_val: [hv_register_value; 1] =
-                                    [hv_register_value { reg64: value }];
-                                let regs_arg = hv_vp_registers {
-                                    count: 1,
-                                    names: reg_name.as_mut_ptr(),
-                                    values: reg_val.as_mut_ptr(),
-                                };
+                                let arr_reg_name_value = [(reg_name, value)];
                                 // debug!("emulator write {:?} {:x?}", name, value);
-                                self.fd.set_reg(regs_arg).unwrap();
+                                set_registers_64!(self.fd, arr_reg_name_value);
                                 emulator_input = emulator::Input::Continue;
                             }
                             emulator::Output::ReadMemory(size) => {
@@ -648,28 +626,14 @@ impl cpu::Vcpu for HypervVcpu {
                             info.default_result_rdx as u32,
                         ),
                     };
-                    let mut reg_vals: [hv_register_value; 5] = [
-                        hv_register_value {
-                            reg64: info.header.rip + 2,
-                        },
-                        hv_register_value { reg64: rax.into() },
-                        hv_register_value { reg64: rbx.into() },
-                        hv_register_value { reg64: rcx.into() },
-                        hv_register_value { reg64: rdx.into() },
+                    let arr_reg_name_value = [
+                        (hv_register_name_hv_x64_register_rip, info.header.rip + 2),
+                        (hv_register_name_hv_x64_register_rax, rax as u64),
+                        (hv_register_name_hv_x64_register_rbx, rbx as u64),
+                        (hv_register_name_hv_x64_register_rcx, rcx as u64),
+                        (hv_register_name_hv_x64_register_rdx, rdx as u64),
                     ];
-                    let mut reg_names: [hv_register_name; 5] = [
-                        hv_register_name_hv_x64_register_rip,
-                        hv_register_name_hv_x64_register_rax,
-                        hv_register_name_hv_x64_register_rbx,
-                        hv_register_name_hv_x64_register_rcx,
-                        hv_register_name_hv_x64_register_rdx,
-                    ];
-                    let reg_arg = hv_vp_registers {
-                        count: 5,
-                        values: reg_vals.as_mut_ptr(),
-                        names: reg_names.as_mut_ptr(),
-                    };
-                    self.fd.set_reg(reg_arg).unwrap();
+                    set_registers_64!(self.fd, arr_reg_name_value);
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
@@ -695,24 +659,15 @@ impl cpu::Vcpu for HypervVcpu {
                         if !general_protection_fault {
                             let rax = msr_value & 0xffffffff;
                             let rdx = msr_value >> 32;
-                            let mut reg_vals: [hv_register_value; 3] = [
-                                hv_register_value {
-                                    reg64: info.header.rip + insn_len,
-                                },
-                                hv_register_value { reg64: rax.into() },
-                                hv_register_value { reg64: rdx.into() },
+                            let arr_reg_name_value = [
+                                (
+                                    hv_register_name_hv_x64_register_rip,
+                                    info.header.rip + insn_len,
+                                ),
+                                (hv_register_name_hv_x64_register_rax, rax as u64),
+                                (hv_register_name_hv_x64_register_rdx, rdx as u64),
                             ];
-                            let mut reg_names: [hv_register_name; 3] = [
-                                hv_register_name_hv_x64_register_rip,
-                                hv_register_name_hv_x64_register_rax,
-                                hv_register_name_hv_x64_register_rdx,
-                            ];
-                            let reg_arg = hv_vp_registers {
-                                count: 3,
-                                values: reg_vals.as_mut_ptr(),
-                                names: reg_names.as_mut_ptr(),
-                            };
-                            self.fd.set_reg(reg_arg).unwrap();
+                            set_registers_64!(self.fd, arr_reg_name_value);
                         }
                     }
                     if general_protection_fault {
@@ -722,16 +677,10 @@ impl cpu::Vcpu for HypervVcpu {
                             high_part: 0,
                             low_part: reg.into(),
                         };
-                        let mut reg_vals: [hv_register_value; 1] =
-                            [hv_register_value { reg128: inp }];
-                        let mut reg_names: [hv_register_name; 1] =
+                        let reg_vals: [hv_register_value; 1] = [hv_register_value { reg128: inp }];
+                        let reg_names: [hv_register_name; 1] =
                             [hv_register_name_hv_register_pending_event0];
-                        let reg_arg = hv_vp_registers {
-                            count: 1,
-                            values: reg_vals.as_mut_ptr(),
-                            names: reg_names.as_mut_ptr(),
-                        };
-                        self.fd.set_reg(reg_arg).unwrap();
+                        self.fd.set_reg(&reg_names, &reg_vals).unwrap();
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
