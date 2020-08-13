@@ -14,12 +14,14 @@ use super::{
     ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
     VirtioDevice, VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
 };
+use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use net_util::{
     open_tap, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TxVirtio,
 };
+use seccomp::{SeccompAction, SeccompFilter};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::num::Wrapping;
@@ -158,8 +160,9 @@ impl NetEpollHandler {
 }
 
 impl EpollHelperHandler for NetEpollHandler {
-    fn handle_event(&mut self, _helper: &mut EpollHelper, event: u16) -> bool {
-        match event {
+    fn handle_event(&mut self, _helper: &mut EpollHelper, event: &epoll::Event) -> bool {
+        let ev_type = event.data as u16;
+        match ev_type {
             RX_QUEUE_EVENT => {
                 self.driver_awake = true;
                 if let Err(e) = self.handle_rx_event() {
@@ -181,7 +184,7 @@ impl EpollHelperHandler for NetEpollHandler {
                 }
             }
             _ => {
-                error!("Unknown event: {}", event);
+                error!("Unknown event: {}", ev_type);
                 return true;
             }
         }
@@ -200,10 +203,11 @@ pub struct Net {
     queue_evts: Option<Vec<EventFd>>,
     interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
     epoll_threads: Option<Vec<thread::JoinHandle<result::Result<(), EpollHelperError>>>>,
-    ctrl_queue_epoll_thread: Option<thread::JoinHandle<result::Result<(), DeviceError>>>,
+    ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     paused: Arc<AtomicBool>,
     queue_size: Vec<u16>,
     counters: NetCounters,
+    seccomp_action: SeccompAction,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -223,6 +227,7 @@ impl Net {
         iommu: bool,
         num_queues: usize,
         queue_size: u16,
+        seccomp_action: SeccompAction,
     ) -> Result<Self> {
         let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
             | 1 << VIRTIO_NET_F_CSUM
@@ -262,6 +267,7 @@ impl Net {
             paused: Arc::new(AtomicBool::new(false)),
             queue_size: vec![queue_size; queue_num],
             counters: NetCounters::default(),
+            seccomp_action,
         })
     }
 
@@ -278,11 +284,20 @@ impl Net {
         iommu: bool,
         num_queues: usize,
         queue_size: u16,
+        seccomp_action: SeccompAction,
     ) -> Result<Self> {
         let taps = open_tap(if_name, ip_addr, netmask, host_mac, num_queues / 2)
             .map_err(Error::OpenTap)?;
 
-        Self::new_with_tap(id, taps, guest_mac, iommu, num_queues, queue_size)
+        Self::new_with_tap(
+            id,
+            taps,
+            guest_mac,
+            iommu,
+            num_queues,
+            queue_size,
+            seccomp_action,
+        )
     }
 
     fn state(&self) -> NetState {
@@ -404,9 +419,19 @@ impl VirtioDevice for Net {
                 };
 
                 let paused = self.paused.clone();
+                // Retrieve seccomp filter for virtio_net thread
+                let virtio_net_seccomp_filter =
+                    get_seccomp_filter(&self.seccomp_action, Thread::VirtioNet)
+                        .map_err(ActivateError::CreateSeccompFilter)?;
                 thread::Builder::new()
                     .name("virtio_net".to_string())
-                    .spawn(move || ctrl_handler.run_ctrl(paused))
+                    .spawn(move || {
+                        if let Err(e) = SeccompFilter::apply(virtio_net_seccomp_filter) {
+                            error!("Error applying seccomp filter: {:?}", e);
+                        } else if let Err(e) = ctrl_handler.run_ctrl(paused) {
+                            error!("Error running worker: {:?}", e);
+                        }
+                    })
                     .map(|thread| self.ctrl_queue_epoll_thread = Some(thread))
                     .map_err(|e| {
                         error!("failed to clone queue EventFd: {}", e);

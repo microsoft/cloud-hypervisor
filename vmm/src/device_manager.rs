@@ -1518,9 +1518,15 @@ impl DeviceManager {
         let virtio_console_input = if let Some(writer) = console_writer {
             let id = String::from(CONSOLE_DEVICE_NAME);
 
-            let (virtio_console_device, virtio_console_input) =
-                virtio_devices::Console::new(id.clone(), writer, col, row, console_config.iommu)
-                    .map_err(DeviceManagerError::CreateVirtioConsole)?;
+            let (virtio_console_device, virtio_console_input) = virtio_devices::Console::new(
+                id.clone(),
+                writer,
+                col,
+                row,
+                console_config.iommu,
+                self.seccomp_action.clone(),
+            )
+            .map_err(DeviceManagerError::CreateVirtioConsole)?;
             let virtio_console_device = Arc::new(Mutex::new(virtio_console_device));
             virtio_devices.push((
                 Arc::clone(&virtio_console_device) as VirtioDeviceArc,
@@ -1900,6 +1906,7 @@ impl DeviceManager {
                         net_cfg.iommu,
                         net_cfg.num_queues,
                         net_cfg.queue_size,
+                        self.seccomp_action.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -1915,6 +1922,7 @@ impl DeviceManager {
                         net_cfg.iommu,
                         net_cfg.num_queues,
                         net_cfg.queue_size,
+                        self.seccomp_action.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -1963,8 +1971,13 @@ impl DeviceManager {
             let id = String::from(RNG_DEVICE_NAME);
 
             let virtio_rng_device = Arc::new(Mutex::new(
-                virtio_devices::Rng::new(id.clone(), rng_path, rng_config.iommu)
-                    .map_err(DeviceManagerError::CreateVirtioRng)?,
+                virtio_devices::Rng::new(
+                    id.clone(),
+                    rng_path,
+                    rng_config.iommu,
+                    self.seccomp_action.clone(),
+                )
+                .map_err(DeviceManagerError::CreateVirtioRng)?,
             ));
             devices.push((
                 Arc::clone(&virtio_rng_device) as VirtioDeviceArc,
@@ -2292,6 +2305,7 @@ impl DeviceManager {
                 mapping,
                 mmap_region,
                 pmem_cfg.iommu,
+                self.seccomp_action.clone(),
             )
             .map_err(DeviceManagerError::CreateVirtioPmem)?,
         ));

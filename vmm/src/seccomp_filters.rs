@@ -350,6 +350,7 @@ fn api_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_accept4),
         allow_syscall(libc::SYS_bind),
+        allow_syscall(libc::SYS_brk),
         allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_epoll_create1),
@@ -363,6 +364,7 @@ fn api_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall_if(libc::SYS_ioctl, create_api_ioctl_seccomp_rule()?),
         allow_syscall(libc::SYS_listen),
         allow_syscall(libc::SYS_madvise),
+        allow_syscall(libc::SYS_mprotect),
         allow_syscall(libc::SYS_munmap),
         allow_syscall(libc::SYS_recvfrom),
         allow_syscall(libc::SYS_sigaltstack),

@@ -208,8 +208,9 @@ impl<T: DiskFile> BlockEpollHandler<T> {
 }
 
 impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
-    fn handle_event(&mut self, _helper: &mut EpollHelper, event: u16) -> bool {
-        match event {
+    fn handle_event(&mut self, _helper: &mut EpollHelper, event: &epoll::Event) -> bool {
+        let ev_type = event.data as u16;
+        match ev_type {
             QUEUE_AVAIL_EVENT => {
                 if let Err(e) = self.queue_evt.read() {
                     error!("Failed to get queue event: {:?}", e);
@@ -244,7 +245,7 @@ impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
                 }
             }
             _ => {
-                error!("Unexpected event: {}", event);
+                error!("Unexpected event: {}", ev_type);
                 return true;
             }
         }
@@ -264,7 +265,7 @@ pub struct Block<T: DiskFile> {
     config: VirtioBlockConfig,
     queue_evts: Option<Vec<EventFd>>,
     interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
-    epoll_threads: Option<Vec<thread::JoinHandle<result::Result<(), EpollHelperError>>>>,
+    epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
     pause_evt: Option<EventFd>,
     paused: Arc<AtomicBool>,
     queue_size: Vec<u16>,
@@ -535,16 +536,18 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
             let paused = self.paused.clone();
 
             // Retrieve seccomp filter for virtio_blk thread
-            let api_seccomp_filter = get_seccomp_filter(&self.seccomp_action, Thread::VirtioBlk)
-                .map_err(ActivateError::CreateSeccompFilter)?;
+            let virtio_blk_seccomp_filter =
+                get_seccomp_filter(&self.seccomp_action, Thread::VirtioBlk)
+                    .map_err(ActivateError::CreateSeccompFilter)?;
 
             thread::Builder::new()
                 .name("virtio_blk".to_string())
                 .spawn(move || {
-                    SeccompFilter::apply(api_seccomp_filter)
-                        .map_err(EpollHelperError::ApplySeccompFilter)?;
-
-                    handler.run(paused)
+                    if let Err(e) = SeccompFilter::apply(virtio_blk_seccomp_filter) {
+                        error!("Error applying seccomp filter: {:?}", e);
+                    } else if let Err(e) = handler.run(paused) {
+                        error!("Error running worker: {:?}", e);
+                    }
                 })
                 .map(|thread| epoll_threads.push(thread))
                 .map_err(|e| {
