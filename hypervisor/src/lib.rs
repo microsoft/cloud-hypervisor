@@ -18,15 +18,15 @@
 //! - arm64
 //!
 
+#[macro_use]
+extern crate anyhow;
+#[macro_use]
+extern crate log;
 extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
 extern crate thiserror;
-#[macro_use]
-extern crate anyhow;
-#[cfg(feature = "hyperv")]
-#[macro_use]
-extern crate log;
+
 #[cfg(feature = "kvm")]
 /// KVM implementation module
 pub mod kvm;

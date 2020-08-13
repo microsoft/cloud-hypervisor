@@ -61,6 +61,9 @@ pipeline{
 							}
 						}
 						stage ('Run integration tests') {
+							options {
+								retry(3)
+							}
 							steps {
 								sh "scripts/dev_cli.sh tests --integration"
 							}
@@ -99,6 +102,12 @@ pipeline{
 							}
 						}
 					}
+					post {
+						always {
+							sh "sudo chown -R jenkins.jenkins ${WORKSPACE}"
+							deleteDir()
+						}
+					}
 				}
 				stage ('Worker build (musl)') {
 					agent { node { label 'bionic' } }
@@ -117,11 +126,30 @@ pipeline{
 							}
 						}
 						stage ('Run integration tests for musl') {
+							options {
+								retry(3)
+							}
 							steps {
 								sh "scripts/dev_cli.sh tests --integration --libc musl"
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+	post {
+		regression {
+			script {
+				if (env.BRANCH_NAME == 'master') {
+					slackSend (color: '#ff0000', message: '"master" branch build is now failing')
+				}
+			}
+		}
+		fixed {
+			script {
+				if (env.BRANCH_NAME == 'master') {
+					slackSend (color: '#00ff00', message: '"master" branch build is now fixed')
 				}
 			}
 		}

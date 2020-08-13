@@ -102,6 +102,44 @@ mod tests {
         }
     }
 
+    fn handle_child_output(
+        r: Result<(), std::boxed::Box<dyn std::any::Any + std::marker::Send>>,
+        output: &std::process::Output,
+    ) {
+        use std::os::unix::process::ExitStatusExt;
+        if r.is_ok() && output.status.success() {
+            return;
+        }
+
+        match output.status.code() {
+            None => {
+                // Don't treat child.kill() as a problem
+                if output.status.signal() == Some(9) && r.is_ok() {
+                    return;
+                }
+
+                eprintln!(
+                    "==== child killed by signal: {} ====",
+                    output.status.signal().unwrap()
+                );
+            }
+            Some(code) => {
+                eprintln!("\n\n==== child exit code: {} ====", code);
+            }
+        }
+
+        eprintln!(
+            "\n\n==== Start child stdout ====\n\n{}\n\n==== End child stdout ====",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        eprintln!(
+            "\n\n==== Start child stderr ====\n\n{}\n\n==== End child stderr ====",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        panic!("Test failed")
+    }
+
     fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
         for i in 0..10 {
             let free_bytes = unsafe {
@@ -914,34 +952,32 @@ mod tests {
     }
 
     fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
-            let total_vcpus = threads_per_core * cores_per_package * packages;
-            let mut child = GuestCommand::new(&guest)
-                .args(&[
-                    "--cpus",
-                    &format!(
-                        "boot={},topology={}:{}:1:{}",
-                        total_vcpus, threads_per_core, cores_per_package, packages
-                    ),
-                ])
-                .args(&["--memory", "size=512M"])
-                .args(&["--kernel", guest.fw_path.as_str()])
-                .default_disks()
-                .default_net()
-                .spawn()
-                .unwrap();
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
+        let total_vcpus = threads_per_core * cores_per_package * packages;
+        let mut child = GuestCommand::new(&guest)
+            .args(&[
+                "--cpus",
+                &format!(
+                    "boot={},topology={}:{}:1:{}",
+                    total_vcpus, threads_per_core, cores_per_package, packages
+                ),
+            ])
+            .args(&["--memory", "size=512M"])
+            .args(&["--kernel", guest.fw_path.as_str()])
+            .default_disks()
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
-            aver_eq!(
-                tb,
+        thread::sleep(std::time::Duration::new(20, 0));
+        let r = std::panic::catch_unwind(|| {
+            assert_eq!(
                 guest.get_cpu_count().unwrap_or_default(),
                 u32::from(total_vcpus)
             );
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("lscpu | grep \"per core\" | cut -f 2 -d \":\" | sed \"s# *##\"")
                     .unwrap_or_default()
@@ -951,8 +987,7 @@ mod tests {
                 threads_per_core
             );
 
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("lscpu | grep \"per socket\" | cut -f 2 -d \":\" | sed \"s# *##\"")
                     .unwrap_or_default()
@@ -962,8 +997,7 @@ mod tests {
                 cores_per_package
             );
 
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("lscpu | grep \"Socket\" | cut -f 2 -d \":\" | sed \"s# *##\"")
                     .unwrap_or_default()
@@ -972,11 +1006,12 @@ mod tests {
                     .unwrap_or(0),
                 packages
             );
-
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(())
         });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
     }
 
     type PrepareNetDaemon =
@@ -989,24 +1024,23 @@ mod tests {
         self_spawned: bool,
         generate_host_mac: bool,
     ) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
-            let api_socket = temp_api_path(&guest.tmp_dir);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
+        let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let host_mac = if generate_host_mac {
-                Some(MacAddr::local_random())
-            } else {
-                None
-            };
+        let host_mac = if generate_host_mac {
+            Some(MacAddr::local_random())
+        } else {
+            None
+        };
 
-            let (net_params, daemon_child) = if self_spawned {
-                (
+        let (net_params, daemon_child) = if self_spawned {
+            (
                     format!(
                         "vhost_user=true,mac={},ip={},mask=255.255.255.0,num_queues={},queue_size=1024{}",
                         guest.network.guest_mac, guest.network.host_ip, num_queues,
@@ -1018,48 +1052,49 @@ mod tests {
                     ),
                     None,
                 )
-            } else {
-                let prepare_daemon = prepare_vhost_user_net_daemon.unwrap();
-                // Start the daemon
-                let (daemon_child, vunet_socket_path) =
-                    prepare_daemon(&guest.tmp_dir, &guest.network.host_ip, tap, num_queues);
+        } else {
+            let prepare_daemon = prepare_vhost_user_net_daemon.unwrap();
+            // Start the daemon
+            let (daemon_child, vunet_socket_path) =
+                prepare_daemon(&guest.tmp_dir, &guest.network.host_ip, tap, num_queues);
 
-                (
-                    format!(
-                        "vhost_user=true,mac={},socket={},num_queues={},queue_size=1024{}",
-                        guest.network.guest_mac,
-                        vunet_socket_path,
-                        num_queues,
-                        if let Some(host_mac) = host_mac {
-                            format!(",host_mac={}", host_mac)
-                        } else {
-                            "".to_owned()
-                        }
-                    ),
-                    Some(daemon_child),
-                )
-            };
+            (
+                format!(
+                    "vhost_user=true,mac={},socket={},num_queues={},queue_size=1024{}",
+                    guest.network.guest_mac,
+                    vunet_socket_path,
+                    num_queues,
+                    if let Some(host_mac) = host_mac {
+                        format!(",host_mac={}", host_mac)
+                    } else {
+                        "".to_owned()
+                    }
+                ),
+                Some(daemon_child),
+            )
+        };
 
-            let mut cloud_child = GuestCommand::new(&guest)
-                .args(&["--cpus", format!("boot={}", num_queues / 2).as_str()])
-                .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .default_disks()
-                .args(&["--net", net_params.as_str()])
-                .args(&["--api-socket", &api_socket])
-                .spawn()
-                .unwrap();
+        let mut child = GuestCommand::new(&guest)
+            .args(&["--cpus", format!("boot={}", num_queues / 2).as_str()])
+            .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .default_disks()
+            .args(&["--net", net_params.as_str()])
+            .args(&["--api-socket", &api_socket])
+            .capture_output()
+            .spawn()
+            .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
+        thread::sleep(std::time::Duration::new(20, 0));
+        let r = std::panic::catch_unwind(|| {
             if let Some(tap_name) = tap {
                 let tap_count = std::process::Command::new("bash")
                     .arg("-c")
                     .arg(format!("ip link | grep -c {}", tap_name))
                     .output()
                     .expect("Expected checking of tap count to succeed");
-                aver_eq!(tb, String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
+                assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
             }
 
             if let Some(host_mac) = tap {
@@ -1068,7 +1103,7 @@ mod tests {
                     .arg(format!("ip link | grep -c {}", host_mac))
                     .output()
                     .expect("Expected checking of host mac to succeed");
-                aver_eq!(tb, String::from_utf8_lossy(&mac_count.stdout).trim(), "1");
+                assert_eq!(String::from_utf8_lossy(&mac_count.stdout).trim(), "1");
             }
 
             // 1 network interface + default localhost ==> 2 interfaces
@@ -1077,8 +1112,7 @@ mod tests {
             // it does not define any --net network interface. That means all
             // the ssh communication in that test happens through the network
             // interface backed by vhost-user-net.
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("ip -o link | wc -l")
                     .unwrap_or_default()
@@ -1099,8 +1133,7 @@ mod tests {
             // Based on the above, the total vectors should 14.
             // This is a PCI only feature.
             #[cfg(all(not(feature = "mmio"), feature = "acpi"))]
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("grep -c PCI-MSI /proc/interrupts")
                     .unwrap_or_default()
@@ -1129,20 +1162,20 @@ mod tests {
                 // Here by simply checking the size (through ssh), we validate
                 // the connection is still working, which means vhost-user-net
                 // keeps working after the resize.
-                aver!(tb, guest.get_total_memory().unwrap_or_default() > 960_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
             }
-
-            let _ = cloud_child.kill();
-            let _ = cloud_child.wait();
-
-            if let Some(mut daemon_child) = daemon_child {
-                thread::sleep(std::time::Duration::new(5, 0));
-                let _ = daemon_child.kill();
-                let _ = daemon_child.wait();
-            }
-
-            Ok(())
         });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        if let Some(mut daemon_child) = daemon_child {
+            thread::sleep(std::time::Duration::new(5, 0));
+            let _ = daemon_child.kill();
+            let _ = daemon_child.wait();
+        }
+
+        handle_child_output(r, &output);
     }
 
     type PrepareBlkDaemon =
@@ -1155,72 +1188,72 @@ mod tests {
         prepare_vhost_user_blk_daemon: Option<&PrepareBlkDaemon>,
         self_spawned: bool,
     ) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
-            let api_socket = temp_api_path(&guest.tmp_dir);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
+        let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let (blk_params, daemon_child) = if self_spawned {
-                let mut blk_file_path = workload_path;
-                blk_file_path.push("blk.img");
-                let blk_file_path = String::from(blk_file_path.to_str().unwrap());
+        let (blk_params, daemon_child) = if self_spawned {
+            let mut blk_file_path = workload_path;
+            blk_file_path.push("blk.img");
+            let blk_file_path = String::from(blk_file_path.to_str().unwrap());
 
-                (
-                    format!(
-                        "vhost_user=true,path={},num_queues={},queue_size=128",
-                        blk_file_path, num_queues,
-                    ),
-                    None,
+            (
+                format!(
+                    "vhost_user=true,path={},num_queues={},queue_size=128",
+                    blk_file_path, num_queues,
+                ),
+                None,
+            )
+        } else {
+            let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
+            // Start the daemon
+            let (daemon_child, vubd_socket_path) =
+                prepare_daemon(&guest.tmp_dir, "blk.img", num_queues, readonly, direct);
+
+            (
+                format!(
+                    "vhost_user=true,socket={},num_queues={},queue_size=128",
+                    vubd_socket_path, num_queues,
+                ),
+                Some(daemon_child),
+            )
+        };
+
+        let mut child = GuestCommand::new(&guest)
+            .args(&["--cpus", format!("boot={}", num_queues).as_str()])
+            .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&[
+                "--disk",
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
                 )
-            } else {
-                let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
-                // Start the daemon
-                let (daemon_child, vubd_socket_path) =
-                    prepare_daemon(&guest.tmp_dir, "blk.img", num_queues, readonly, direct);
-
-                (
-                    format!(
-                        "vhost_user=true,socket={},num_queues={},queue_size=128",
-                        vubd_socket_path, num_queues,
-                    ),
-                    Some(daemon_child),
+                .as_str(),
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
                 )
-            };
+                .as_str(),
+                blk_params.as_str(),
+            ])
+            .default_net()
+            .args(&["--api-socket", &api_socket])
+            .capture_output()
+            .spawn()
+            .unwrap();
 
-            let mut cloud_child = GuestCommand::new(&guest)
-                .args(&["--cpus", format!("boot={}", num_queues).as_str()])
-                .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .args(&[
-                    "--disk",
-                    format!(
-                        "path={}",
-                        guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
-                    )
-                    .as_str(),
-                    format!(
-                        "path={}",
-                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                    )
-                    .as_str(),
-                    blk_params.as_str(),
-                ])
-                .default_net()
-                .args(&["--api-socket", &api_socket])
-                .spawn()
-                .unwrap();
+        thread::sleep(std::time::Duration::new(120, 0));
 
-            thread::sleep(std::time::Duration::new(120, 0));
-
+        let r = std::panic::catch_unwind(|| {
             // Check both if /dev/vdc exists and if the block size is 16M.
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("lsblk | grep vdc | grep -c 16M")
                     .unwrap_or_default()
@@ -1231,8 +1264,7 @@ mod tests {
             );
 
             // Check if this block is RO or RW.
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("lsblk | grep vdc | awk '{print $5}'")
                     .unwrap_or_default()
@@ -1244,8 +1276,7 @@ mod tests {
 
             // Check if the number of queues in /sys/block/vdc/mq matches the
             // expected num_queues.
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("ls -ll /sys/block/vdc/mq | grep ^d | wc -l")
                     .unwrap_or_default()
@@ -1257,19 +1288,20 @@ mod tests {
 
             // Mount the device
             let mount_ro_rw_flag = if readonly { "ro,noload" } else { "rw" };
-            guest.ssh_command("mkdir mount_image")?;
-            guest.ssh_command(
-                format!(
-                    "sudo mount -o {} -t ext4 /dev/vdc mount_image/",
-                    mount_ro_rw_flag
+            guest.ssh_command("mkdir mount_image").unwrap();
+            guest
+                .ssh_command(
+                    format!(
+                        "sudo mount -o {} -t ext4 /dev/vdc mount_image/",
+                        mount_ro_rw_flag
+                    )
+                    .as_str(),
                 )
-                .as_str(),
-            )?;
+                .unwrap();
 
             // Check the content of the block device. The file "foo" should
             // contain "bar".
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("cat mount_image/foo")
                     .unwrap_or_default()
@@ -1293,12 +1325,11 @@ mod tests {
 
                 thread::sleep(std::time::Duration::new(10, 0));
 
-                aver!(tb, guest.get_total_memory().unwrap_or_default() > 960_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
 
                 // Check again the content of the block device after the resize
                 // has been performed.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command("cat mount_image/foo")
                         .unwrap_or_default()
@@ -1308,20 +1339,20 @@ mod tests {
             }
 
             // Unmount the device
-            guest.ssh_command("sudo umount /dev/vdc")?;
-            guest.ssh_command("rm -r mount_image")?;
-
-            let _ = cloud_child.kill();
-            let _ = cloud_child.wait();
-
-            if let Some(mut daemon_child) = daemon_child {
-                thread::sleep(std::time::Duration::new(5, 0));
-                let _ = daemon_child.kill();
-                let _ = daemon_child.wait();
-            }
-
-            Ok(())
+            guest.ssh_command("sudo umount /dev/vdc").unwrap();
+            guest.ssh_command("rm -r mount_image").unwrap();
         });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        if let Some(mut daemon_child) = daemon_child {
+            thread::sleep(std::time::Duration::new(5, 0));
+            let _ = daemon_child.kill();
+            let _ = daemon_child.wait();
+        }
+
+        handle_child_output(r, &output);
     }
 
     fn test_boot_from_vhost_user_blk(
@@ -1331,75 +1362,72 @@ mod tests {
         prepare_vhost_user_blk_daemon: Option<&PrepareBlkDaemon>,
         self_spawned: bool,
     ) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let disk_path = guest
-                .disk_config
-                .disk(DiskType::RawOperatingSystem)
-                .unwrap();
+        let disk_path = guest
+            .disk_config
+            .disk(DiskType::RawOperatingSystem)
+            .unwrap();
 
-            let (blk_boot_params, daemon_child) = if self_spawned {
-                (
-                    format!(
-                        "vhost_user=true,path={},num_queues={},queue_size=128",
-                        disk_path, num_queues,
-                    ),
-                    None,
-                )
-            } else {
-                let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
-                // Start the daemon
-                let (daemon_child, vubd_socket_path) = prepare_daemon(
-                    &guest.tmp_dir,
-                    disk_path.as_str(),
-                    num_queues,
-                    readonly,
-                    direct,
-                );
-
-                (
-                    format!(
-                        "vhost_user=true,socket={},num_queues={},queue_size=128",
-                        vubd_socket_path, num_queues,
-                    ),
-                    Some(daemon_child),
-                )
-            };
-
-            let mut cloud_child = GuestCommand::new(&guest)
-                .args(&["--cpus", format!("boot={}", num_queues).as_str()])
-                .args(&["--memory", "size=512M,shared=on"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .args(&[
-                    "--disk",
-                    blk_boot_params.as_str(),
-                    format!(
-                        "path={}",
-                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                    )
-                    .as_str(),
-                ])
-                .default_net()
-                .spawn()
-                .unwrap();
-
-            thread::sleep(std::time::Duration::new(40, 0));
-
-            // Just check the VM booted correctly.
-            aver_eq!(
-                tb,
-                guest.get_cpu_count().unwrap_or_default(),
-                num_queues as u32
+        let (blk_boot_params, daemon_child) = if self_spawned {
+            (
+                format!(
+                    "vhost_user=true,path={},num_queues={},queue_size=128",
+                    disk_path, num_queues,
+                ),
+                None,
+            )
+        } else {
+            let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
+            // Start the daemon
+            let (daemon_child, vubd_socket_path) = prepare_daemon(
+                &guest.tmp_dir,
+                disk_path.as_str(),
+                num_queues,
+                readonly,
+                direct,
             );
-            aver!(tb, guest.get_total_memory().unwrap_or_default() > 480_000);
+
+            (
+                format!(
+                    "vhost_user=true,socket={},num_queues={},queue_size=128",
+                    vubd_socket_path, num_queues,
+                ),
+                Some(daemon_child),
+            )
+        };
+
+        let mut child = GuestCommand::new(&guest)
+            .args(&["--cpus", format!("boot={}", num_queues).as_str()])
+            .args(&["--memory", "size=512M,shared=on"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&[
+                "--disk",
+                blk_boot_params.as_str(),
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                )
+                .as_str(),
+            ])
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        thread::sleep(std::time::Duration::new(40, 0));
+
+        let r = std::panic::catch_unwind(|| {
+            // Just check the VM booted correctly.
+            assert_eq!(guest.get_cpu_count().unwrap_or_default(), num_queues as u32);
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
             if self_spawned {
                 // The reboot is not supported with mmio, so no reason to test it.
@@ -1412,7 +1440,7 @@ mod tests {
                         .parse::<u32>()
                         .unwrap_or(1);
 
-                    aver_eq!(tb, reboot_count, 0);
+                    assert_eq!(reboot_count, 0);
                     guest.ssh_command("sudo reboot").unwrap_or_default();
 
                     thread::sleep(std::time::Duration::new(20, 0));
@@ -1422,21 +1450,20 @@ mod tests {
                         .trim()
                         .parse::<u32>()
                         .unwrap_or_default();
-                    aver_eq!(tb, reboot_count, 1);
+                    assert_eq!(reboot_count, 1);
                 }
             }
-
-            let _ = cloud_child.kill();
-            let _ = cloud_child.wait();
-
-            if let Some(mut daemon_child) = daemon_child {
-                thread::sleep(std::time::Duration::new(5, 0));
-                let _ = daemon_child.kill();
-                let _ = daemon_child.wait();
-            }
-
-            Ok(())
         });
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        if let Some(mut daemon_child) = daemon_child {
+            thread::sleep(std::time::Duration::new(5, 0));
+            let _ = daemon_child.kill();
+            let _ = daemon_child.wait();
+        }
+
+        handle_child_output(r, &output);
     }
 
     fn test_virtio_fs(
@@ -1446,65 +1473,61 @@ mod tests {
         prepare_daemon: &dyn Fn(&TempDir, &str, &str) -> (std::process::Child, String),
         hotplug: bool,
     ) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
-            let api_socket = temp_api_path(&guest.tmp_dir);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
+        let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let mut shared_dir = workload_path;
-            shared_dir.push("shared_dir");
+        let mut shared_dir = workload_path;
+        shared_dir.push("shared_dir");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let (dax_vmm_param, dax_mount_param) = if dax { ("on", "-o dax") } else { ("off", "") };
-            let cache_size_vmm_param = if let Some(cache) = cache_size {
-                format!(",cache_size={}", cache)
-            } else {
-                "".to_string()
-            };
+        let (dax_vmm_param, dax_mount_param) = if dax { ("on", "-o dax") } else { ("off", "") };
+        let cache_size_vmm_param = if let Some(cache) = cache_size {
+            format!(",cache_size={}", cache)
+        } else {
+            "".to_string()
+        };
 
-            let (mut daemon_child, virtiofsd_socket_path) = prepare_daemon(
-                &guest.tmp_dir,
-                shared_dir.to_str().unwrap(),
-                virtiofsd_cache,
-            );
+        let (mut daemon_child, virtiofsd_socket_path) = prepare_daemon(
+            &guest.tmp_dir,
+            shared_dir.to_str().unwrap(),
+            virtiofsd_cache,
+        );
 
-            let mut guest_command = GuestCommand::new(&guest);
-            guest_command
-                .args(&["--cpus", "boot=1"])
-                .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .default_disks()
-                .default_net()
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .args(&["--api-socket", &api_socket]);
+        let mut guest_command = GuestCommand::new(&guest);
+        guest_command
+            .args(&["--cpus", "boot=1"])
+            .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .default_disks()
+            .default_net()
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--api-socket", &api_socket]);
 
-            let fs_params = format!(
-                "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}",
-                virtiofsd_socket_path, dax_vmm_param, cache_size_vmm_param
-            );
+        let fs_params = format!(
+            "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}",
+            virtiofsd_socket_path, dax_vmm_param, cache_size_vmm_param
+        );
 
-            if !hotplug {
-                guest_command.args(&["--fs", fs_params.as_str()]);
-            }
+        if !hotplug {
+            guest_command.args(&["--fs", fs_params.as_str()]);
+        }
 
-            let mut child = guest_command.spawn().unwrap();
+        let mut child = guest_command.capture_output().spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
+        thread::sleep(std::time::Duration::new(20, 0));
+        let r = std::panic::catch_unwind(|| {
             if hotplug {
                 // Add fs to the VM
                 let (cmd_success, cmd_output) =
                     remote_command_w_output(&api_socket, "add-fs", Some(&fs_params));
-                aver!(tb, cmd_success);
-                aver!(
-                    tb,
-                    String::from_utf8_lossy(&cmd_output)
-                        .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}")
-                );
+                assert!(cmd_success);
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
 
                 thread::sleep(std::time::Duration::new(10, 0));
             }
@@ -1516,8 +1539,7 @@ mod tests {
                  echo ok",
                 dax_mount_param
             );
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest.ssh_command(&mount_cmd).unwrap_or_default().trim(),
                 "ok"
             );
@@ -1525,16 +1547,14 @@ mod tests {
             // Check the cache size is the expected one.
             // With virtio-mmio the cache doesn't appear in /proc/iomem
             #[cfg(not(feature = "mmio"))]
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .valid_virtio_fs_cache_size(dax, cache_size)
                     .unwrap_or_default(),
                 true
             );
             // Check file1 exists and its content is "foo"
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("cat mount_dir/file1")
                     .unwrap_or_default()
@@ -1542,8 +1562,7 @@ mod tests {
                 "foo"
             );
             // Check file2 does not exist
-            aver_ne!(
-                tb,
+            assert_ne!(
                 guest
                     .ssh_command("ls mount_dir/file2")
                     .unwrap_or_default()
@@ -1551,8 +1570,7 @@ mod tests {
                 "mount_dir/file2"
             );
             // Check file3 exists and its content is "bar"
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("cat mount_dir/file3")
                     .unwrap_or_default()
@@ -1577,12 +1595,11 @@ mod tests {
                 resize_command(&api_socket, None, Some(desired_ram), None);
 
                 thread::sleep(std::time::Duration::new(10, 0));
-                aver!(tb, guest.get_total_memory().unwrap_or_default() > 960_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
 
                 // After the resize, check again that file1 exists and its
                 // content is "foo".
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command("cat mount_dir/file1")
                         .unwrap_or_default()
@@ -1593,25 +1610,26 @@ mod tests {
 
             if hotplug {
                 // Remove from VM
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command("sudo umount mount_dir && echo ok")
                         .unwrap_or_default()
                         .trim(),
                     "ok"
                 );
-                aver!(
-                    tb,
-                    remote_command(&api_socket, "remove-device", Some("myfs0"),)
-                );
+                assert!(remote_command(&api_socket, "remove-device", Some("myfs0")));
+            }
+        });
 
-                thread::sleep(std::time::Duration::new(10, 0));
-                let (mut daemon_child, virtiofsd_socket_path) = prepare_daemon(
-                    &guest.tmp_dir,
-                    shared_dir.to_str().unwrap(),
-                    virtiofsd_cache,
-                );
+        let (r, hotplug_daemon_child) = if r.is_ok() && hotplug {
+            thread::sleep(std::time::Duration::new(10, 0));
+            let (daemon_child, virtiofsd_socket_path) = prepare_daemon(
+                &guest.tmp_dir,
+                shared_dir.to_str().unwrap(),
+                virtiofsd_cache,
+            );
+
+            let r = std::panic::catch_unwind(|| {
                 thread::sleep(std::time::Duration::new(10, 0));
                 let fs_params = format!(
                     "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}",
@@ -1621,12 +1639,9 @@ mod tests {
                 // Add back and check it works
                 let (cmd_success, cmd_output) =
                     remote_command_w_output(&api_socket, "add-fs", Some(&fs_params));
-                aver!(tb, cmd_success);
-                aver!(
-                    tb,
-                    String::from_utf8_lossy(&cmd_output)
-                        .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}")
-                );
+                assert!(cmd_success);
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
                 thread::sleep(std::time::Duration::new(10, 0));
                 // Mount shared directory through virtio_fs filesystem
                 let mount_cmd = format!(
@@ -1635,79 +1650,85 @@ mod tests {
                      echo ok",
                     dax_mount_param
                 );
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest.ssh_command(&mount_cmd).unwrap_or_default().trim(),
                     "ok"
                 );
                 // Check file1 exists and its content is "foo"
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command("cat mount_dir/file1")
                         .unwrap_or_default()
                         .trim(),
                     "foo"
                 );
-                let _ = daemon_child.kill();
-                let _ = daemon_child.wait();
-            }
+            });
 
-            let _ = child.kill();
+            (r, Some(daemon_child))
+        } else {
+            (r, None)
+        };
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        let _ = daemon_child.kill();
+        let _ = daemon_child.wait();
+
+        if let Some(mut daemon_child) = hotplug_daemon_child {
             let _ = daemon_child.kill();
-            let _ = child.wait();
             let _ = daemon_child.wait();
-            Ok(())
-        });
+        }
+
+        handle_child_output(r, &output);
     }
 
     fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let mut pmem_temp_file = NamedTempFile::new().unwrap();
-            pmem_temp_file.as_file_mut().set_len(128 << 20).unwrap();
+        let mut pmem_temp_file = NamedTempFile::new().unwrap();
+        pmem_temp_file.as_file_mut().set_len(128 << 20).unwrap();
 
-            std::process::Command::new("mkfs.ext4")
-                .arg(pmem_temp_file.path())
-                .output()
-                .expect("Expect creating disk image to succeed");
+        std::process::Command::new("mkfs.ext4")
+            .arg(pmem_temp_file.path())
+            .output()
+            .expect("Expect creating disk image to succeed");
 
-            let mut child = GuestCommand::new(&guest)
-                .args(&["--cpus", "boot=1"])
-                .args(&["--memory", "size=512M"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .default_disks()
-                .default_net()
-                .args(&[
-                    "--pmem",
-                    format!(
-                        "file={}{}{}",
-                        pmem_temp_file.path().to_str().unwrap(),
-                        if specify_size { ",size=128M" } else { "" },
-                        if discard_writes {
-                            ",discard_writes=on"
-                        } else {
-                            ""
-                        }
-                    )
-                    .as_str(),
-                ])
-                .spawn()
-                .unwrap();
+        let mut child = GuestCommand::new(&guest)
+            .args(&["--cpus", "boot=1"])
+            .args(&["--memory", "size=512M"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .default_disks()
+            .default_net()
+            .args(&[
+                "--pmem",
+                format!(
+                    "file={}{}{}",
+                    pmem_temp_file.path().to_str().unwrap(),
+                    if specify_size { ",size=128M" } else { "" },
+                    if discard_writes {
+                        ",discard_writes=on"
+                    } else {
+                        ""
+                    }
+                )
+                .as_str(),
+            ])
+            .capture_output()
+            .spawn()
+            .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
+        thread::sleep(std::time::Duration::new(20, 0));
+        let r = std::panic::catch_unwind(|| {
             // Check for the presence of /dev/pmem0
-            aver_eq!(
-                tb,
+            assert_eq!(
                 guest
                     .ssh_command("ls /dev/pmem0")
                     .unwrap_or_default()
@@ -1716,17 +1737,13 @@ mod tests {
             );
 
             // Check changes persist after reboot
-            aver_eq!(
-                tb,
-                guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(),
-                ""
-            );
-            aver_eq!(tb, guest.ssh_command("ls /mnt").unwrap(), "lost+found\n");
+            assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
+            assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "lost+found\n");
             guest
                 .ssh_command("echo test123 | sudo tee /mnt/test")
                 .unwrap();
-            aver_eq!(tb, guest.ssh_command("sudo umount /mnt").unwrap(), "");
-            aver_eq!(tb, guest.ssh_command("ls /mnt").unwrap(), "");
+            assert_eq!(guest.ssh_command("sudo umount /mnt").unwrap(), "");
+            assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
             guest.ssh_command("sudo reboot").unwrap();
             thread::sleep(std::time::Duration::new(30, 0));
@@ -1736,26 +1753,21 @@ mod tests {
                 .trim()
                 .parse::<u32>()
                 .unwrap_or_default();
-            aver_eq!(tb, reboot_count, 1);
-            aver_eq!(
-                tb,
-                guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(),
-                ""
-            );
-            aver_eq!(
-                tb,
+            assert_eq!(reboot_count, 1);
+            assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
+            assert_eq!(
                 guest
                     .ssh_command("sudo cat /mnt/test")
                     .unwrap_or_default()
                     .trim(),
                 if discard_writes { "" } else { "test123" }
             );
-
-            let _ = child.kill();
-            let _ = child.wait();
-
-            Ok(())
         });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
     }
 
     fn get_fd_count(pid: u32) -> usize {
@@ -1763,53 +1775,51 @@ mod tests {
     }
 
     fn _test_virtio_vsock(hotplug: bool) {
-        test_block!(tb, "", {
-            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(&mut focal);
+        let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(&mut focal);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let socket = temp_vsock_path(&guest.tmp_dir);
-            let api_socket = temp_api_path(&guest.tmp_dir);
+        let socket = temp_vsock_path(&guest.tmp_dir);
+        let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut cmd = GuestCommand::new(&guest);
-            cmd.args(&["--api-socket", &api_socket]);
-            cmd.args(&["--cpus", "boot=1"]);
-            cmd.args(&["--memory", "size=512M"]);
-            cmd.args(&["--kernel", kernel_path.to_str().unwrap()]);
-            cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
-            cmd.default_disks();
-            cmd.default_net();
+        let mut cmd = GuestCommand::new(&guest);
+        cmd.args(&["--api-socket", &api_socket]);
+        cmd.args(&["--cpus", "boot=1"]);
+        cmd.args(&["--memory", "size=512M"]);
+        cmd.args(&["--kernel", kernel_path.to_str().unwrap()]);
+        cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+        cmd.default_disks();
+        cmd.default_net();
 
-            if !hotplug {
-                cmd.args(&["--vsock", format!("cid=3,socket={}", socket).as_str()]);
-            }
+        if !hotplug {
+            cmd.args(&["--vsock", format!("cid=3,socket={}", socket).as_str()]);
+        }
 
-            let mut child = cmd.spawn().unwrap();
+        let mut child = cmd.capture_output().spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
+        thread::sleep(std::time::Duration::new(20, 0));
 
+        let r = std::panic::catch_unwind(|| {
             if hotplug {
                 let (cmd_success, cmd_output) = remote_command_w_output(
                     &api_socket,
                     "add-vsock",
                     Some(format!("cid=3,socket={},id=test0", socket).as_str()),
                 );
-                aver!(tb, cmd_success);
-                aver!(
-                    tb,
-                    String::from_utf8_lossy(&cmd_output)
-                        .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:06.0\"}")
-                );
+                assert!(cmd_success);
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:06.0\"}"));
                 thread::sleep(std::time::Duration::new(10, 0));
                 // Check adding a second one fails
-                aver!(
-                    tb,
-                    !remote_command(&api_socket, "add-vsock", Some("cid=1234,socket=/tmp/fail"))
-                );
+                assert!(!remote_command(
+                    &api_socket,
+                    "add-vsock",
+                    Some("cid=1234,socket=/tmp/fail")
+                ));
             }
 
             // Validate vsock works as expected.
@@ -1827,7 +1837,7 @@ mod tests {
                     .parse::<u32>()
                     .unwrap_or(1);
 
-                aver_eq!(tb, reboot_count, 0);
+                assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
                 thread::sleep(std::time::Duration::new(30, 0));
@@ -1837,23 +1847,20 @@ mod tests {
                     .trim()
                     .parse::<u32>()
                     .unwrap_or_default();
-                aver_eq!(tb, reboot_count, 1);
+                assert_eq!(reboot_count, 1);
 
                 // Validate vsock still works after a reboot.
                 guest.check_vsock(socket.as_str());
             }
             if hotplug {
-                aver!(
-                    tb,
-                    remote_command(&api_socket, "remove-device", Some("test0"))
-                );
+                assert!(remote_command(&api_socket, "remove-device", Some("test0")));
             }
-
-            let _ = child.kill();
-            let _ = child.wait();
-
-            Ok(())
         });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
     }
 
     fn get_pss(pid: u32) -> u32 {
@@ -1874,52 +1881,52 @@ mod tests {
     }
 
     fn test_memory_mergeable(mergeable: bool) {
-        test_block!(tb, "", {
-            let memory_param = if mergeable {
-                "mergeable=on"
-            } else {
-                "mergeable=off"
-            };
+        let memory_param = if mergeable {
+            "mergeable=on"
+        } else {
+            "mergeable=off"
+        };
 
-            let mut focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let mut focal2 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let mut focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let mut focal2 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
 
-            let guest1 = Guest::new(&mut focal1 as &mut dyn DiskConfig);
+        let guest1 = Guest::new(&mut focal1 as &mut dyn DiskConfig);
 
-            let mut child1 = GuestCommand::new(&guest1)
-                .args(&["--cpus", "boot=1"])
-                .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
-                .args(&["--kernel", guest1.fw_path.as_str()])
-                .default_disks()
-                .args(&["--net", guest1.default_net_string().as_str()])
-                .args(&["--serial", "tty", "--console", "off"])
-                .spawn()
-                .unwrap();
+        let mut child1 = GuestCommand::new(&guest1)
+            .args(&["--cpus", "boot=1"])
+            .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
+            .args(&["--kernel", guest1.fw_path.as_str()])
+            .default_disks()
+            .args(&["--net", guest1.default_net_string().as_str()])
+            .args(&["--serial", "tty", "--console", "off"])
+            .spawn()
+            .unwrap();
 
-            // Let enough time for the first VM to be spawned, and to make
-            // sure the PSS measurement is accurate.
-            thread::sleep(std::time::Duration::new(120, 0));
+        // Let enough time for the first VM to be spawned, and to make
+        // sure the PSS measurement is accurate.
+        thread::sleep(std::time::Duration::new(120, 0));
 
-            // Get initial PSS
-            let old_pss = get_pss(child1.id());
+        // Get initial PSS
+        let old_pss = get_pss(child1.id());
 
-            let guest2 = Guest::new(&mut focal2 as &mut dyn DiskConfig);
+        let guest2 = Guest::new(&mut focal2 as &mut dyn DiskConfig);
 
-            let mut child2 = GuestCommand::new(&guest2)
-                .args(&["--cpus", "boot=1"])
-                .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
-                .args(&["--kernel", guest2.fw_path.as_str()])
-                .default_disks()
-                .args(&["--net", guest2.default_net_string().as_str()])
-                .args(&["--serial", "tty", "--console", "off"])
-                .spawn()
-                .unwrap();
+        let mut child2 = GuestCommand::new(&guest2)
+            .args(&["--cpus", "boot=1"])
+            .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
+            .args(&["--kernel", guest2.fw_path.as_str()])
+            .default_disks()
+            .args(&["--net", guest2.default_net_string().as_str()])
+            .args(&["--serial", "tty", "--console", "off"])
+            .capture_output()
+            .spawn()
+            .unwrap();
 
-            // Let enough time for the second VM to be spawned, and to make
-            // sure KSM has enough time to merge identical pages between the
-            // 2 VMs.
-            thread::sleep(std::time::Duration::new(60, 0));
-
+        // Let enough time for the second VM to be spawned, and to make
+        // sure KSM has enough time to merge identical pages between the
+        // 2 VMs.
+        thread::sleep(std::time::Duration::new(60, 0));
+        let r = std::panic::catch_unwind(|| {
             // Get new PSS
             let new_pss = get_pss(child1.id());
 
@@ -1930,17 +1937,19 @@ mod tests {
             println!("old PSS {}, new PSS {}", old_pss, new_pss);
 
             if mergeable {
-                aver!(tb, new_pss < (old_pss * 0.95));
+                assert!(new_pss < (old_pss * 0.95));
             } else {
-                aver!(tb, (old_pss * 0.95) < new_pss && new_pss < (old_pss * 1.05));
+                assert!((old_pss * 0.95) < new_pss && new_pss < (old_pss * 1.05));
             }
-
-            let _ = child1.kill();
-            let _ = child2.kill();
-            let _ = child1.wait();
-            let _ = child2.wait();
-            Ok(())
         });
+
+        let _ = child1.kill();
+        let _ = child2.kill();
+
+        let output = child1.wait_with_output().unwrap();
+        child2.wait().unwrap();
+
+        handle_child_output(r, &output);
     }
 
     fn _get_vmm_overhead(pid: u32, guest_memory_size: u32) -> HashMap<String, u32> {
@@ -2142,19 +2151,22 @@ mod tests {
         }
 
         #[cfg_attr(not(feature = "mmio"), test)]
-        #[cfg(target_arch = "x86_64")]
         fn test_large_vm() {
             test_block!(tb, "", {
                 let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
                 let guest = Guest::new(&mut focal);
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=48"])
+                let mut cmd = GuestCommand::new(&guest);
+                cmd.args(&["--cpus", "boot=48"])
                     .args(&["--memory", "size=5120M"])
                     .args(&["--kernel", guest.fw_path.as_str()])
                     .default_disks()
-                    .default_net()
-                    .spawn()
-                    .unwrap();
+                    .default_net();
+
+                // Now AArch64 can only boot from direct kernel, command-line is needed.
+                #[cfg(target_arch = "aarch64")]
+                cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+
+                let mut child = cmd.spawn().unwrap();
 
                 thread::sleep(std::time::Duration::new(20, 0));
 
@@ -2167,19 +2179,22 @@ mod tests {
         }
 
         #[cfg_attr(not(feature = "mmio"), test)]
-        #[cfg(target_arch = "x86_64")]
         fn test_huge_memory() {
             test_block!(tb, "", {
                 let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
                 let guest = Guest::new(&mut focal);
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=1"])
+                let mut cmd = GuestCommand::new(&guest);
+                cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=128G"])
                     .args(&["--kernel", guest.fw_path.as_str()])
                     .default_disks()
-                    .default_net()
-                    .spawn()
-                    .unwrap();
+                    .default_net();
+
+                // Now AArch64 can only boot from direct kernel, command-line is needed.
+                #[cfg(target_arch = "aarch64")]
+                cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+
+                let mut child = cmd.spawn().unwrap();
 
                 thread::sleep(std::time::Duration::new(20, 0));
 
@@ -2937,25 +2952,29 @@ mod tests {
         }
 
         #[cfg_attr(not(feature = "mmio"), test)]
-        #[cfg(target_arch = "x86_64")]
         fn test_serial_null() {
             test_block!(tb, "", {
                 let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
                 let guest = Guest::new(&mut focal);
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=1"])
+                let mut cmd = GuestCommand::new(&guest);
+                cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
                     .args(&["--kernel", guest.fw_path.as_str()])
                     .default_disks()
                     .default_net()
                     .args(&["--serial", "null"])
                     .args(&["--console", "off"])
-                    .capture_output()
-                    .spawn()
-                    .unwrap();
+                    .capture_output();
+
+                // Now AArch64 can only boot from direct kernel, command-line is needed.
+                #[cfg(target_arch = "aarch64")]
+                cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+
+                let mut child = cmd.spawn().unwrap();
 
                 thread::sleep(std::time::Duration::new(20, 0));
 
+                #[cfg(target_arch = "x86_64")]
                 // Test that there is a ttyS0
                 aver_eq!(
                     tb,
@@ -3189,84 +3208,103 @@ mod tests {
         // The third device is added to validate that hotplug works correctly since
         // it is being added to the L2 VM through hotplugging mechanism.
         fn test_vfio() {
-            test_block!(tb, "", {
-                let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-                let guest = Guest::new_from_ip_range(&mut focal, "172.17", 0);
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new_from_ip_range(&mut focal, "172.17", 0);
 
-                let mut workload_path = dirs::home_dir().unwrap();
-                workload_path.push("workloads");
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
 
-                let mut kernel_path = workload_path.clone();
-                kernel_path.push("bzImage");
+            let mut kernel_path = workload_path.clone();
+            kernel_path.push("bzImage");
 
-                let mut vfio_path = workload_path;
-                vfio_path.push("vfio");
+            let mut vfio_path = workload_path.clone();
+            vfio_path.push("vfio");
 
-                let mut cloud_init_vfio_base_path = vfio_path.clone();
-                cloud_init_vfio_base_path.push("cloudinit.img");
+            let mut cloud_init_vfio_base_path = vfio_path.clone();
+            cloud_init_vfio_base_path.push("cloudinit.img");
 
-                // We copy our cloudinit into the vfio mount point, for the nested
-                // cloud-hypervisor guest to use.
-                rate_limited_copy(
-                    &guest.disk_config.disk(DiskType::CloudInit).unwrap(),
-                    &cloud_init_vfio_base_path,
-                )
-                .expect("copying of cloud-init disk failed");
+            // We copy our cloudinit into the vfio mount point, for the nested
+            // cloud-hypervisor guest to use.
+            rate_limited_copy(
+                &guest.disk_config.disk(DiskType::CloudInit).unwrap(),
+                &cloud_init_vfio_base_path,
+            )
+            .expect("copying of cloud-init disk failed");
 
-                let vfio_tap0 = "vfio-tap0";
-                let vfio_tap1 = "vfio-tap1";
-                let vfio_tap2 = "vfio-tap2";
-                let vfio_tap3 = "vfio-tap3";
+            let mut vfio_disk_path = workload_path;
+            vfio_disk_path.push("vfio.img");
 
-                let (mut daemon_child, virtiofsd_socket_path) =
-                    prepare_virtiofsd(&guest.tmp_dir, vfio_path.to_str().unwrap(), "none");
+            // Create the vfio disk image
+            let output = Command::new("mkfs.ext4")
+                .arg("-d")
+                .arg(vfio_path.to_str().unwrap())
+                .arg(vfio_disk_path.to_str().unwrap())
+                .arg("2g")
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+                panic!("mkfs.ext4 command generated an error");
+            }
 
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=4"])
-                    .args(&["--memory", "size=2G,hugepages=on,shared=on"])
-                    .args(&["--kernel", kernel_path.to_str().unwrap()])
-                    .default_disks()
-                    .args(&[
-                        "--cmdline",
-                        format!(
-                            "{} kvm-intel.nested=1 vfio_iommu_type1.allow_unsafe_interrupts",
-                            DIRECT_KERNEL_BOOT_CMDLINE
-                        )
-                        .as_str(),
-                    ])
-                    .args(&[
-                        "--net",
-                        format!("tap={},mac={}", vfio_tap0, guest.network.guest_mac).as_str(),
-                        format!(
-                            "tap={},mac={},iommu=on",
-                            vfio_tap1, guest.network.l2_guest_mac1
-                        )
-                        .as_str(),
-                        format!(
-                            "tap={},mac={},iommu=on",
-                            vfio_tap2, guest.network.l2_guest_mac2
-                        )
-                        .as_str(),
-                        format!(
-                            "tap={},mac={},iommu=on",
-                            vfio_tap3, guest.network.l2_guest_mac3
-                        )
-                        .as_str(),
-                    ])
-                    .args(&[
-                        "--fs",
-                        format!(
-                            "tag=myfs,socket={},num_queues=1,queue_size=1024,dax=on",
-                            virtiofsd_socket_path,
-                        )
-                        .as_str(),
-                    ])
-                    .spawn()
-                    .unwrap();
+            let vfio_tap0 = "vfio-tap0";
+            let vfio_tap1 = "vfio-tap1";
+            let vfio_tap2 = "vfio-tap2";
+            let vfio_tap3 = "vfio-tap3";
 
-                thread::sleep(std::time::Duration::new(30, 0));
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--cpus", "boot=4"])
+                .args(&["--memory", "size=2G,hugepages=on,shared=on"])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&[
+                    "--disk",
+                    format!(
+                        "path={}",
+                        guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
+                    )
+                    .as_str(),
+                    format!(
+                        "path={}",
+                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                    )
+                    .as_str(),
+                    format!("path={}", vfio_disk_path.to_str().unwrap()).as_str(),
+                ])
+                .args(&[
+                    "--cmdline",
+                    format!(
+                        "{} kvm-intel.nested=1 vfio_iommu_type1.allow_unsafe_interrupts",
+                        DIRECT_KERNEL_BOOT_CMDLINE
+                    )
+                    .as_str(),
+                ])
+                .args(&[
+                    "--net",
+                    format!("tap={},mac={}", vfio_tap0, guest.network.guest_mac).as_str(),
+                    format!(
+                        "tap={},mac={},iommu=on",
+                        vfio_tap1, guest.network.l2_guest_mac1
+                    )
+                    .as_str(),
+                    format!(
+                        "tap={},mac={},iommu=on",
+                        vfio_tap2, guest.network.l2_guest_mac2
+                    )
+                    .as_str(),
+                    format!(
+                        "tap={},mac={},iommu=on",
+                        vfio_tap3, guest.network.l2_guest_mac3
+                    )
+                    .as_str(),
+                ])
+                .capture_output()
+                .spawn()
+                .unwrap();
 
-                guest.ssh_command_l1("sudo systemctl start vfio")?;
+            thread::sleep(std::time::Duration::new(30, 0));
+
+            let r = std::panic::catch_unwind(|| {
+                guest.ssh_command_l1("sudo systemctl start vfio").unwrap();
                 thread::sleep(std::time::Duration::new(120, 0));
 
                 // We booted our cloud hypervisor L2 guest with a "VFIOTAG" tag
@@ -3274,8 +3312,7 @@ mod tests {
                 // Let's ssh into it and verify that it's there. If it is it means
                 // we're in the right guest (The L2 one) because the QEMU L1 guest
                 // does not have this command line tag.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_1("grep -c VFIOTAG /proc/cmdline")
                         .unwrap_or_default()
@@ -3287,8 +3324,7 @@ mod tests {
 
                 // Let's also verify from the second virtio-net device passed to
                 // the L2 VM.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_2("grep -c VFIOTAG /proc/cmdline")
                         .unwrap_or_default()
@@ -3299,8 +3335,7 @@ mod tests {
                 );
 
                 // Check the amount of PCI devices appearing in L2 VM.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_1("ls /sys/bus/pci/devices | wc -l")
                         .unwrap_or_default()
@@ -3312,18 +3347,21 @@ mod tests {
 
                 // Hotplug an extra virtio-net device through L2 VM.
                 guest.ssh_command_l1(
-                    "echo 0000:00:07.0 | sudo tee /sys/bus/pci/devices/0000:00:07.0/driver/unbind",
-                )?;
-                guest.ssh_command_l1(
-                    "echo 1af4 1041 | sudo tee /sys/bus/pci/drivers/vfio-pci/new_id",
-                )?;
-                let vfio_hotplug_output = guest.ssh_command_l1(
-                    "sudo /mnt/ch-remote \
+                    "echo 0000:00:08.0 | sudo tee /sys/bus/pci/devices/0000:00:08.0/driver/unbind",
+                ).unwrap();
+                guest
+                    .ssh_command_l1(
+                        "echo 1af4 1041 | sudo tee /sys/bus/pci/drivers/vfio-pci/new_id",
+                    )
+                    .unwrap();
+                let vfio_hotplug_output = guest
+                    .ssh_command_l1(
+                        "sudo /mnt/ch-remote \
                  --api-socket=/tmp/ch_api.sock \
-                 add-device path=/sys/bus/pci/devices/0000:00:07.0,id=vfio123",
-                )?;
-                aver!(
-                    tb,
+                 add-device path=/sys/bus/pci/devices/0000:00:08.0,id=vfio123",
+                    )
+                    .unwrap();
+                assert!(
                     vfio_hotplug_output.contains("{\"id\":\"vfio123\",\"bdf\":\"0000:00:07.0\"}")
                 );
 
@@ -3332,8 +3370,7 @@ mod tests {
                 // Let's also verify from the third virtio-net device passed to
                 // the L2 VM. This third device has been hotplugged through the L2
                 // VM, so this is our way to validate hotplug works for VFIO PCI.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_3("grep -c VFIOTAG /proc/cmdline")
                         .unwrap_or_default()
@@ -3346,8 +3383,7 @@ mod tests {
                 // Check the amount of PCI devices appearing in L2 VM.
                 // There should be one more device than before, raising the count
                 // up to 8 PCI devices.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_1("ls /sys/bus/pci/devices | wc -l")
                         .unwrap_or_default()
@@ -3360,17 +3396,18 @@ mod tests {
                 // Let's now verify that we can correctly remove the virtio-net
                 // device through the "remove-device" command responsible for
                 // unplugging VFIO devices.
-                guest.ssh_command_l1(
-                    "sudo /mnt/ch-remote \
+                guest
+                    .ssh_command_l1(
+                        "sudo /mnt/ch-remote \
                  --api-socket=/tmp/ch_api.sock \
                  remove-device vfio123",
-                )?;
+                    )
+                    .unwrap();
                 thread::sleep(std::time::Duration::new(10, 0));
 
                 // Check the amount of PCI devices appearing in L2 VM is back down
                 // to 7 devices.
-                aver_eq!(
-                    tb,
+                assert_eq!(
                     guest
                         .ssh_command_l2_1("ls /sys/bus/pci/devices | wc -l")
                         .unwrap_or_default()
@@ -3384,30 +3421,24 @@ mod tests {
                 // up as expected. In order to check, we will use the virtio-net
                 // device already passed through L2 as a VFIO device, this will
                 // verify that VFIO devices are functional with memory hotplug.
-                aver!(
-                    tb,
-                    guest.get_total_memory_l2().unwrap_or_default() > 480_000
-                );
+                assert!(guest.get_total_memory_l2().unwrap_or_default() > 480_000);
                 guest.ssh_command_l2_1(
                     "sudo bash -c 'echo online > /sys/devices/system/memory/auto_online_blocks'",
-                )?;
-                guest.ssh_command_l1(
-                    "sudo /mnt/ch-remote \
+                ).unwrap();
+                guest
+                    .ssh_command_l1(
+                        "sudo /mnt/ch-remote \
                  --api-socket=/tmp/ch_api.sock \
                  resize --memory=1073741824",
-                )?;
-                aver!(
-                    tb,
-                    guest.get_total_memory_l2().unwrap_or_default() > 960_000
-                );
-
-                let _ = child.kill();
-                let _ = daemon_child.kill();
-                let _ = child.wait();
-                let _ = daemon_child.wait();
-
-                Ok(())
+                    )
+                    .unwrap();
+                assert!(guest.get_total_memory_l2().unwrap_or_default() > 960_000);
             });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
         }
 
         #[cfg_attr(feature = "mmio", test)]
@@ -4635,49 +4666,48 @@ mod tests {
 
         #[test]
         fn test_initramfs() {
-            test_block!(tb, "", {
-                let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-                let guest = Guest::new(&mut focal);
-                let mut workload_path = dirs::home_dir().unwrap();
-                workload_path.push("workloads");
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
 
-                let mut kernels = vec![];
-                kernels.push(direct_kernel_boot_path().unwrap());
+            let mut kernels = vec![];
+            kernels.push(direct_kernel_boot_path().unwrap());
 
-                #[cfg(target_arch = "x86_64")]
-                {
-                    let mut pvh_kernel_path = workload_path.clone();
-                    pvh_kernel_path.push("vmlinux.pvh");
-                    kernels.push(pvh_kernel_path);
-                }
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut pvh_kernel_path = workload_path.clone();
+                pvh_kernel_path.push("vmlinux.pvh");
+                kernels.push(pvh_kernel_path);
+            }
 
-                let mut initramfs_path = workload_path;
-                initramfs_path.push("alpine_initramfs.img");
+            let mut initramfs_path = workload_path;
+            initramfs_path.push("alpine_initramfs.img");
 
-                let test_string = String::from("axz34i9rylotd8n50wbv6kcj7f2qushme1pg");
-                let cmdline = format!("console=hvc0 quiet TEST_STRING={}", test_string);
+            let test_string = String::from("axz34i9rylotd8n50wbv6kcj7f2qushme1pg");
+            let cmdline = format!("console=hvc0 quiet TEST_STRING={}", test_string);
 
-                kernels.iter().for_each(|k_path| {
-                    let mut child = GuestCommand::new(&guest)
-                        .args(&["--kernel", k_path.to_str().unwrap()])
-                        .args(&["--initramfs", initramfs_path.to_str().unwrap()])
-                        .args(&["--cmdline", &cmdline])
-                        .capture_output()
-                        .spawn()
-                        .unwrap();
+            kernels.iter().for_each(|k_path| {
+                let mut child = GuestCommand::new(&guest)
+                    .args(&["--kernel", k_path.to_str().unwrap()])
+                    .args(&["--initramfs", initramfs_path.to_str().unwrap()])
+                    .args(&["--cmdline", &cmdline])
+                    .capture_output()
+                    .spawn()
+                    .unwrap();
 
-                    thread::sleep(std::time::Duration::new(20, 0));
+                thread::sleep(std::time::Duration::new(20, 0));
 
-                    let _ = child.kill();
-                    match child.wait_with_output() {
-                        Ok(out) => {
-                            let s = String::from_utf8_lossy(&out.stdout);
-                            aver_ne!(tb, s.lines().position(|line| line == test_string), None);
-                        }
-                        Err(_) => aver!(tb, false),
-                    }
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+
+                let r = std::panic::catch_unwind(|| {
+                    let s = String::from_utf8_lossy(&output.stdout);
+
+                    assert_ne!(s.lines().position(|line| line == test_string), None);
                 });
-                Ok(())
+
+                handle_child_output(r, &output);
             });
         }
 
@@ -4687,91 +4717,85 @@ mod tests {
         #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_snapshot_restore() {
-            test_block!(tb, "", {
-                let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-                let guest = Guest::new(&mut focal);
-                let mut workload_path = dirs::home_dir().unwrap();
-                workload_path.push("workloads");
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
 
-                let mut kernel_path = workload_path;
-                kernel_path.push("bzImage");
+            let mut kernel_path = workload_path;
+            kernel_path.push("bzImage");
 
-                let api_socket = temp_api_path(&guest.tmp_dir);
+            let api_socket = temp_api_path(&guest.tmp_dir);
 
-                let net_id = "net123";
-                let net_params = format!(
-                    "id={},tap=,mac={},ip={},mask=255.255.255.0",
-                    net_id, guest.network.guest_mac, guest.network.host_ip
-                );
+            let net_id = "net123";
+            let net_params = format!(
+                "id={},tap=,mac={},ip={},mask=255.255.255.0",
+                net_id, guest.network.guest_mac, guest.network.host_ip
+            );
 
-                let cloudinit_params = if cfg!(feature = "mmio") {
+            let cloudinit_params = if cfg!(feature = "mmio") {
+                format!(
+                    "path={}",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                )
+            } else {
+                format!(
+                    "path={},iommu=on",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                )
+            };
+
+            let socket = temp_vsock_path(&guest.tmp_dir);
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=4"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&[
+                    "--disk",
                     format!(
                         "path={}",
-                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                        guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
                     )
-                } else {
-                    format!(
-                        "path={},iommu=on",
-                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                    )
-                };
+                    .as_str(),
+                    cloudinit_params.as_str(),
+                ])
+                .args(&["--net", net_params.as_str()])
+                .args(&["--vsock", format!("cid=3,socket={}", socket).as_str()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .capture_output()
+                .spawn()
+                .unwrap();
 
-                let socket = temp_vsock_path(&guest.tmp_dir);
+            thread::sleep(std::time::Duration::new(20, 0));
 
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--api-socket", &api_socket])
-                    .args(&["--cpus", "boot=4"])
-                    .args(&["--memory", "size=4G"])
-                    .args(&["--kernel", kernel_path.to_str().unwrap()])
-                    .args(&[
-                        "--disk",
-                        format!(
-                            "path={}",
-                            guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
-                        )
-                        .as_str(),
-                        cloudinit_params.as_str(),
-                    ])
-                    .args(&["--net", net_params.as_str()])
-                    .args(&["--vsock", format!("cid=3,socket={}", socket).as_str()])
-                    .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                    .capture_output()
-                    .spawn()
-                    .unwrap();
+            let console_text = String::from("On a branch floating down river a cricket, singing.");
+            let console_cmd = format!("echo {} | sudo tee /dev/hvc0", console_text);
+            // Create the snapshot directory
+            let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
 
-                thread::sleep(std::time::Duration::new(20, 0));
-
+            let r = std::panic::catch_unwind(|| {
                 // Check the number of vCPUs
-                aver_eq!(tb, guest.get_cpu_count().unwrap_or_default(), 4);
+                assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
                 // Check the guest RAM
-                aver!(tb, guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
                 // Check block devices are readable
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
-                        .is_ok()
-                );
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
-                        .is_ok()
-                );
+                assert!(guest
+                    .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
+                    .is_ok());
+                assert!(guest
+                    .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
+                    .is_ok());
                 // Check if the rng device is readable
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
-                        .is_ok()
-                );
+                assert!(guest
+                    .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
+                    .is_ok());
                 // Check vsock
                 guest.check_vsock(socket.as_str());
                 // Check if the console is usable
-                let console_text =
-                    String::from("On a branch floating down river a cricket, singing.");
-                let console_cmd = format!("echo {} | sudo tee /dev/hvc0", console_text);
-                aver!(tb, guest.ssh_command(&console_cmd).is_ok());
+
+                assert!(guest.ssh_command(&console_cmd).is_ok());
 
                 // Only for PCI, we can check that removing and adding back the
                 // virtio-net device does not break the snapshot/restore support
@@ -4781,153 +4805,131 @@ mod tests {
                 #[cfg(not(feature = "mmio"))]
                 {
                     // Unplug the virtio-net device
-                    aver!(
-                        tb,
-                        remote_command(&api_socket, "remove-device", Some(net_id),)
-                    );
+                    assert!(remote_command(&api_socket, "remove-device", Some(net_id),));
                     thread::sleep(std::time::Duration::new(10, 0));
 
                     // Plug the virtio-net device again
-                    aver!(
-                        tb,
-                        remote_command(&api_socket, "add-net", Some(net_params.as_str()),)
-                    );
+                    assert!(remote_command(
+                        &api_socket,
+                        "add-net",
+                        Some(net_params.as_str()),
+                    ));
                     thread::sleep(std::time::Duration::new(10, 0));
                 }
 
                 // Pause the VM
-                aver!(tb, remote_command(&api_socket, "pause", None));
-
-                // Create the snapshot directory
-                let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+                assert!(remote_command(&api_socket, "pause", None));
 
                 // Take a snapshot from the VM
-                aver!(
-                    tb,
-                    remote_command(
-                        &api_socket,
-                        "snapshot",
-                        Some(format!("file://{}", snapshot_dir).as_str()),
-                    )
-                );
+                assert!(remote_command(
+                    &api_socket,
+                    "snapshot",
+                    Some(format!("file://{}", snapshot_dir).as_str()),
+                ));
 
                 // Wait to make sure the snapshot is completed
                 thread::sleep(std::time::Duration::new(10, 0));
+            });
 
-                // Shutdown the source VM and check console output
-                let _ = child.kill();
-                match child.wait_with_output() {
-                    Ok(out) => {
-                        aver!(
-                            tb,
-                            String::from_utf8_lossy(&out.stdout).contains(&console_text)
-                        );
-                    }
-                    Err(_) => aver!(tb, false),
-                }
+            // Shutdown the source VM and check console output
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
 
-                // Remove the vsock socket file.
-                Command::new("rm")
-                    .arg("-f")
-                    .arg(socket.as_str())
-                    .output()
-                    .unwrap();
+            let r = std::panic::catch_unwind(|| {
+                assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+            });
 
-                // Restore the VM from the snapshot
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--api-socket", &api_socket])
-                    .args(&[
-                        "--restore",
-                        format!("source_url=file://{}", snapshot_dir).as_str(),
-                    ])
-                    .capture_output()
-                    .spawn()
-                    .unwrap();
+            handle_child_output(r, &output);
 
-                // Wait for the VM to be restored
-                thread::sleep(std::time::Duration::new(10, 0));
+            // Remove the vsock socket file.
+            Command::new("rm")
+                .arg("-f")
+                .arg(socket.as_str())
+                .output()
+                .unwrap();
 
+            // Restore the VM from the snapshot
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--api-socket", &api_socket])
+                .args(&[
+                    "--restore",
+                    format!("source_url=file://{}", snapshot_dir).as_str(),
+                ])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            // Wait for the VM to be restored
+            thread::sleep(std::time::Duration::new(10, 0));
+
+            let r = std::panic::catch_unwind(|| {
                 // Resume the VM
-                aver!(tb, remote_command(&api_socket, "resume", None));
+                assert!(remote_command(&api_socket, "resume", None));
 
                 // Perform same checks to validate VM has been properly restored
-                aver_eq!(tb, guest.get_cpu_count().unwrap_or_default(), 4);
-                aver!(tb, guest.get_total_memory().unwrap_or_default() > 3_840_000);
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
-                        .is_ok()
-                );
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
-                        .is_ok()
-                );
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
-                        .is_ok()
-                );
+                assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
+                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                assert!(guest
+                    .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
+                    .is_ok());
+                assert!(guest
+                    .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
+                    .is_ok());
+                assert!(guest
+                    .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
+                    .is_ok());
                 guest.check_vsock(socket.as_str());
-                aver!(tb, guest.ssh_command(&console_cmd).is_ok());
-
+                assert!(guest.ssh_command(&console_cmd).is_ok());
                 // Shutdown the target VM and check console output
-                let _ = child.kill();
-                match child.wait_with_output() {
-                    Ok(out) => {
-                        aver!(
-                            tb,
-                            String::from_utf8_lossy(&out.stdout).contains(&console_text)
-                        );
-                    }
-                    Err(_) => aver!(tb, false),
-                }
-
-                Ok(())
             });
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+
+            let r = std::panic::catch_unwind(|| {
+                assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+            });
+
+            handle_child_output(r, &output);
         }
 
         #[cfg_attr(not(feature = "mmio"), test)]
         #[cfg(target_arch = "x86_64")]
         fn test_counters() {
-            test_block!(tb, "", {
-                let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-                let guest = Guest::new(&mut focal);
-                let api_socket = temp_api_path(&guest.tmp_dir);
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let api_socket = temp_api_path(&guest.tmp_dir);
 
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=1"])
-                    .args(&["--memory", "size=512M"])
-                    .args(&["--kernel", guest.fw_path.as_str()])
-                    .default_disks()
-                    .args(&["--net", guest.default_net_string().as_str()])
-                    .args(&["--api-socket", &api_socket])
-                    .spawn()
-                    .unwrap();
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--cpus", "boot=1"])
+                .args(&["--memory", "size=512M"])
+                .args(&["--kernel", guest.fw_path.as_str()])
+                .default_disks()
+                .args(&["--net", guest.default_net_string().as_str()])
+                .args(&["--api-socket", &api_socket])
+                .capture_output()
+                .spawn()
+                .unwrap();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+            thread::sleep(std::time::Duration::new(20, 0));
 
+            let r = std::panic::catch_unwind(|| {
                 let orig_counters = get_counters(&api_socket);
-
-                aver!(
-                    tb,
-                    guest
-                        .ssh_command("dd if=/dev/zero of=test count=8 bs=1M")
-                        .is_ok()
-                );
+                assert!(guest
+                    .ssh_command("dd if=/dev/zero of=test count=8 bs=1M")
+                    .is_ok());
 
                 let new_counters = get_counters(&api_socket);
 
                 // Check that all the counters have increased
-                aver!(tb, new_counters > orig_counters);
-
-                let _ = child.kill();
-                let _ = child.wait();
-                Ok(())
+                assert!(new_counters > orig_counters);
             });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
         }
     }
 
