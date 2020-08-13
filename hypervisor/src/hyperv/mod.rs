@@ -83,7 +83,12 @@ impl IrqfdCtrlEpollHandler {
             epoll::Events::EPOLLIN,
             u64::from(KILL_EVENT),
         )
-        .unwrap();
+        .unwrap_or_else(|err| {
+            info!(
+                "IrqfdCtrlEpollHandler: failed to register listener: {:?}",
+                err
+            );
+        });
 
         register_listener(
             epoll_file.as_raw_fd(),
@@ -91,7 +96,12 @@ impl IrqfdCtrlEpollHandler {
             epoll::Events::EPOLLIN,
             u64::from(IRQFD_EVENT),
         )
-        .unwrap();
+        .unwrap_or_else(|err| {
+            info!(
+                "IrqfdCtrlEpollHandler: failed to register listener: {:?}",
+                err
+            );
+        });
 
         let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 2];
 
@@ -230,7 +240,9 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
         logical_destination_mode,
         false,
     )
-    .unwrap();
+    .unwrap_or_else(|err| {
+        info!("Failed to request virtual interrupt: {:?}", err);
+    });
 }
 
 /// Wrapper over Hyperv system ioctls.
@@ -286,14 +298,14 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         let intercept_args = hv_install_intercept_args {
             access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
             intercept_type: hv_intercept_type_hv_intercept_type_x64_global_cpuid,
-            intercept_parameter: hv_intercept_parameters { as_uint64 : 0x0 },
+            intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
         let intercept_args = hv_install_intercept_args {
             access_type: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
             intercept_type: hv_intercept_type_hv_intercept_type_x64_msr,
-            intercept_parameter: hv_intercept_parameters { as_uint64 : 0x0 },
+            intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
@@ -560,7 +572,10 @@ impl cpu::Vcpu for HypervVcpu {
                             emulator::Output::ReadRegister64(name) => {
                                 let reg_name = emu_reg64_to_hv_reg64(name);
                                 let reg_name: [hv_register_name; 1] = [reg_name];
-                                let reg_val = self.fd.get_reg(&reg_name).unwrap();
+                                let reg_val = self
+                                    .fd
+                                    .get_reg(&reg_name)
+                                    .map_err(|e| cpu::HypervisorCpuError::GetReg(e.into()))?;
                                 let value = unsafe { reg_val[0].reg64 };
                                 // debug!("emulator read {:?} {:x?}", name, value);
                                 emulator_input = emulator::Input::Register64(name, value);
@@ -677,18 +692,25 @@ impl cpu::Vcpu for HypervVcpu {
                             let rax = msr_value & 0xffffffff;
                             let rdx = msr_value >> 32;
                             set_registers_64!(
-                                    self.fd,
-                                    &[(hv_register_name_hv_x64_register_rip, info.header.rip + insn_len),
-                                      (hv_register_name_hv_x64_register_rax, rax as u64),
-                                      (hv_register_name_hv_x64_register_rdx, rdx as u64),
-                                    ]);
+                                self.fd,
+                                &[
+                                    (
+                                        hv_register_name_hv_x64_register_rip,
+                                        info.header.rip + insn_len
+                                    ),
+                                    (hv_register_name_hv_x64_register_rax, rax as u64),
+                                    (hv_register_name_hv_x64_register_rdx, rdx as u64),
+                                ]
+                            );
                         }
                     } else {
                         debug!("msr write: {:x}", info.msr_number);
                         let v = info.rax & 0xffffffff | info.rdx << 32;
                         match info.msr_number {
-                            0x40000000..=0x4fffffff => hv1::process_msr_write(self.vp_index as u32, info.msr_number, v),
-                            _ => None
+                            0x40000000..=0x4fffffff => {
+                                hv1::process_msr_write(self.vp_index as u32, info.msr_number, v)
+                            }
+                            _ => None,
                         }
                         .unwrap_or_else(|| {
                             debug!(
@@ -698,21 +720,32 @@ impl cpu::Vcpu for HypervVcpu {
                             general_protection_fault = true;
                         });
                         if !general_protection_fault {
-                            set_registers_64!(self.fd,
-                                              &[(hv_register_name_hv_x64_register_rip, info.header.rip + insn_len)]);
+                            set_registers_64!(
+                                self.fd,
+                                &[(
+                                    hv_register_name_hv_x64_register_rip,
+                                    info.header.rip + insn_len
+                                )]
+                            );
                         }
                     }
                     if general_protection_fault {
                         // inject a general protection fault by setting event pending register
-                        let mut reg = hv_x64_pending_exception_event { as_uint64: [0;2]};
+                        let mut reg = hv_x64_pending_exception_event { as_uint64: [0; 2] };
                         unsafe {
                             reg.__bindgen_anon_1.set_event_pending(1);
                             // reg.__bindgen_anon_1.set_event_type(0);
                             reg.__bindgen_anon_1.set_deliver_error_code(1);
                             reg.__bindgen_anon_1.set_vector(0xd); // gpf
                         }
-                        self.fd.set_reg(&[hv_register_name_hv_register_pending_event0],
-                                        &[hv_register_value { pending_exception_event: reg }]).unwrap();
+                        self.fd
+                            .set_reg(
+                                &[hv_register_name_hv_register_pending_event0],
+                                &[hv_register_value {
+                                    pending_exception_event: reg,
+                                }],
+                            )
+                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                     }
                     Ok(cpu::VmExit::Ignore)
                 }

@@ -160,6 +160,16 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to get debug registers: {0}")]
     GetDebugRegs(#[source] anyhow::Error),
+    ///
+    /// Get register error
+    ///
+    #[error("Failed to get registers: {0}")]
+    GetReg(#[source] anyhow::Error),
+    ///
+    /// Set register error
+    ///
+    #[error("Failed to set registers: {0}")]
+    SetReg(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]
