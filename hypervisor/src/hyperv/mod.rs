@@ -543,7 +543,8 @@ impl cpu::Vcpu for HypervVcpu {
                         ),
                         (hv_register_name_hv_x64_register_rax, ret_rax),
                     ];
-                    set_registers_64!(self.fd, arr_reg_name_value);
+                    set_registers_64!(self.fd, arr_reg_name_value)
+                        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
@@ -584,7 +585,8 @@ impl cpu::Vcpu for HypervVcpu {
                                 let reg_name = emu_reg64_to_hv_reg64(name);
                                 let arr_reg_name_value = [(reg_name, value)];
                                 // debug!("emulator write {:?} {:x?}", name, value);
-                                set_registers_64!(self.fd, arr_reg_name_value);
+                                set_registers_64!(self.fd, arr_reg_name_value)
+                                    .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                                 emulator_input = emulator::Input::Continue;
                             }
                             emulator::Output::ReadMemory(size) => {
@@ -664,7 +666,8 @@ impl cpu::Vcpu for HypervVcpu {
                         (hv_register_name_hv_x64_register_rcx, rcx as u64),
                         (hv_register_name_hv_x64_register_rdx, rdx as u64),
                     ];
-                    set_registers_64!(self.fd, arr_reg_name_value);
+                    set_registers_64!(self.fd, arr_reg_name_value)
+                        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
@@ -701,7 +704,8 @@ impl cpu::Vcpu for HypervVcpu {
                                     (hv_register_name_hv_x64_register_rax, rax as u64),
                                     (hv_register_name_hv_x64_register_rdx, rdx as u64),
                                 ]
-                            );
+                            )
+                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                         }
                     } else {
                         debug!("msr write: {:x}", info.msr_number);
@@ -726,7 +730,8 @@ impl cpu::Vcpu for HypervVcpu {
                                     hv_register_name_hv_x64_register_rip,
                                     info.header.rip + insn_len
                                 )]
-                            );
+                            )
+                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
                         }
                     }
                     if general_protection_fault {
