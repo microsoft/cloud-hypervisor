@@ -24,26 +24,6 @@ pipeline{
 		stage ('Build') {
 			failFast true
             parallel {
-				stage ('Master build') {
-					agent { node { label 'master' } }
-					stages {
-						stage ('Checkout') {
-							steps {
-								checkout scm
-							}
-						}
-						stage ('Run Cargo tests') {
-							steps {
-								sh "scripts/dev_cli.sh tests --cargo"
-							}
-						}
-						stage ('Run OpenAPI tests') {
-							steps {
-								sh "scripts/run_openapi_tests.sh"
-							}
-						}
-					}
-				}	
 				stage ('Worker build') {
 					agent { node { label 'bionic' } }
 					options {
@@ -55,15 +35,17 @@ pipeline{
 								checkout scm
 							}
 						}
+						stage ('Run OpenAPI tests') {
+							steps {
+								sh "scripts/run_openapi_tests.sh"
+							}
+						}
 						stage ('Run unit tests') {
 							steps {
 								sh "scripts/dev_cli.sh tests --unit"
 							}
 						}
 						stage ('Run integration tests') {
-							options {
-								retry(3)
-							}
 							steps {
 								sh "scripts/dev_cli.sh tests --integration"
 							}
@@ -126,9 +108,6 @@ pipeline{
 							}
 						}
 						stage ('Run integration tests for musl') {
-							options {
-								retry(3)
-							}
 							steps {
 								sh "scripts/dev_cli.sh tests --integration --libc musl"
 							}

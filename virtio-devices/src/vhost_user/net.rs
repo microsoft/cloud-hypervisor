@@ -4,19 +4,19 @@
 use super::super::net_util::{
     build_net_config_space, CtrlVirtio, NetCtrlEpollHandler, VirtioNetConfig,
 };
-use super::super::{
-    ActivateError, ActivateResult, EpollHelperError, Queue, VirtioDevice, VirtioDeviceType,
-};
+use super::super::{ActivateError, ActivateResult, Queue, VirtioDevice, VirtioDeviceType};
 use super::handler::*;
 use super::vu_common_ctrl::*;
 use super::{Error, Result};
+use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::VirtioInterrupt;
 use libc::EFD_NONBLOCK;
 use net_util::MacAddr;
+use seccomp::{SeccompAction, SeccompFilter};
 use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::vec::Vec;
 use vhost_rs::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
@@ -45,15 +45,22 @@ pub struct Net {
     queue_sizes: Vec<u16>,
     queue_evts: Option<Vec<EventFd>>,
     interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
-    epoll_threads: Option<Vec<thread::JoinHandle<result::Result<(), EpollHelperError>>>>,
-    ctrl_queue_epoll_thread: Option<thread::JoinHandle<result::Result<(), EpollHelperError>>>,
+    epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
+    ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     paused: Arc<AtomicBool>,
+    paused_sync: Arc<Barrier>,
+    seccomp_action: SeccompAction,
 }
 
 impl Net {
     /// Create a new vhost-user-net device
     /// Create a new vhost-user-net device
-    pub fn new(id: String, mac_addr: MacAddr, vu_cfg: VhostUserConfig) -> Result<Net> {
+    pub fn new(
+        id: String,
+        mac_addr: MacAddr,
+        vu_cfg: VhostUserConfig,
+        seccomp_action: SeccompAction,
+    ) -> Result<Net> {
         let mut vhost_user_net = Master::connect(&vu_cfg.socket, vu_cfg.num_queues as u64)
             .map_err(Error::VhostUserCreateMaster)?;
 
@@ -153,6 +160,8 @@ impl Net {
             epoll_threads: None,
             ctrl_queue_epoll_thread: None,
             paused: Arc::new(AtomicBool::new(false)),
+            paused_sync: Arc::new(Barrier::new((vu_cfg.num_queues / 2) + 1)),
+            seccomp_action,
         })
     }
 }
@@ -259,9 +268,23 @@ impl VirtioDevice for Net {
             };
 
             let paused = self.paused.clone();
+            // Let's update the barrier as we need 1 for each RX/TX pair +
+            // 1 for the control queue + 1 for the main thread signalling
+            // the pause.
+            self.paused_sync = Arc::new(Barrier::new((queue_num / 2) + 2));
+            let paused_sync = self.paused_sync.clone();
+            let virtio_vhost_net_ctl_seccomp_filter =
+                get_seccomp_filter(&self.seccomp_action, Thread::VirtioVhostNetCtl)
+                    .map_err(ActivateError::CreateSeccompFilter)?;
             thread::Builder::new()
-                .name("virtio_net".to_string())
-                .spawn(move || ctrl_handler.run_ctrl(paused))
+                .name("vhost_net_ctl".to_string())
+                .spawn(move || {
+                    if let Err(e) = SeccompFilter::apply(virtio_vhost_net_ctl_seccomp_filter) {
+                        error!("Error applying seccomp filter: {:?}", e);
+                    } else if let Err(e) = ctrl_handler.run_ctrl(paused, paused_sync) {
+                        error!("Error running worker: {:?}", e);
+                    }
+                })
                 .map(|thread| self.ctrl_queue_epoll_thread = Some(thread))
                 .map_err(|e| {
                     error!("failed to clone queue EventFd: {}", e);
@@ -294,9 +317,19 @@ impl VirtioDevice for Net {
             });
 
             let paused = self.paused.clone();
+            let paused_sync = self.paused_sync.clone();
+            let virtio_vhost_net_seccomp_filter =
+                get_seccomp_filter(&self.seccomp_action, Thread::VirtioVhostNet)
+                    .map_err(ActivateError::CreateSeccompFilter)?;
             thread::Builder::new()
-                .name("vhost_user_net".to_string())
-                .spawn(move || handler.run(paused))
+                .name("vhost_net".to_string())
+                .spawn(move || {
+                    if let Err(e) = SeccompFilter::apply(virtio_vhost_net_seccomp_filter) {
+                        error!("Error applying seccomp filter: {:?}", e);
+                    } else if let Err(e) = handler.run(paused, paused_sync) {
+                        error!("Error running worker: {:?}", e);
+                    }
+                })
                 .map(|thread| epoll_threads.push(thread))
                 .map_err(|e| {
                     error!("failed to clone queue EventFd: {}", e);
