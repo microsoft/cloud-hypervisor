@@ -1012,8 +1012,9 @@ impl DeviceManager {
             let iommu_id = String::from(IOMMU_DEVICE_NAME);
 
             let (iommu_device, iommu_mapping) = if self.config.lock().unwrap().iommu {
-                let (device, mapping) = virtio_devices::Iommu::new(iommu_id.clone())
-                    .map_err(DeviceManagerError::CreateVirtioIommu)?;
+                let (device, mapping) =
+                    virtio_devices::Iommu::new(iommu_id.clone(), self.seccomp_action.clone())
+                        .map_err(DeviceManagerError::CreateVirtioIommu)?;
                 let device = Arc::new(Mutex::new(device));
                 self.iommu_device = Some(Arc::clone(&device));
 
@@ -1644,8 +1645,12 @@ impl DeviceManager {
                 queue_size: disk_cfg.queue_size,
             };
             let vhost_user_block_device = Arc::new(Mutex::new(
-                virtio_devices::vhost_user::Blk::new(id.clone(), vu_cfg)
-                    .map_err(DeviceManagerError::CreateVhostUserBlk)?,
+                virtio_devices::vhost_user::Blk::new(
+                    id.clone(),
+                    vu_cfg,
+                    self.seccomp_action.clone(),
+                )
+                .map_err(DeviceManagerError::CreateVhostUserBlk)?,
             ));
 
             // Fill the device tree with a new node. In case of restore, we
@@ -1876,8 +1881,13 @@ impl DeviceManager {
                 queue_size: net_cfg.queue_size,
             };
             let vhost_user_net_device = Arc::new(Mutex::new(
-                virtio_devices::vhost_user::Net::new(id.clone(), net_cfg.mac, vu_cfg)
-                    .map_err(DeviceManagerError::CreateVhostUserNet)?,
+                virtio_devices::vhost_user::Net::new(
+                    id.clone(),
+                    net_cfg.mac,
+                    vu_cfg,
+                    self.seccomp_action.clone(),
+                )
+                .map_err(DeviceManagerError::CreateVhostUserNet)?,
             ));
 
             // Fill the device tree with a new node. In case of restore, we
@@ -2123,6 +2133,7 @@ impl DeviceManager {
                     fs_cfg.num_queues,
                     fs_cfg.queue_size,
                     cache,
+                    self.seccomp_action.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioFs)?,
             ));
@@ -2419,6 +2430,7 @@ impl DeviceManager {
                     resize
                         .try_clone()
                         .map_err(DeviceManagerError::TryCloneVirtioMemResize)?,
+                    self.seccomp_action.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioMem)?,
             ));
@@ -2453,6 +2465,7 @@ impl DeviceManager {
                 virtio_devices::Balloon::new(
                     id.clone(),
                     self.config.lock().unwrap().memory.balloon_size,
+                    self.seccomp_action.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioBalloon)?,
             ));
@@ -3441,6 +3454,7 @@ impl Aml for DeviceManager {
                 vec![
                     &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A06")),
                     &aml::Name::new("_STA".into(), &0x0bu8),
+                    &aml::Name::new("_UID".into(), &"PCI Hotplug Controller"),
                     &aml::Mutex::new("BLCK".into(), 0),
                     // I/O port for PCI hotplug controller
                     &aml::Name::new(

@@ -43,7 +43,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vm_migration::{
@@ -193,13 +193,17 @@ where
         }
     }
 
-    fn run(&mut self, paused: Arc<AtomicBool>) -> result::Result<(), EpollHelperError> {
+    fn run(
+        &mut self,
+        paused: Arc<AtomicBool>,
+        paused_sync: Arc<Barrier>,
+    ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evts[0].as_raw_fd(), RX_QUEUE_EVENT)?;
         helper.add_event(self.queue_evts[1].as_raw_fd(), TX_QUEUE_EVENT)?;
         helper.add_event(self.queue_evts[2].as_raw_fd(), EVT_QUEUE_EVENT)?;
         helper.add_event(self.backend.read().unwrap().get_polled_fd(), BACKEND_EVENT)?;
-        helper.run(paused, self)?;
+        helper.run(paused, paused_sync, self)?;
 
         Ok(())
     }
@@ -301,8 +305,9 @@ pub struct Vsock<B: VsockBackend> {
     acked_features: u64,
     queue_evts: Option<Vec<EventFd>>,
     interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
-    epoll_threads: Option<Vec<thread::JoinHandle<result::Result<(), EpollHelperError>>>>,
+    epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
     paused: Arc<AtomicBool>,
+    paused_sync: Arc<Barrier>,
     path: PathBuf,
 }
 
@@ -343,6 +348,7 @@ where
             interrupt_cb: None,
             epoll_threads: None,
             paused: Arc::new(AtomicBool::new(false)),
+            paused_sync: Arc::new(Barrier::new(2)),
             path,
         })
     }
@@ -476,10 +482,15 @@ where
         };
 
         let paused = self.paused.clone();
+        let paused_sync = self.paused_sync.clone();
         let mut epoll_threads = Vec::new();
         thread::Builder::new()
             .name("virtio_vsock".to_string())
-            .spawn(move || handler.run(paused))
+            .spawn(move || {
+                if let Err(e) = handler.run(paused, paused_sync) {
+                    error!("Error running worker: {:?}", e);
+                }
+            })
             .map(|thread| epoll_threads.push(thread))
             .map_err(|e| {
                 error!("failed to clone the vsock epoll thread: {}", e);
