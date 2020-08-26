@@ -1,3 +1,12 @@
+//
+// Copyright © 2020, Microsoft Corporation
+//
+// SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+//
+// X86_64 instruction emulator
+//
+// Author: John Starks <jostarks@microsoft.com>
+//
 use super::x64;
 use log::error;
 use std::convert::{TryFrom, TryInto};
