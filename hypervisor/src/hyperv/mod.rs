@@ -245,6 +245,24 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
     });
 }
 
+pub fn raise_general_page_fault(fd_ref:&VcpuFd) -> std::result::Result<(), cpu::HypervisorCpuError> {
+    // inject a general protection fault by setting event pending register
+    let mut reg = hv_x64_pending_exception_event { as_uint64: [0; 2] };
+    unsafe {
+        reg.__bindgen_anon_1.set_event_pending(1);
+        // reg.__bindgen_anon_1.set_event_type(0);
+        reg.__bindgen_anon_1.set_deliver_error_code(1);
+        reg.__bindgen_anon_1.set_vector(0xd); // gpf
+    }
+    fd_ref.set_reg(
+            &[hv_register_name_hv_register_pending_event0],
+            &[hv_register_value {
+                pending_exception_event: reg,
+            }],
+        )
+        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))
+}
+
 /// Wrapper over Hyperv system ioctls.
 pub struct HypervHypervisor {
     hyperv: Hyperv,
@@ -309,6 +327,13 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         };
         fd.install_intercept(intercept_args).unwrap();
 
+        let intercept_args = hv_install_intercept_args {
+            access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+            intercept_type: hv_intercept_type_hv_intercept_type_exception,
+            intercept_parameter: hv_intercept_parameters { exception_vector: 0x6}, // INVALID OPCODE: https://wiki.osdev.org/Exceptions
+        };
+        fd.install_intercept(intercept_args).unwrap();
+
         let msr_list = self.get_msr_list()?;
         let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
         let mut msrs = MsrEntries::new(num_msrs);
@@ -329,6 +354,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
             irqfds,
             ioeventfds,
             gsi_routes,
+            hv_state: hv_state_init(),
         }))
     }
     ///
@@ -355,6 +381,7 @@ pub struct HypervVcpu {
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
+    hv_state: Arc<RwLock<HvState>>,  // Hyperv State
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -679,7 +706,7 @@ impl cpu::Vcpu for HypervVcpu {
                         let msr_value: u64 = match info.msr_number {
                             hv1::X86X_IA32_MSR_PLATFORM_ID => Some(0),
                             0x40000000..=0x4fffffff => {
-                                hv1::process_msr_read(self.vp_index as u32, info.msr_number as u32)
+                                hv1::process_msr_read(self.vp_index as u32, info.msr_number as u32, self.hv_state.clone())
                             }
                             _ => None,
                         }
@@ -709,12 +736,10 @@ impl cpu::Vcpu for HypervVcpu {
                         }
                     } else {
                         debug!("msr write: {:x}", info.msr_number);
-                        let v = info.rax & 0xffffffff | info.rdx << 32;
+                        let msr_input = info.rax & 0xffffffff | info.rdx << 32;
                         match info.msr_number {
-                            0x40000000..=0x4fffffff => {
-                                hv1::process_msr_write(self.vp_index as u32, info.msr_number, v)
-                            }
-                            _ => None,
+                            0x40000000..=0x4fffffff => hv1::process_msr_write(self.vp_index as u32, info.msr_number, msr_input, self.hv_state.clone(), vr, &self.fd),
+                            _ => None
                         }
                         .unwrap_or_else(|| {
                             debug!(
@@ -735,23 +760,14 @@ impl cpu::Vcpu for HypervVcpu {
                         }
                     }
                     if general_protection_fault {
-                        // inject a general protection fault by setting event pending register
-                        let mut reg = hv_x64_pending_exception_event { as_uint64: [0; 2] };
-                        unsafe {
-                            reg.__bindgen_anon_1.set_event_pending(1);
-                            // reg.__bindgen_anon_1.set_event_type(0);
-                            reg.__bindgen_anon_1.set_deliver_error_code(1);
-                            reg.__bindgen_anon_1.set_vector(0xd); // gpf
-                        }
-                        self.fd
-                            .set_reg(
-                                &[hv_register_name_hv_register_pending_event0],
-                                &[hv_register_value {
-                                    pending_exception_event: reg,
-                                }],
-                            )
-                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
+                        raise_general_page_fault(&self.fd)?;
                     }
+                    Ok(cpu::VmExit::Ignore)
+                }
+                hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT => {
+                    //TODO: Handler for VMCALL here.
+                    let info = x.to_exception_info();
+                    debug!("Exception Info {:?}", info.exception_vector);
                     Ok(cpu::VmExit::Ignore)
                 }
                 exit => {
@@ -878,6 +894,16 @@ pub struct HypervVm {
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     // GSI routing information
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
+    // Hypervisor State
+    hv_state: Arc<RwLock<HvState>>,
+
+}
+
+fn hv_state_init() -> Arc<RwLock<HvState>> {
+    Arc::new(RwLock::new(
+        HvState{
+        hypercall_page: 0,
+    }))
 }
 
 ///
@@ -956,6 +982,7 @@ impl vm::Vm for HypervVm {
             msrs: self.msrs.clone(),
             ioeventfds: self.ioeventfds.clone(),
             gsi_routes: self.gsi_routes.clone(),
+            hv_state: self.hv_state.clone(),
         };
         Ok(Arc::new(vcpu))
     }
@@ -1082,6 +1109,10 @@ pub struct HypervIrqRoutingEntry {
     pub route: HypervIrqRouting,
 }
 
+#[derive(Debug, Default)]
+pub struct HvState {
+    hypercall_page: u64,
+}
 pub type IrqRoutingEntry = HypervIrqRoutingEntry;
 
 pub const CPUID_FLAG_VALID_INDEX: u32 = 0;

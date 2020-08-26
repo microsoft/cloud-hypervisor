@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{cmp, io, result, thread};
 #[cfg(target_arch = "x86_64")]
-use vm_memory::GuestAddress;
+use vm_memory::{GuestAddress, GuestAddressSpace, Bytes};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -243,6 +243,8 @@ pub struct Vcpu {
     #[cfg(target_arch = "aarch64")]
     mpidr: u64,
     saved_state: Option<CpuState>,
+    guest_memory_map: GuestMemoryAtomic<GuestMemoryMmap>,
+
 }
 
 impl hypervisor::cpu::VcpuRun for Vcpu {
@@ -261,6 +263,10 @@ impl hypervisor::cpu::VcpuRun for Vcpu {
         }
         self.io_bus.write(u64::from(addr), data);
     }
+    fn write_to_guest_mem(&self, buf: &[u8], gpa:u64) -> hypervisor::cpu::Result<usize>{
+        let guest_memory = self.guest_memory_map.memory();
+        guest_memory.write(buf, GuestAddress(gpa)).map_err(|e| hypervisor::cpu::HypervisorCpuError::GuestMemWrite(e.into()))
+    }
 }
 
 impl Vcpu {
@@ -277,6 +283,7 @@ impl Vcpu {
         mmio_bus: Arc<devices::Bus>,
         interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
         creation_ts: std::time::Instant,
+        guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<Arc<Mutex<Self>>> {
         let vcpu = vm
             .create_vcpu(id)
@@ -293,6 +300,7 @@ impl Vcpu {
             #[cfg(target_arch = "aarch64")]
             mpidr: 0,
             saved_state: None,
+            guest_memory_map: guest_memory,
         })))
     }
 
@@ -734,6 +742,7 @@ impl CpuManager {
             self.mmio_bus.clone(),
             interrupt_controller,
             creation_ts,
+            self.vm_memory.clone(),
         )?;
 
         if let Some(snapshot) = snapshot {

@@ -16,6 +16,7 @@ use crate::x86_64::{CpuId, LapicState};
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
+use crate::cpu;
 use crate::CpuState;
 #[cfg(feature = "kvm")]
 use crate::{MpState, Xsave};
@@ -170,6 +171,11 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to set registers: {0}")]
     SetReg(#[source] anyhow::Error),
+    ///
+    /// Write to Guest Mem
+    ///
+    #[error("Failed to write to Guest Mem at: {0}")]
+    GuestMemWrite(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -340,4 +346,5 @@ pub trait VcpuRun {
     fn mmio_write(&self, addr: u64, data: &[u8]);
     fn pio_in(&self, addr: u64, data: &mut [u8]);
     fn pio_out(&self, addr: u64, data: &[u8]);
+    fn write_to_guest_mem(&self, buf: &[u8], gpa:u64,) -> cpu::Result<usize>;
 }
