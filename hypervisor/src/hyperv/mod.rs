@@ -145,14 +145,14 @@ impl IrqfdCtrlEpollHandler {
 
 // Translate from architectural defined delivery mode to Hyper-V type
 // See Intel SDM vol3 10.11.2
-fn get_interrupt_type(delivery_mode: u8) -> Option<HV_INTERRUPT_TYPE> {
+fn get_interrupt_type(delivery_mode: u8) -> Option<hv_interrupt_type> {
     match delivery_mode {
-        0 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeFixed),
-        1 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeLowestPriority),
-        2 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeSmi),
-        4 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeNmi),
-        5 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeInit),
-        7 => Some(HV_INTERRUPT_TYPE_HvX64InterruptTypeExtInt),
+        0 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_FIXED),
+        1 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_LOWESTPRIORITY),
+        2 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_SMI),
+        4 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_NMI),
+        5 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_INIT),
+        7 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT),
         _ => None,
     }
 }
@@ -245,7 +245,9 @@ fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
     });
 }
 
-pub fn raise_general_page_fault(fd_ref:&VcpuFd) -> std::result::Result<(), cpu::HypervisorCpuError> {
+pub fn raise_general_page_fault(
+    fd_ref: &VcpuFd,
+) -> std::result::Result<(), cpu::HypervisorCpuError> {
     // inject a general protection fault by setting event pending register
     let mut reg = hv_x64_pending_exception_event { as_uint64: [0; 2] };
     unsafe {
@@ -254,8 +256,9 @@ pub fn raise_general_page_fault(fd_ref:&VcpuFd) -> std::result::Result<(), cpu::
         reg.__bindgen_anon_1.set_deliver_error_code(1);
         reg.__bindgen_anon_1.set_vector(0xd); // gpf
     }
-    fd_ref.set_reg(
-            &[hv_register_name_hv_register_pending_event0],
+    fd_ref
+        .set_reg(
+            &[hv_register_name::HV_REGISTER_PENDING_EVENT0],
             &[hv_register_value {
                 pending_exception_event: reg,
             }],
@@ -315,22 +318,24 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         /* Install enlightenment intercepts */
         let intercept_args = hv_install_intercept_args {
             access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type: hv_intercept_type_hv_intercept_type_x64_global_cpuid,
+            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_GLOBAL_CPUID,
             intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
         let intercept_args = hv_install_intercept_args {
             access_type: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
-            intercept_type: hv_intercept_type_hv_intercept_type_x64_msr,
+            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_MSR,
             intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
         let intercept_args = hv_install_intercept_args {
             access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type: hv_intercept_type_hv_intercept_type_exception,
-            intercept_parameter: hv_intercept_parameters { exception_vector: 0x6}, // INVALID OPCODE: https://wiki.osdev.org/Exceptions
+            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION,
+            intercept_parameter: hv_intercept_parameters {
+                exception_vector: 0x6,
+            }, // INVALID OPCODE: https://wiki.osdev.org/Exceptions
         };
         fd.install_intercept(intercept_args).unwrap();
 
@@ -381,7 +386,7 @@ pub struct HypervVcpu {
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
-    hv_state: Arc<RwLock<HvState>>,  // Hyperv State
+    hv_state: Arc<RwLock<HvState>>, // Hyperv State
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -565,10 +570,10 @@ impl cpu::Vcpu for HypervVcpu {
                     /* Advance RIP and update RAX */
                     let arr_reg_name_value = [
                         (
-                            hv_register_name_hv_x64_register_rip,
+                            hv_register_name::HV_X64_REGISTER_RIP,
                             info.header.rip + insn_len,
                         ),
-                        (hv_register_name_hv_x64_register_rax, ret_rax),
+                        (hv_register_name::HV_X64_REGISTER_RAX, ret_rax),
                     ];
                     set_registers_64!(self.fd, arr_reg_name_value)
                         .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
@@ -687,11 +692,11 @@ impl cpu::Vcpu for HypervVcpu {
                         ),
                     };
                     let arr_reg_name_value = [
-                        (hv_register_name_hv_x64_register_rip, info.header.rip + 2),
-                        (hv_register_name_hv_x64_register_rax, rax as u64),
-                        (hv_register_name_hv_x64_register_rbx, rbx as u64),
-                        (hv_register_name_hv_x64_register_rcx, rcx as u64),
-                        (hv_register_name_hv_x64_register_rdx, rdx as u64),
+                        (hv_register_name::HV_X64_REGISTER_RIP, info.header.rip + 2),
+                        (hv_register_name::HV_X64_REGISTER_RAX, rax as u64),
+                        (hv_register_name::HV_X64_REGISTER_RBX, rbx as u64),
+                        (hv_register_name::HV_X64_REGISTER_RCX, rcx as u64),
+                        (hv_register_name::HV_X64_REGISTER_RDX, rdx as u64),
                     ];
                     set_registers_64!(self.fd, arr_reg_name_value)
                         .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
@@ -705,9 +710,11 @@ impl cpu::Vcpu for HypervVcpu {
                         debug!("msr read: {:x}", info.msr_number);
                         let msr_value: u64 = match info.msr_number {
                             hv1::X86X_IA32_MSR_PLATFORM_ID => Some(0),
-                            0x40000000..=0x4fffffff => {
-                                hv1::process_msr_read(self.vp_index as u32, info.msr_number as u32, self.hv_state.clone())
-                            }
+                            0x40000000..=0x4fffffff => hv1::process_msr_read(
+                                self.vp_index as u32,
+                                info.msr_number as u32,
+                                self.hv_state.clone(),
+                            ),
                             _ => None,
                         }
                         .unwrap_or_else(|| {
@@ -725,11 +732,11 @@ impl cpu::Vcpu for HypervVcpu {
                                 self.fd,
                                 &[
                                     (
-                                        hv_register_name_hv_x64_register_rip,
+                                        hv_register_name::HV_X64_REGISTER_RIP,
                                         info.header.rip + insn_len
                                     ),
-                                    (hv_register_name_hv_x64_register_rax, rax as u64),
-                                    (hv_register_name_hv_x64_register_rdx, rdx as u64),
+                                    (hv_register_name::HV_X64_REGISTER_RAX, rax as u64),
+                                    (hv_register_name::HV_X64_REGISTER_RDX, rdx as u64),
                                 ]
                             )
                             .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
@@ -738,8 +745,15 @@ impl cpu::Vcpu for HypervVcpu {
                         debug!("msr write: {:x}", info.msr_number);
                         let msr_input = info.rax & 0xffffffff | info.rdx << 32;
                         match info.msr_number {
-                            0x40000000..=0x4fffffff => hv1::process_msr_write(self.vp_index as u32, info.msr_number, msr_input, self.hv_state.clone(), vr, &self.fd),
-                            _ => None
+                            0x40000000..=0x4fffffff => hv1::process_msr_write(
+                                self.vp_index as u32,
+                                info.msr_number,
+                                msr_input,
+                                self.hv_state.clone(),
+                                vr,
+                                &self.fd,
+                            ),
+                            _ => None,
                         }
                         .unwrap_or_else(|| {
                             debug!(
@@ -752,7 +766,7 @@ impl cpu::Vcpu for HypervVcpu {
                             set_registers_64!(
                                 self.fd,
                                 &[(
-                                    hv_register_name_hv_x64_register_rip,
+                                    hv_register_name::HV_X64_REGISTER_RIP,
                                     info.header.rip + insn_len
                                 )]
                             )
@@ -862,25 +876,25 @@ impl cpu::Vcpu for HypervVcpu {
 
 fn emu_reg64_to_hv_reg64(name: emulator::Register64) -> hv_register_name {
     match name {
-        emulator::Register64::Rax => hv_register_name_hv_x64_register_rax,
-        emulator::Register64::Rcx => hv_register_name_hv_x64_register_rcx,
-        emulator::Register64::Rdx => hv_register_name_hv_x64_register_rdx,
-        emulator::Register64::Rbx => hv_register_name_hv_x64_register_rbx,
-        emulator::Register64::Rsp => hv_register_name_hv_x64_register_rsp,
-        emulator::Register64::Rbp => hv_register_name_hv_x64_register_rbp,
-        emulator::Register64::Rsi => hv_register_name_hv_x64_register_rsi,
-        emulator::Register64::Rdi => hv_register_name_hv_x64_register_rdi,
-        emulator::Register64::R8 => hv_register_name_hv_x64_register_r8,
-        emulator::Register64::R9 => hv_register_name_hv_x64_register_r9,
-        emulator::Register64::R10 => hv_register_name_hv_x64_register_r10,
-        emulator::Register64::R11 => hv_register_name_hv_x64_register_r11,
-        emulator::Register64::R12 => hv_register_name_hv_x64_register_r12,
-        emulator::Register64::R13 => hv_register_name_hv_x64_register_r13,
-        emulator::Register64::R14 => hv_register_name_hv_x64_register_r14,
-        emulator::Register64::R15 => hv_register_name_hv_x64_register_r15,
-        emulator::Register64::Rip => hv_register_name_hv_x64_register_rip,
-        emulator::Register64::Cr0 => hv_register_name_hv_x64_register_cr0,
-        emulator::Register64::Efer => hv_register_name_hv_x64_register_efer,
+        emulator::Register64::Rax => hv_register_name::HV_X64_REGISTER_RAX,
+        emulator::Register64::Rcx => hv_register_name::HV_X64_REGISTER_RCX,
+        emulator::Register64::Rdx => hv_register_name::HV_X64_REGISTER_RDX,
+        emulator::Register64::Rbx => hv_register_name::HV_X64_REGISTER_RBX,
+        emulator::Register64::Rsp => hv_register_name::HV_X64_REGISTER_RSP,
+        emulator::Register64::Rbp => hv_register_name::HV_X64_REGISTER_RBP,
+        emulator::Register64::Rsi => hv_register_name::HV_X64_REGISTER_RSI,
+        emulator::Register64::Rdi => hv_register_name::HV_X64_REGISTER_RDI,
+        emulator::Register64::R8 => hv_register_name::HV_X64_REGISTER_R8,
+        emulator::Register64::R9 => hv_register_name::HV_X64_REGISTER_R9,
+        emulator::Register64::R10 => hv_register_name::HV_X64_REGISTER_R10,
+        emulator::Register64::R11 => hv_register_name::HV_X64_REGISTER_R11,
+        emulator::Register64::R12 => hv_register_name::HV_X64_REGISTER_R12,
+        emulator::Register64::R13 => hv_register_name::HV_X64_REGISTER_R13,
+        emulator::Register64::R14 => hv_register_name::HV_X64_REGISTER_R14,
+        emulator::Register64::R15 => hv_register_name::HV_X64_REGISTER_R15,
+        emulator::Register64::Rip => hv_register_name::HV_X64_REGISTER_RIP,
+        emulator::Register64::Cr0 => hv_register_name::HV_X64_REGISTER_CR0,
+        emulator::Register64::Efer => hv_register_name::HV_X64_REGISTER_EFER,
     }
 }
 
@@ -896,14 +910,10 @@ pub struct HypervVm {
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
-
 }
 
 fn hv_state_init() -> Arc<RwLock<HvState>> {
-    Arc::new(RwLock::new(
-        HvState{
-        hypercall_page: 0,
-    }))
+    Arc::new(RwLock::new(HvState { hypercall_page: 0 }))
 }
 
 ///
