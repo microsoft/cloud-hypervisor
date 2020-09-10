@@ -52,20 +52,20 @@ pub enum HypervisorError {
     #[error("Failed to get number of max vcpus: {0}")]
     GetMaxVcpu(#[source] anyhow::Error),
     ///
-    /// Recommended Vcpu error
-    ///
-    #[error("Failed to get number of max vcpus: {0}")]
-    GetNrVcpus(#[source] anyhow::Error),
-    ///
     /// CpuId error
     ///
-    #[error("Failed to get number of max vcpus: {0}")]
+    #[error("Failed to get cpuid: {0}")]
     GetCpuId(#[source] anyhow::Error),
     ///
     /// Failed to retrieve list of MSRs.
     ///
     #[error("Failed to get the list of supported MSRs: {0}")]
     GetMsrList(#[source] anyhow::Error),
+    ///
+    /// API version is not compatible
+    ///
+    #[error("Incompatible API version")]
+    IncompatibleApiVersion,
 }
 
 ///
@@ -84,11 +84,6 @@ pub trait Hypervisor: Send + Sync {
     /// Return a hypervisor-agnostic Vm trait object
     ///
     fn create_vm(&self) -> Result<Arc<dyn Vm>>;
-    #[cfg(feature = "kvm")]
-    ///
-    /// Get the API version of the hypervisor
-    ///
-    fn get_api_version(&self) -> i32;
     #[cfg(feature = "kvm")]
     ///
     /// Returns the size of the memory mapping required to use the vcpu's structures

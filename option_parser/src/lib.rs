@@ -143,6 +143,7 @@ impl FromStr for Toggle {
 
 pub struct ByteSized(pub u64);
 
+#[derive(Debug)]
 pub enum ByteSizedParseError {
     InvalidValue(String),
 }
@@ -168,5 +169,99 @@ impl FromStr for ByteSized {
                 .map_err(|_| ByteSizedParseError::InvalidValue(s.to_owned()))?
                 << shift
         }))
+    }
+}
+
+pub struct IntegerList(pub Vec<u64>);
+
+pub enum IntegerListParseError {
+    InvalidValue(String),
+}
+
+impl FromStr for IntegerList {
+    type Err = IntegerListParseError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let mut integer_list = Vec::new();
+        let ranges_list: Vec<&str> = s.trim().split(':').collect();
+
+        for range in ranges_list.iter() {
+            let items: Vec<&str> = range.split('-').collect();
+
+            if items.len() > 2 {
+                return Err(IntegerListParseError::InvalidValue(range.to_string()));
+            }
+
+            let start_range = items[0]
+                .parse::<u64>()
+                .map_err(|_| IntegerListParseError::InvalidValue(items[0].to_owned()))?;
+
+            integer_list.push(start_range);
+
+            if items.len() == 2 {
+                let end_range = items[1]
+                    .parse::<u64>()
+                    .map_err(|_| IntegerListParseError::InvalidValue(items[1].to_owned()))?;
+                if start_range >= end_range {
+                    return Err(IntegerListParseError::InvalidValue(range.to_string()));
+                }
+
+                for i in start_range..end_range {
+                    integer_list.push(i + 1);
+                }
+            }
+        }
+
+        Ok(IntegerList(integer_list))
+    }
+}
+
+pub struct TupleTwoIntegers(pub Vec<(u64, u64)>);
+
+pub enum TupleTwoIntegersParseError {
+    InvalidValue(String),
+}
+
+impl FromStr for TupleTwoIntegers {
+    type Err = TupleTwoIntegersParseError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let mut list = Vec::new();
+        let tuples_list: Vec<&str> = s.trim().split(':').collect();
+
+        for tuple in tuples_list.iter() {
+            let items: Vec<&str> = tuple.split('@').collect();
+
+            if items.len() != 2 {
+                return Err(TupleTwoIntegersParseError::InvalidValue(tuple.to_string()));
+            }
+
+            let item1 = items[0]
+                .parse::<u64>()
+                .map_err(|_| TupleTwoIntegersParseError::InvalidValue(items[0].to_owned()))?;
+            let item2 = items[1]
+                .parse::<u64>()
+                .map_err(|_| TupleTwoIntegersParseError::InvalidValue(items[1].to_owned()))?;
+
+            list.push((item1, item2));
+        }
+
+        Ok(TupleTwoIntegers(list))
+    }
+}
+
+pub struct StringList(pub Vec<String>);
+
+pub enum StringListParseError {
+    InvalidValue(String),
+}
+
+impl FromStr for StringList {
+    type Err = StringListParseError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let string_list: Vec<String> = s.trim().split(':').map(|e| e.to_owned()).collect();
+
+        Ok(StringList(string_list))
     }
 }

@@ -23,6 +23,8 @@ extern crate signal_hook;
 extern crate vm_allocator;
 extern crate vm_memory;
 
+#[cfg(feature = "acpi")]
+use crate::config::NumaConfig;
 use crate::config::{
     DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig, ValidationError,
     VmConfig, VsockConfig,
@@ -47,7 +49,7 @@ use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 use linux_loader::loader::KernelLoader;
 use seccomp::SeccompAction;
 use signal_hook::{iterator::Signals, SIGINT, SIGTERM, SIGWINCH};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
@@ -59,7 +61,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
 use url::Url;
-use vm_memory::{Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryMmap};
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryMmap, GuestRegionMmap,
+};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
     Transportable,
@@ -195,8 +199,34 @@ pub enum Error {
 
     /// Failed serializing into JSON
     SerializeJson(serde_json::Error),
+
+    /// Invalid configuration for NUMA.
+    InvalidNumaConfig,
 }
 pub type Result<T> = result::Result<T, Error>;
+
+#[derive(Clone)]
+pub struct NumaNode {
+    memory_regions: Vec<Arc<GuestRegionMmap>>,
+    cpus: Vec<u8>,
+    distances: BTreeMap<u32, u8>,
+}
+
+impl NumaNode {
+    pub fn memory_regions(&self) -> &Vec<Arc<GuestRegionMmap>> {
+        &self.memory_regions
+    }
+
+    pub fn cpus(&self) -> &Vec<u8> {
+        &self.cpus
+    }
+
+    pub fn distances(&self) -> &BTreeMap<u32, u8> {
+        &self.distances
+    }
+}
+
+pub type NumaNodes = BTreeMap<u32, NumaNode>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum VmState {
@@ -251,12 +281,13 @@ pub struct Vm {
     state: RwLock<VmState>,
     cpu_manager: Arc<Mutex<cpu::CpuManager>>,
     memory_manager: Arc<Mutex<MemoryManager>>,
-    #[cfg(target_arch = "x86_64")]
     #[cfg_attr(not(feature = "kvm"), allow(dead_code))]
     // The hypervisor abstracted virtual machine.
     vm: Arc<dyn hypervisor::Vm>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     saved_clock: Option<hypervisor::ClockData>,
+    #[cfg(feature = "acpi")]
+    numa_nodes: NumaNodes,
 }
 
 impl Vm {
@@ -314,6 +345,11 @@ impl Vm {
             .transpose()
             .map_err(Error::InitramfsFile)?;
 
+        // Create NUMA nodes based on NumaConfig.
+        #[cfg(feature = "acpi")]
+        let numa_nodes =
+            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+
         Ok(Vm {
             kernel,
             initramfs,
@@ -325,11 +361,77 @@ impl Vm {
             state: RwLock::new(VmState::Created),
             cpu_manager,
             memory_manager,
-            #[cfg(target_arch = "x86_64")]
             vm,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             saved_clock: _saved_clock,
+            #[cfg(feature = "acpi")]
+            numa_nodes,
         })
+    }
+
+    #[cfg(feature = "acpi")]
+    fn create_numa_nodes(
+        configs: Option<Vec<NumaConfig>>,
+        memory_manager: &Arc<Mutex<MemoryManager>>,
+    ) -> Result<NumaNodes> {
+        let mm = memory_manager.lock().unwrap();
+        let mm_zones = mm.memory_zones();
+        let mut numa_nodes = BTreeMap::new();
+
+        if let Some(configs) = &configs {
+            let node_id_list: Vec<u32> = configs.iter().map(|cfg| cfg.guest_numa_id).collect();
+
+            for config in configs.iter() {
+                if numa_nodes.contains_key(&config.guest_numa_id) {
+                    error!("Can't define twice the same NUMA node");
+                    return Err(Error::InvalidNumaConfig);
+                }
+
+                let mut node = NumaNode {
+                    memory_regions: Vec::new(),
+                    cpus: Vec::new(),
+                    distances: BTreeMap::new(),
+                };
+
+                if let Some(memory_zones) = &config.memory_zones {
+                    for memory_zone in memory_zones.iter() {
+                        if let Some(mm_zone) = mm_zones.get(memory_zone) {
+                            node.memory_regions.extend(mm_zone.clone());
+                        } else {
+                            error!("Unknown memory zone '{}'", memory_zone);
+                            return Err(Error::InvalidNumaConfig);
+                        }
+                    }
+                }
+
+                if let Some(cpus) = &config.cpus {
+                    node.cpus.extend(cpus);
+                }
+
+                if let Some(distances) = &config.distances {
+                    for distance in distances.iter() {
+                        let dest = distance.destination;
+                        let dist = distance.distance;
+
+                        if !node_id_list.contains(&dest) {
+                            error!("Unknown destination NUMA node {}", dest);
+                            return Err(Error::InvalidNumaConfig);
+                        }
+
+                        if node.distances.contains_key(&dest) {
+                            error!("Destination NUMA node {} has been already set", dest);
+                            return Err(Error::InvalidNumaConfig);
+                        }
+
+                        node.distances.insert(dest, dist);
+                    }
+                }
+
+                numa_nodes.insert(config.guest_numa_id, node);
+            }
+        }
+
+        Ok(numa_nodes)
     }
 
     pub fn new(
@@ -406,7 +508,11 @@ impl Vm {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         vm.enable_split_irq().unwrap();
         let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
-        let config = vm_snapshot.config.clone();
+        let config = vm_snapshot.config;
+        if let Some(state) = vm_snapshot.state {
+            vm.set_state(&state)
+                .map_err(|e| Error::Restore(MigratableError::Restore(e.into())))?;
+        }
 
         let memory_manager = if let Some(memory_manager_snapshot) =
             snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID)
@@ -587,6 +693,7 @@ impl Vm {
                 &self.device_manager,
                 &self.cpu_manager,
                 &self.memory_manager,
+                &self.numa_nodes,
             ));
         }
 
@@ -1259,6 +1366,7 @@ pub struct VmSnapshot {
     pub config: Arc<Mutex<VmConfig>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     pub clock: Option<hypervisor::ClockData>,
+    pub state: Option<hypervisor::VmState>,
 }
 
 pub const VM_SNAPSHOT_ID: &str = "vm";
@@ -1267,7 +1375,7 @@ impl Snapshottable for Vm {
         VM_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let current_state = self.get_state().unwrap();
         if current_state != VmState::Paused {
             return Err(MigratableError::Snapshot(anyhow!(
@@ -1276,10 +1384,15 @@ impl Snapshottable for Vm {
         }
 
         let mut vm_snapshot = Snapshot::new(VM_SNAPSHOT_ID);
+        let vm_state = self
+            .vm
+            .state()
+            .map_err(|e| MigratableError::Snapshot(e.into()))?;
         let vm_snapshot_data = serde_json::to_vec(&VmSnapshot {
             config: self.get_config(),
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             clock: self.saved_clock,
+            state: Some(vm_state),
         })
         .map_err(|e| MigratableError::Snapshot(e.into()))?;
 
@@ -1571,7 +1684,7 @@ mod tests {
             &CString::new("console=tty0").unwrap(),
             vec![0],
             &dev_info,
-            &gic,
+            &*gic,
             &None,
             &None,
         )

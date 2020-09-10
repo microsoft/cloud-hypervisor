@@ -10,7 +10,6 @@
 // See https://pdos.csail.mit.edu/6.828/2016/readings/ia32/ioapic.pdf for a specification.
 
 use super::interrupt_controller::{Error, InterruptController};
-use crate::BusDevice;
 use anyhow::anyhow;
 use byteorder::{ByteOrder, LittleEndian};
 use std::result;
@@ -19,6 +18,7 @@ use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup,
     MsiIrqGroupConfig, MsiIrqSourceConfig,
 };
+use vm_device::BusDevice;
 use vm_memory::GuestAddress;
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -405,7 +405,7 @@ impl Snapshottable for Ioapic {
         self.id.clone()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot =
             serde_json::to_vec(&self.state()).map_err(|e| MigratableError::Snapshot(e.into()))?;
 

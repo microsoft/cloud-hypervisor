@@ -158,7 +158,7 @@ impl MsixConfig {
         self.masked = ((reg >> FUNCTION_MASK_BIT) & 1u16) == 1u16;
         self.enabled = ((reg >> MSIX_ENABLE_BIT) & 1u16) == 1u16;
 
-        // Update KVM routes
+        // Update interrupt routing
         if old_masked != self.masked || old_enabled != self.enabled {
             if self.enabled && !self.masked {
                 for (idx, table_entry) in self.table_entries.iter().enumerate() {
@@ -437,7 +437,7 @@ impl Snapshottable for MsixConfig {
         String::from("msix_config")
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot =
             serde_json::to_vec(&self.state()).map_err(|e| MigratableError::Snapshot(e.into()))?;
 

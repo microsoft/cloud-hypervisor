@@ -5,7 +5,9 @@
 
 use clap::ArgMatches;
 use net_util::MacAddr;
-use option_parser::{ByteSized, OptionParser, OptionParserError, Toggle};
+use option_parser::{
+    ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, TupleTwoIntegers,
+};
 use std::convert::From;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -42,6 +44,10 @@ pub enum Error {
     ParseCpus(OptionParserError),
     /// Error parsing memory options
     ParseMemory(OptionParserError),
+    /// Error parsing memory zone options
+    ParseMemoryZone(OptionParserError),
+    /// Missing 'id' from memory zone
+    ParseMemoryZoneIdMissing,
     /// Error parsing disk options
     ParseDisk(OptionParserError),
     /// Error parsing network options
@@ -67,6 +73,8 @@ pub enum Error {
     /// Failed to parse SGX EPC parameters
     #[cfg(target_arch = "x86_64")]
     ParseSgxEpc(OptionParserError),
+    /// Failed to parse NUMA parameters
+    ParseNuma(OptionParserError),
     /// Failed to validate configuration
     Validation(ValidationError),
 }
@@ -147,12 +155,15 @@ impl fmt::Display for Error {
             ParseVsockCidMissing => write!(f, "Error parsing --vsock: cid missing"),
             ParseVsockSockMissing => write!(f, "Error parsing --vsock: socket missing"),
             ParseMemory(o) => write!(f, "Error parsing --memory: {}", o),
+            ParseMemoryZone(o) => write!(f, "Error parsing --memory-zone: {}", o),
+            ParseMemoryZoneIdMissing => write!(f, "Error parsing --memory-zone: id missing"),
             ParseNetwork(o) => write!(f, "Error parsing --net: {}", o),
             ParseDisk(o) => write!(f, "Error parsing --disk: {}", o),
             ParseRNG(o) => write!(f, "Error parsing --rng: {}", o),
             ParseRestore(o) => write!(f, "Error parsing --restore: {}", o),
             #[cfg(target_arch = "x86_64")]
             ParseSgxEpc(o) => write!(f, "Error parsing --sgx-epc: {}", o),
+            ParseNuma(o) => write!(f, "Error parsing --numa: {}", o),
             ParseRestoreSourceUrlMissing => {
                 write!(f, "Error parsing --restore: source_url missing")
             }
@@ -166,6 +177,7 @@ pub type Result<T> = result::Result<T, Error>;
 pub struct VmParams<'a> {
     pub cpus: &'a str,
     pub memory: &'a str,
+    pub memory_zones: Option<Vec<&'a str>>,
     pub kernel: Option<&'a str>,
     pub initramfs: Option<&'a str>,
     pub cmdline: Option<&'a str>,
@@ -180,6 +192,7 @@ pub struct VmParams<'a> {
     pub vsock: Option<&'a str>,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
+    pub numa: Option<Vec<&'a str>>,
 }
 
 impl<'a> VmParams<'a> {
@@ -187,6 +200,7 @@ impl<'a> VmParams<'a> {
         // These .unwrap()s cannot fail as there is a default value defined
         let cpus = args.value_of("cpus").unwrap();
         let memory = args.value_of("memory").unwrap();
+        let memory_zones: Option<Vec<&str>> = args.values_of("memory-zone").map(|x| x.collect());
         let rng = args.value_of("rng").unwrap();
         let serial = args.value_of("serial").unwrap();
 
@@ -203,10 +217,12 @@ impl<'a> VmParams<'a> {
         let vsock: Option<&str> = args.value_of("vsock");
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
+        let numa: Option<Vec<&str>> = args.values_of("numa").map(|x| x.collect());
 
         VmParams {
             cpus,
             memory,
+            memory_zones,
             kernel,
             initramfs,
             cmdline,
@@ -221,6 +237,7 @@ impl<'a> VmParams<'a> {
             vsock,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
+            numa,
         }
     }
 }
@@ -338,10 +355,22 @@ impl Default for CpusConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct MemoryConfig {
+pub struct MemoryZoneConfig {
+    pub id: String,
     pub size: u64,
     #[serde(default)]
     pub file: Option<PathBuf>,
+    #[serde(default)]
+    pub shared: bool,
+    #[serde(default)]
+    pub hugepages: bool,
+    #[serde(default)]
+    pub host_numa_node: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    pub size: u64,
     #[serde(default)]
     pub mergeable: bool,
     #[serde(default)]
@@ -356,10 +385,12 @@ pub struct MemoryConfig {
     pub balloon: bool,
     #[serde(default)]
     pub balloon_size: u64,
+    #[serde(default)]
+    pub zones: Option<Vec<MemoryZoneConfig>>,
 }
 
 impl MemoryConfig {
-    pub fn parse(memory: &str) -> Result<Self> {
+    pub fn parse(memory: &str, memory_zones: Option<Vec<&str>>) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("size")
@@ -377,7 +408,6 @@ impl MemoryConfig {
             .map_err(Error::ParseMemory)?
             .unwrap_or(ByteSized(DEFAULT_MEMORY_MB << 20))
             .0;
-        let file = parser.get("file").map(PathBuf::from);
         let mergeable = parser
             .convert::<Toggle>("mergeable")
             .map_err(Error::ParseMemory)?
@@ -407,9 +437,56 @@ impl MemoryConfig {
             .unwrap_or(Toggle(false))
             .0;
 
+        let zones: Option<Vec<MemoryZoneConfig>> = if let Some(memory_zones) = &memory_zones {
+            let mut zones = Vec::new();
+            for memory_zone in memory_zones.iter() {
+                let mut parser = OptionParser::new();
+                parser
+                    .add("id")
+                    .add("size")
+                    .add("file")
+                    .add("shared")
+                    .add("hugepages")
+                    .add("host_numa_node");
+                parser.parse(memory_zone).map_err(Error::ParseMemoryZone)?;
+
+                let id = parser.get("id").ok_or(Error::ParseMemoryZoneIdMissing)?;
+                let size = parser
+                    .convert::<ByteSized>("size")
+                    .map_err(Error::ParseMemoryZone)?
+                    .unwrap_or(ByteSized(DEFAULT_MEMORY_MB << 20))
+                    .0;
+                let file = parser.get("file").map(PathBuf::from);
+                let shared = parser
+                    .convert::<Toggle>("shared")
+                    .map_err(Error::ParseMemoryZone)?
+                    .unwrap_or(Toggle(false))
+                    .0;
+                let hugepages = parser
+                    .convert::<Toggle>("hugepages")
+                    .map_err(Error::ParseMemoryZone)?
+                    .unwrap_or(Toggle(false))
+                    .0;
+                let host_numa_node = parser
+                    .convert::<u32>("host_numa_node")
+                    .map_err(Error::ParseMemoryZone)?;
+
+                zones.push(MemoryZoneConfig {
+                    id,
+                    size,
+                    file,
+                    shared,
+                    hugepages,
+                    host_numa_node,
+                });
+            }
+            Some(zones)
+        } else {
+            None
+        };
+
         Ok(MemoryConfig {
             size,
-            file,
             mergeable,
             hotplug_method,
             hotplug_size,
@@ -417,6 +494,7 @@ impl MemoryConfig {
             hugepages,
             balloon,
             balloon_size: 0,
+            zones,
         })
     }
 }
@@ -425,7 +503,6 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         MemoryConfig {
             size: DEFAULT_MEMORY_MB << 20,
-            file: None,
             mergeable: false,
             hotplug_method: HotplugMethod::Acpi,
             hotplug_size: None,
@@ -433,6 +510,7 @@ impl Default for MemoryConfig {
             hugepages: false,
             balloon: false,
             balloon_size: 0,
+            zones: None,
         }
     }
 }
@@ -1135,6 +1213,72 @@ impl SgxEpcConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+pub struct NumaDistance {
+    #[serde(default)]
+    pub destination: u32,
+    #[serde(default)]
+    pub distance: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+pub struct NumaConfig {
+    #[serde(default)]
+    pub guest_numa_id: u32,
+    #[serde(default)]
+    pub cpus: Option<Vec<u8>>,
+    #[serde(default)]
+    pub distances: Option<Vec<NumaDistance>>,
+    #[serde(default)]
+    pub memory_zones: Option<Vec<String>>,
+}
+
+impl NumaConfig {
+    pub const SYNTAX: &'static str = "Settings related to a given NUMA node \
+        \"guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,\
+        memory_zones=<list_of_memory_zones>\"";
+    pub fn parse(numa: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser
+            .add("guest_numa_id")
+            .add("cpus")
+            .add("distances")
+            .add("memory_zones");
+        parser.parse(numa).map_err(Error::ParseNuma)?;
+
+        let guest_numa_id = parser
+            .convert::<u32>("guest_numa_id")
+            .map_err(Error::ParseNuma)?
+            .unwrap_or(0);
+        let cpus = parser
+            .convert::<IntegerList>("cpus")
+            .map_err(Error::ParseNuma)?
+            .map(|v| v.0.iter().map(|e| *e as u8).collect());
+        let distances = parser
+            .convert::<TupleTwoIntegers>("distances")
+            .map_err(Error::ParseNuma)?
+            .map(|v| {
+                v.0.iter()
+                    .map(|(e1, e2)| NumaDistance {
+                        destination: *e1 as u32,
+                        distance: *e2 as u8,
+                    })
+                    .collect()
+            });
+        let memory_zones = parser
+            .convert::<StringList>("memory_zones")
+            .map_err(Error::ParseNuma)?
+            .map(|v| v.0);
+
+        Ok(NumaConfig {
+            guest_numa_id,
+            cpus,
+            distances,
+            memory_zones,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub struct RestoreConfig {
     pub source_url: PathBuf,
     #[serde(default)]
@@ -1195,6 +1339,7 @@ pub struct VmConfig {
     pub iommu: bool,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<SgxEpcConfig>>,
+    pub numa: Option<Vec<NumaConfig>>,
 }
 
 impl VmConfig {
@@ -1216,10 +1361,6 @@ impl VmConfig {
 
         if self.cpus.max_vcpus < self.cpus.boot_vcpus {
             return Err(ValidationError::CpusMaxLowerThanBoot);
-        }
-
-        if self.memory.file.is_some() {
-            error!("Use of backing file ('--memory file=') is deprecated. Use the 'shared' and 'hugepages' controls.");
         }
 
         if let Some(disks) = &self.disks {
@@ -1372,6 +1513,16 @@ impl VmConfig {
             }
         }
 
+        let mut numa: Option<Vec<NumaConfig>> = None;
+        if let Some(numa_list) = &vm_params.numa {
+            let mut numa_config_list = Vec::new();
+            for item in numa_list.iter() {
+                let numa_config = NumaConfig::parse(item)?;
+                numa_config_list.push(numa_config);
+            }
+            numa = Some(numa_config_list);
+        }
+
         let mut kernel: Option<KernelConfig> = None;
         if let Some(k) = vm_params.kernel {
             kernel = Some(KernelConfig {
@@ -1388,7 +1539,7 @@ impl VmConfig {
 
         let config = VmConfig {
             cpus: CpusConfig::parse(vm_params.cpus)?,
-            memory: MemoryConfig::parse(vm_params.memory)?,
+            memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
             kernel,
             initramfs,
             cmdline: CmdlineConfig::parse(vm_params.cmdline)?,
@@ -1404,6 +1555,7 @@ impl VmConfig {
             iommu,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
+            numa,
         };
         config.validate().map_err(Error::Validation)?;
         Ok(config)
@@ -1419,21 +1571,16 @@ mod tests {
         let mut parser = OptionParser::new();
         parser
             .add("size")
-            .add("file")
             .add("mergeable")
             .add("hotplug_method")
             .add("hotplug_size");
 
-        assert!(parser
-            .parse("size=128M,file=/dev/shm,hanging_param")
-            .is_err());
-        assert!(parser
-            .parse("size=128M,file=/dev/shm,too_many_equals=foo=bar")
-            .is_err());
-        assert!(parser.parse("size=128M,file=/dev/shm").is_ok());
+        assert!(parser.parse("size=128M,hanging_param").is_err());
+        assert!(parser.parse("size=128M,too_many_equals=foo=bar").is_err());
+        assert!(parser.parse("size=128M,file=/dev/shm").is_err());
+        assert!(parser.parse("size=128M").is_ok());
 
         assert_eq!(parser.get("size"), Some("128M".to_owned()));
-        assert_eq!(parser.get("file"), Some("/dev/shm".to_owned()));
         assert!(!parser.is_set("mergeable"));
         assert!(parser.is_set("size"));
         Ok(())
@@ -1481,19 +1628,14 @@ mod tests {
 
     #[test]
     fn test_mem_parsing() -> Result<()> {
-        assert_eq!(MemoryConfig::parse("")?, MemoryConfig::default());
+        assert_eq!(MemoryConfig::parse("", None)?, MemoryConfig::default());
         // Default string
-        assert_eq!(MemoryConfig::parse("size=512M")?, MemoryConfig::default());
         assert_eq!(
-            MemoryConfig::parse("size=512M,file=/some/file")?,
-            MemoryConfig {
-                size: 512 << 20,
-                file: Some(PathBuf::from("/some/file")),
-                ..Default::default()
-            }
+            MemoryConfig::parse("size=512M", None)?,
+            MemoryConfig::default()
         );
         assert_eq!(
-            MemoryConfig::parse("size=512M,mergeable=on")?,
+            MemoryConfig::parse("size=512M,mergeable=on", None)?,
             MemoryConfig {
                 size: 512 << 20,
                 mergeable: true,
@@ -1501,14 +1643,14 @@ mod tests {
             }
         );
         assert_eq!(
-            MemoryConfig::parse("mergeable=on")?,
+            MemoryConfig::parse("mergeable=on", None)?,
             MemoryConfig {
                 mergeable: true,
                 ..Default::default()
             }
         );
         assert_eq!(
-            MemoryConfig::parse("size=1G,mergeable=off")?,
+            MemoryConfig::parse("size=1G,mergeable=off", None)?,
             MemoryConfig {
                 size: 1 << 30,
                 mergeable: false,
@@ -1516,20 +1658,20 @@ mod tests {
             }
         );
         assert_eq!(
-            MemoryConfig::parse("hotplug_method=acpi")?,
+            MemoryConfig::parse("hotplug_method=acpi", None)?,
             MemoryConfig {
                 ..Default::default()
             }
         );
         assert_eq!(
-            MemoryConfig::parse("hotplug_method=acpi,hotplug_size=512M")?,
+            MemoryConfig::parse("hotplug_method=acpi,hotplug_size=512M", None)?,
             MemoryConfig {
                 hotplug_size: Some(512 << 20),
                 ..Default::default()
             }
         );
         assert_eq!(
-            MemoryConfig::parse("hotplug_method=virtio-mem,hotplug_size=512M")?,
+            MemoryConfig::parse("hotplug_method=virtio-mem,hotplug_size=512M", None)?,
             MemoryConfig {
                 hotplug_size: Some(512 << 20),
                 hotplug_method: HotplugMethod::VirtioMem,
@@ -1943,7 +2085,6 @@ mod tests {
             },
             memory: MemoryConfig {
                 size: 536_870_912,
-                file: None,
                 mergeable: false,
                 hotplug_method: HotplugMethod::Acpi,
                 hotplug_size: None,
@@ -1951,6 +2092,7 @@ mod tests {
                 hugepages: false,
                 balloon: false,
                 balloon_size: 0,
+                zones: None,
             },
             kernel: Some(KernelConfig {
                 path: PathBuf::from("/path/to/kernel"),
@@ -1982,6 +2124,7 @@ mod tests {
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
+            numa: None,
         };
 
         assert!(valid_config.validate().is_ok());
