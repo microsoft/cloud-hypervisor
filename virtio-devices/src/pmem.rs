@@ -9,13 +9,12 @@
 use super::Error as DeviceError;
 use super::{
     ActivateError, ActivateResult, DescriptorChain, EpollHelper, EpollHelperError,
-    EpollHelperHandler, Queue, UserspaceMapping, VirtioDevice, VirtioDeviceType,
+    EpollHelperHandler, Queue, UserspaceMapping, VirtioCommon, VirtioDevice, VirtioDeviceType,
     EPOLL_HELPER_EVENT_LAST, VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_VERSION_1,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use anyhow::anyhow;
-use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fmt::{self, Display};
@@ -24,7 +23,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::unix::io::AsRawFd;
 use std::result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use vm_memory::{
@@ -38,7 +37,6 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
-const NUM_QUEUES: usize = 1;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 
 const VIRTIO_PMEM_REQ_TYPE_FLUSH: u32 = 0;
@@ -281,18 +279,10 @@ impl EpollHelperHandler for PmemEpollHandler {
 }
 
 pub struct Pmem {
+    common: VirtioCommon,
     id: String,
-    kill_evt: Option<EventFd>,
-    pause_evt: Option<EventFd>,
     disk: Option<File>,
-    avail_features: u64,
-    acked_features: u64,
     config: VirtioPmemConfig,
-    queue_evts: Option<Vec<EventFd>>,
-    interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
-    epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
-    paused: Arc<AtomicBool>,
-    paused_sync: Arc<Barrier>,
     mapping: UserspaceMapping,
     seccomp_action: SeccompAction,
 
@@ -330,18 +320,16 @@ impl Pmem {
         }
 
         Ok(Pmem {
+            common: VirtioCommon {
+                device_type: VirtioDeviceType::TYPE_PMEM as u32,
+                queue_sizes: QUEUE_SIZES.to_vec(),
+                paused_sync: Some(Arc::new(Barrier::new(2))),
+                avail_features,
+                ..Default::default()
+            },
             id,
-            kill_evt: None,
-            pause_evt: None,
             disk: Some(disk),
-            avail_features,
-            acked_features: 0u64,
             config,
-            queue_evts: None,
-            interrupt_cb: None,
-            epoll_threads: None,
-            paused: Arc::new(AtomicBool::new(false)),
-            paused_sync: Arc::new(Barrier::new(2)),
             mapping,
             seccomp_action,
             _region,
@@ -350,15 +338,15 @@ impl Pmem {
 
     fn state(&self) -> PmemState {
         PmemState {
-            avail_features: self.avail_features,
-            acked_features: self.acked_features,
+            avail_features: self.common.avail_features,
+            acked_features: self.common.acked_features,
             config: self.config,
         }
     }
 
     fn set_state(&mut self, state: &PmemState) -> io::Result<()> {
-        self.avail_features = state.avail_features;
-        self.acked_features = state.acked_features;
+        self.common.avail_features = state.avail_features;
+        self.common.acked_features = state.acked_features;
         self.config = state.config;
 
         Ok(())
@@ -367,7 +355,7 @@ impl Pmem {
 
 impl Drop for Pmem {
     fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
+        if let Some(kill_evt) = self.common.kill_evt.take() {
             // Ignore the result because there is nothing we can do about it.
             let _ = kill_evt.write(1);
         }
@@ -376,28 +364,19 @@ impl Drop for Pmem {
 
 impl VirtioDevice for Pmem {
     fn device_type(&self) -> u32 {
-        VirtioDeviceType::TYPE_PMEM as u32
+        self.common.device_type
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        QUEUE_SIZES
+        &self.common.queue_sizes
     }
 
     fn features(&self) -> u64 {
-        self.avail_features
+        self.common.avail_features
     }
 
     fn ack_features(&mut self, value: u64) {
-        let mut v = value;
-        // Check if the guest is ACK'ing a feature that we didn't claim to have.
-        let unrequested_features = v & !self.avail_features;
-        if unrequested_features != 0 {
-            warn!("Received acknowledge request for unknown feature.");
-
-            // Don't count these features as acked.
-            v &= !unrequested_features;
-        }
-        self.acked_features |= v;
+        self.common.ack_features(value)
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -411,46 +390,27 @@ impl VirtioDevice for Pmem {
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
-        if queues.len() != NUM_QUEUES || queue_evts.len() != NUM_QUEUES {
-            error!(
-                "Cannot perform activate. Expected {} queue(s), got {}",
-                NUM_QUEUES,
-                queues.len()
-            );
-            return Err(ActivateError::BadActivate);
-        }
-
-        let (self_kill_evt, kill_evt) = EventFd::new(EFD_NONBLOCK)
-            .and_then(|e| Ok((e.try_clone()?, e)))
+        self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
+        let kill_evt = self
+            .common
+            .kill_evt
+            .as_ref()
+            .unwrap()
+            .try_clone()
             .map_err(|e| {
-                error!("failed creating kill EventFd pair: {}", e);
+                error!("failed to clone kill_evt eventfd: {}", e);
                 ActivateError::BadActivate
             })?;
-        self.kill_evt = Some(self_kill_evt);
-
-        let (self_pause_evt, pause_evt) = EventFd::new(EFD_NONBLOCK)
-            .and_then(|e| Ok((e.try_clone()?, e)))
+        let pause_evt = self
+            .common
+            .pause_evt
+            .as_ref()
+            .unwrap()
+            .try_clone()
             .map_err(|e| {
-                error!("failed creating pause EventFd pair: {}", e);
+                error!("failed to clone pause_evt eventfd: {}", e);
                 ActivateError::BadActivate
             })?;
-        self.pause_evt = Some(self_pause_evt);
-
-        // Save the interrupt EventFD as we need to return it on reset
-        // but clone it to pass into the thread.
-        self.interrupt_cb = Some(interrupt_cb.clone());
-
-        let mut tmp_queue_evts: Vec<EventFd> = Vec::new();
-        for queue_evt in queue_evts.iter() {
-            // Save the queue EventFD as we need to return it on reset
-            // but clone it to pass into the thread.
-            tmp_queue_evts.push(queue_evt.try_clone().map_err(|e| {
-                error!("failed to clone queue EventFd: {}", e);
-                ActivateError::BadActivate
-            })?);
-        }
-        self.queue_evts = Some(tmp_queue_evts);
-
         if let Some(disk) = self.disk.as_ref() {
             let disk = disk.try_clone().map_err(|e| {
                 error!("failed cloning pmem disk: {}", e);
@@ -466,8 +426,8 @@ impl VirtioDevice for Pmem {
                 pause_evt,
             };
 
-            let paused = self.paused.clone();
-            let paused_sync = self.paused_sync.clone();
+            let paused = self.common.paused.clone();
+            let paused_sync = self.common.paused_sync.clone();
             let mut epoll_threads = Vec::new();
             // Retrieve seccomp filter for virtio_pmem thread
             let virtio_pmem_seccomp_filter =
@@ -478,7 +438,7 @@ impl VirtioDevice for Pmem {
                 .spawn(move || {
                     if let Err(e) = SeccompFilter::apply(virtio_pmem_seccomp_filter) {
                         error!("Error applying seccomp filter: {:?}", e);
-                    } else if let Err(e) = handler.run(paused, paused_sync) {
+                    } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                         error!("Error running worker: {:?}", e);
                     }
                 })
@@ -488,7 +448,7 @@ impl VirtioDevice for Pmem {
                     ActivateError::BadActivate
                 })?;
 
-            self.epoll_threads = Some(epoll_threads);
+            self.common.epoll_threads = Some(epoll_threads);
 
             return Ok(());
         }
@@ -496,21 +456,7 @@ impl VirtioDevice for Pmem {
     }
 
     fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
-        // We first must resume the virtio thread if it was paused.
-        if self.pause_evt.take().is_some() {
-            self.resume().ok()?;
-        }
-
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
-        }
-
-        // Return the interrupt and queue EventFDs
-        Some((
-            self.interrupt_cb.take().unwrap(),
-            self.queue_evts.take().unwrap(),
-        ))
+        self.common.reset()
     }
 
     fn userspace_mappings(&self) -> Vec<UserspaceMapping> {
@@ -518,13 +464,22 @@ impl VirtioDevice for Pmem {
     }
 }
 
-virtio_pausable!(Pmem);
+impl Pausable for Pmem {
+    fn pause(&mut self) -> result::Result<(), MigratableError> {
+        self.common.pause()
+    }
+
+    fn resume(&mut self) -> result::Result<(), MigratableError> {
+        self.common.resume()
+    }
+}
+
 impl Snapshottable for Pmem {
     fn id(&self) -> String {
         self.id.clone()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot =
             serde_json::to_vec(&self.state()).map_err(|e| MigratableError::Snapshot(e.into()))?;
 

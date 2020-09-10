@@ -41,7 +41,7 @@ use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
 use devices::{
-    interrupt_controller, interrupt_controller::InterruptController, legacy::Serial, BusDevice,
+    interrupt_controller, interrupt_controller::InterruptController, legacy::Serial,
     HotPlugNotificationFlags,
 };
 #[cfg(feature = "kvm")]
@@ -85,7 +85,7 @@ use vm_allocator::SystemAllocator;
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, LegacyIrqGroupConfig, MsiIrqGroupConfig,
 };
-use vm_device::Resource;
+use vm_device::{Bus, BusDevice, Resource};
 use vm_memory::guest_memory::FileOffset;
 use vm_memory::{
     Address, GuestAddress, GuestAddressSpace, GuestRegionMmap, GuestUsize, MmapRegion,
@@ -253,7 +253,7 @@ pub enum DeviceManagerError {
     Mmap(io::Error),
 
     /// Cannot add legacy device to Bus.
-    BusError(devices::BusError),
+    BusError(vm_device::BusError),
 
     /// Failed to allocate IO port
     AllocateIOPort,
@@ -302,10 +302,10 @@ pub enum DeviceManagerError {
     RemoveDeviceFromPciBus(pci::PciRootError),
 
     /// Failed removing a bus device from the IO bus.
-    RemoveDeviceFromIoBus(devices::BusError),
+    RemoveDeviceFromIoBus(vm_device::BusError),
 
     /// Failed removing a bus device from the MMIO bus.
-    RemoveDeviceFromMmioBus(devices::BusError),
+    RemoveDeviceFromMmioBus(vm_device::BusError),
 
     /// Failed to find the device corresponding to a specific PCI b/d/f.
     #[cfg(feature = "pci_support")]
@@ -463,8 +463,8 @@ impl Console {
 struct AddressManager {
     allocator: Arc<Mutex<SystemAllocator>>,
     #[cfg(target_arch = "x86_64")]
-    io_bus: Arc<devices::Bus>,
-    mmio_bus: Arc<devices::Bus>,
+    io_bus: Arc<Bus>,
+    mmio_bus: Arc<Bus>,
     vm: Arc<dyn hypervisor::Vm>,
     #[cfg(feature = "pci_support")]
     device_tree: Arc<Mutex<DeviceTree>>,
@@ -826,8 +826,8 @@ impl DeviceManager {
         let address_manager = Arc::new(AddressManager {
             allocator: memory_manager.lock().unwrap().allocator(),
             #[cfg(target_arch = "x86_64")]
-            io_bus: Arc::new(devices::Bus::new()),
-            mmio_bus: Arc::new(devices::Bus::new()),
+            io_bus: Arc::new(Bus::new()),
+            mmio_bus: Arc::new(Bus::new()),
             vm: vm.clone(),
             #[cfg(feature = "pci_support")]
             device_tree: Arc::clone(&device_tree),
@@ -1359,7 +1359,7 @@ impl DeviceManager {
 
         self.address_manager
             .mmio_bus
-            .insert(rtc_device.clone(), addr.0, MMIO_LEN)
+            .insert(rtc_device, addr.0, MMIO_LEN)
             .map_err(DeviceManagerError::BusError)?;
 
         self.id_to_dev_info.insert(
@@ -1708,6 +1708,7 @@ impl DeviceManager {
                                     disk_cfg.iommu,
                                     disk_cfg.num_queues,
                                     disk_cfg.queue_size,
+                                    self.seccomp_action.clone(),
                                 )
                                 .map_err(DeviceManagerError::CreateVirtioBlock)?,
                             ));
@@ -2380,6 +2381,7 @@ impl DeviceManager {
                 vsock_cfg.socket.clone(),
                 backend,
                 vsock_cfg.iommu,
+                self.seccomp_action.clone(),
             )
             .map_err(DeviceManagerError::CreateVirtioVsock)?,
         ));
@@ -2999,11 +3001,11 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn io_bus(&self) -> &Arc<devices::Bus> {
+    pub fn io_bus(&self) -> &Arc<Bus> {
         &self.address_manager.io_bus
     }
 
-    pub fn mmio_bus(&self) -> &Arc<devices::Bus> {
+    pub fn mmio_bus(&self) -> &Arc<Bus> {
         &self.address_manager.mmio_bus
     }
 
@@ -3516,8 +3518,6 @@ impl Aml for DeviceManager {
             &aml::ResourceTemplate::new(vec![
                 &aml::AddressSpace::new_bus_number(0x0u16, 0xffu16),
                 &aml::IO::new(0xcf8, 0xcf8, 1, 0x8),
-                &aml::AddressSpace::new_io(0x0u16, 0xcf7u16),
-                &aml::AddressSpace::new_io(0xd00u16, 0xffffu16),
                 &aml::AddressSpace::new_memory(
                     aml::AddressSpaceCachable::NotCacheable,
                     true,
@@ -3631,7 +3631,7 @@ impl Snapshottable for DeviceManager {
         DEVICE_MANAGER_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let mut snapshot = Snapshot::new(DEVICE_MANAGER_SNAPSHOT_ID);
 
         // We aggregate all devices snapshots.

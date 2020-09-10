@@ -369,7 +369,6 @@ components:
     VmConfig:
       required:
       - kernel
-      - cmdline
       type: object
       properties:
         cpus:
@@ -414,6 +413,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SgxEpcConfig'
+        numa:
+          type: array
+          items:
+            $ref: '#/components/schemas/NumaConfig'
         iommu:
           type: boolean
           default: false
@@ -448,6 +451,33 @@ components:
         topology:
             $ref: '#/components/schemas/CpuTopology'
 
+    MemoryZoneConfig:
+      required:
+      - id
+      - size
+      type: object
+      properties:
+        id:
+          type: string
+        size:
+          type: integer
+          format: int64
+          default: 512 MB
+        file:
+          type: string
+        mergeable:
+          type: boolean
+          default: false
+        shared:
+          type: boolean
+          default: false
+        hugepages:
+          type: boolean
+          default: false
+        host_numa_node:
+          type: integer
+          format: uint32
+
     MemoryConfig:
       required:
       - size
@@ -460,8 +490,6 @@ components:
         hotplug_size:
           type: integer
           format: int64
-        file:
-          type: string
         mergeable:
           type: boolean
           default: false
@@ -477,6 +505,13 @@ components:
         balloon:
           type: boolean
           default: false
+        balloon_size:
+          type: integer
+          format: uint64
+        zones:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryZoneConfig'
 
     KernelConfig:
       required:
@@ -685,6 +720,41 @@ components:
         prefault:
           type: boolean
           default: false
+
+    NumaDistance:
+      required:
+      - destination
+      - distance
+      type: object
+      properties:
+        destination:
+          type: integer
+          format: uint32
+        distance:
+          type: integer
+          format: uint8
+
+    NumaConfig:
+      required:
+      - guest_numa_id
+      type: object
+      properties:
+        guest_numa_id:
+          type: integer
+          format: uint32
+        cpus:
+          type: array
+          items:
+            type: integer
+            format: uint8
+        distances:
+          type: array
+          items:
+            $ref: '#/components/schemas/NumaDistance'
+        memory_zones:
+          type: array
+          items:
+            type: string
 
     VmResize:
       type: object

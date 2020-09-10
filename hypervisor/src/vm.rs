@@ -16,8 +16,9 @@ use crate::device::Device;
 use crate::ClockData;
 #[cfg(feature = "kvm")]
 use crate::CreateDevice;
-use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
 #[cfg(feature = "kvm")]
+use crate::KvmVmState as VmState;
+use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
 use kvm_ioctls::Cap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -202,4 +203,8 @@ pub trait Vm: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+    /// Get the Vm state. Return VM specific data
+    fn state(&self) -> Result<VmState>;
+    /// Set the VM state
+    fn set_state(&self, state: &VmState) -> Result<()>;
 }

@@ -11,13 +11,12 @@
 use super::Error as DeviceError;
 use super::{
     ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
-    VirtioDevice, VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
+    VirtioCommon, VirtioDevice, VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
 use block_util::{build_disk_image_id, Request, RequestType, VirtioBlockConfig};
-use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -259,21 +258,12 @@ impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
 
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct Block<T: DiskFile> {
+    common: VirtioCommon,
     id: String,
-    kill_evt: Option<EventFd>,
     disk_image: Arc<Mutex<T>>,
     disk_path: PathBuf,
     disk_nsectors: u64,
-    avail_features: u64,
-    acked_features: u64,
     config: VirtioBlockConfig,
-    queue_evts: Option<Vec<EventFd>>,
-    interrupt_cb: Option<Arc<dyn VirtioInterrupt>>,
-    epoll_threads: Option<Vec<thread::JoinHandle<()>>>,
-    pause_evt: Option<EventFd>,
-    paused: Arc<AtomicBool>,
-    paused_sync: Arc<Barrier>,
-    queue_size: Vec<u16>,
     writeback: Arc<AtomicBool>,
     counters: BlockCounters,
     seccomp_action: SeccompAction,
@@ -338,21 +328,18 @@ impl<T: DiskFile> Block<T> {
         }
 
         Ok(Block {
+            common: VirtioCommon {
+                device_type: VirtioDeviceType::TYPE_BLOCK as u32,
+                avail_features,
+                paused_sync: Some(Arc::new(Barrier::new(num_queues + 1))),
+                queue_sizes: vec![queue_size; num_queues],
+                ..Default::default()
+            },
             id,
-            kill_evt: None,
             disk_image: Arc::new(Mutex::new(disk_image)),
             disk_path,
             disk_nsectors,
-            avail_features,
-            acked_features: 0u64,
             config,
-            queue_evts: None,
-            interrupt_cb: None,
-            epoll_threads: None,
-            pause_evt: None,
-            paused: Arc::new(AtomicBool::new(false)),
-            paused_sync: Arc::new(Barrier::new(num_queues + 1)),
-            queue_size: vec![queue_size; num_queues],
             writeback: Arc::new(AtomicBool::new(true)),
             counters: BlockCounters::default(),
             seccomp_action,
@@ -363,8 +350,8 @@ impl<T: DiskFile> Block<T> {
         BlockState {
             disk_path: self.disk_path.clone(),
             disk_nsectors: self.disk_nsectors,
-            avail_features: self.avail_features,
-            acked_features: self.acked_features,
+            avail_features: self.common.avail_features,
+            acked_features: self.common.acked_features,
             config: self.config,
         }
     }
@@ -372,8 +359,8 @@ impl<T: DiskFile> Block<T> {
     fn set_state(&mut self, state: &BlockState) -> io::Result<()> {
         self.disk_path = state.disk_path.clone();
         self.disk_nsectors = state.disk_nsectors;
-        self.avail_features = state.avail_features;
-        self.acked_features = state.acked_features;
+        self.common.avail_features = state.avail_features;
+        self.common.acked_features = state.acked_features;
         self.config = state.config;
 
         Ok(())
@@ -381,13 +368,12 @@ impl<T: DiskFile> Block<T> {
 
     fn update_writeback(&mut self) {
         // Use writeback from config if VIRTIO_BLK_F_CONFIG_WCE
-        let writeback =
-            if self.acked_features & 1 << VIRTIO_BLK_F_CONFIG_WCE == 1 << VIRTIO_BLK_F_CONFIG_WCE {
-                self.config.writeback == 1
-            } else {
-                // Else check if VIRTIO_BLK_F_FLUSH negotiated
-                self.acked_features & 1 << VIRTIO_BLK_F_FLUSH == 1 << VIRTIO_BLK_F_FLUSH
-            };
+        let writeback = if self.common.feature_acked(VIRTIO_BLK_F_CONFIG_WCE.into()) {
+            self.config.writeback == 1
+        } else {
+            // Else check if VIRTIO_BLK_F_FLUSH negotiated
+            self.common.feature_acked(VIRTIO_BLK_F_FLUSH.into())
+        };
 
         info!(
             "Changing cache mode to {}",
@@ -401,39 +387,21 @@ impl<T: DiskFile> Block<T> {
     }
 }
 
-impl<T: DiskFile> Drop for Block<T> {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
-        }
-    }
-}
-
 impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
     fn device_type(&self) -> u32 {
-        VirtioDeviceType::TYPE_BLOCK as u32
+        self.common.device_type
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        self.queue_size.as_slice()
+        self.common.queue_sizes.as_slice()
     }
 
     fn features(&self) -> u64 {
-        self.avail_features
+        self.common.avail_features
     }
 
     fn ack_features(&mut self, value: u64) {
-        let mut v = value;
-        // Check if the guest is ACK'ing a feature that we didn't claim to have.
-        let unrequested_features = v & !self.avail_features;
-        if unrequested_features != 0 {
-            warn!("Received acknowledge request for unknown feature.");
-
-            // Don't count these features as acked.
-            v &= !unrequested_features;
-        }
-        self.acked_features |= v;
+        self.common.ack_features(value)
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -465,63 +433,35 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
         mut queues: Vec<Queue>,
         mut queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
-        if queues.len() != self.queue_size.len() || queue_evts.len() != self.queue_size.len() {
-            error!(
-                "Cannot perform activate. Expected {} queue(s), got {}",
-                self.queue_size.len(),
-                queues.len()
-            );
-            return Err(ActivateError::BadActivate);
-        }
-
-        let (self_kill_evt, kill_evt) = EventFd::new(EFD_NONBLOCK)
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .map_err(|e| {
-                error!("failed creating kill EventFd pair: {}", e);
-                ActivateError::BadActivate
-            })?;
-
-        self.kill_evt = Some(self_kill_evt);
-
-        let (self_pause_evt, pause_evt) = EventFd::new(EFD_NONBLOCK)
-            .and_then(|e| Ok((e.try_clone()?, e)))
-            .map_err(|e| {
-                error!("failed creating pause EventFd pair: {}", e);
-                ActivateError::BadActivate
-            })?;
-        self.pause_evt = Some(self_pause_evt);
+        self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
 
         let disk_image_id = build_disk_image_id(&self.disk_path);
-
-        let mut tmp_queue_evts: Vec<EventFd> = Vec::new();
-        for queue_evt in queue_evts.iter() {
-            // Save the queue EventFD as we need to return it on reset
-            // but clone it to pass into the thread.
-            tmp_queue_evts.push(queue_evt.try_clone().map_err(|e| {
-                error!("failed to clone queue EventFd: {}", e);
-                ActivateError::BadActivate
-            })?);
-        }
-        self.queue_evts = Some(tmp_queue_evts);
-
-        let mut tmp_queue_evts: Vec<EventFd> = Vec::new();
-        for queue_evt in queue_evts.iter() {
-            // Save the queue EventFD as we need to return it on reset
-            // but clone it to pass into the thread.
-            tmp_queue_evts.push(queue_evt.try_clone().map_err(|e| {
-                error!("failed to clone queue EventFd: {}", e);
-                ActivateError::BadActivate
-            })?);
-        }
-        self.queue_evts = Some(tmp_queue_evts);
-
-        let event_idx = self.acked_features & 1u64 << VIRTIO_RING_F_EVENT_IDX
-            == 1u64 << VIRTIO_RING_F_EVENT_IDX;
+        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
         self.update_writeback();
 
         let mut epoll_threads = Vec::new();
-        for _ in 0..self.queue_size.len() {
+        for _ in 0..self.common.queue_sizes.len() {
             let queue_evt = queue_evts.remove(0);
+            let kill_evt = self
+                .common
+                .kill_evt
+                .as_ref()
+                .unwrap()
+                .try_clone()
+                .map_err(|e| {
+                    error!("failed to clone kill_evt eventfd: {}", e);
+                    ActivateError::BadActivate
+                })?;
+            let pause_evt = self
+                .common
+                .pause_evt
+                .as_ref()
+                .unwrap()
+                .try_clone()
+                .map_err(|e| {
+                    error!("failed to clone pause_evt eventfd: {}", e);
+                    ActivateError::BadActivate
+                })?;
             let mut handler = BlockEpollHandler {
                 queue: queues.remove(0),
                 mem: mem.clone(),
@@ -529,8 +469,8 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
                 disk_nsectors: self.disk_nsectors,
                 interrupt_cb: interrupt_cb.clone(),
                 disk_image_id: disk_image_id.clone(),
-                kill_evt: kill_evt.try_clone().unwrap(),
-                pause_evt: pause_evt.try_clone().unwrap(),
+                kill_evt,
+                pause_evt,
                 event_idx,
                 writeback: self.writeback.clone(),
                 counters: self.counters.clone(),
@@ -539,8 +479,8 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
 
             handler.queue.set_event_idx(event_idx);
 
-            let paused = self.paused.clone();
-            let paused_sync = self.paused_sync.clone();
+            let paused = self.common.paused.clone();
+            let paused_sync = self.common.paused_sync.clone();
 
             // Retrieve seccomp filter for virtio_blk thread
             let virtio_blk_seccomp_filter =
@@ -552,7 +492,7 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
                 .spawn(move || {
                     if let Err(e) = SeccompFilter::apply(virtio_blk_seccomp_filter) {
                         error!("Error applying seccomp filter: {:?}", e);
-                    } else if let Err(e) = handler.run(paused, paused_sync) {
+                    } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                         error!("Error running worker: {:?}", e);
                     }
                 })
@@ -563,31 +503,13 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
                 })?;
         }
 
-        // Save the interrupt EventFD as we need to return it on reset
-        // but clone it to pass into the thread.
-        self.interrupt_cb = Some(interrupt_cb);
-
-        self.epoll_threads = Some(epoll_threads);
+        self.common.epoll_threads = Some(epoll_threads);
 
         Ok(())
     }
 
     fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
-        // We first must resume the virtio thread if it was paused.
-        if self.pause_evt.take().is_some() {
-            self.resume().ok()?;
-        }
-
-        if let Some(kill_evt) = self.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
-        }
-
-        // Return the interrupt and queue EventFDs
-        Some((
-            self.interrupt_cb.take().unwrap(),
-            self.queue_evts.take().unwrap(),
-        ))
+        self.common.reset()
     }
 
     fn counters(&self) -> Option<HashMap<&'static str, Wrapping<u64>>> {
@@ -614,13 +536,31 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
     }
 }
 
-virtio_pausable!(Block, T: 'static + DiskFile + Send);
+impl<T: DiskFile> Drop for Block<T> {
+    fn drop(&mut self) {
+        if let Some(kill_evt) = self.common.kill_evt.take() {
+            // Ignore the result because there is nothing we can do about it.
+            let _ = kill_evt.write(1);
+        }
+    }
+}
+
+impl<T: 'static + DiskFile + Send> Pausable for Block<T> {
+    fn pause(&mut self) -> result::Result<(), MigratableError> {
+        self.common.pause()
+    }
+
+    fn resume(&mut self) -> result::Result<(), MigratableError> {
+        self.common.resume()
+    }
+}
+
 impl<T: 'static + DiskFile + Send> Snapshottable for Block<T> {
     fn id(&self) -> String {
         self.id.clone()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot =
             serde_json::to_vec(&self.state()).map_err(|e| MigratableError::Snapshot(e.into()))?;
 

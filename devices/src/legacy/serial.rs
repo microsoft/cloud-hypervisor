@@ -5,12 +5,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use crate::BusDevice;
 use anyhow::anyhow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{io, result};
 use vm_device::interrupt::InterruptSourceGroup;
+use vm_device::BusDevice;
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
     Transportable,
@@ -289,7 +289,7 @@ impl Snapshottable for Serial {
         self.id.clone()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot =
             serde_json::to_vec(&self.state()).map_err(|e| MigratableError::Snapshot(e.into()))?;
 

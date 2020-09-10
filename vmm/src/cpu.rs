@@ -27,19 +27,18 @@ use arch::x86_64::SgxEpcSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "x86_64")]
 use arch::{CpuidPatch, CpuidReg};
-use devices::{interrupt_controller::InterruptController, BusDevice};
+use devices::interrupt_controller::InterruptController;
 #[cfg(target_arch = "x86_64")]
 use hypervisor::CpuId;
 use hypervisor::{CpuState, VmExit};
-
 use libc::{c_void, siginfo_t};
-
 #[cfg(target_arch = "x86_64")]
 use std::fmt;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{cmp, io, result, thread};
+use vm_device::{Bus, BusDevice};
 #[cfg(target_arch = "x86_64")]
 use vm_memory::{GuestAddress, GuestAddressSpace, Bytes};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
@@ -129,7 +128,7 @@ pub enum Error {
     ThreadCleanup(std::boxed::Box<dyn std::any::Any + std::marker::Send>),
 
     /// Cannot add legacy device to Bus.
-    BusError(devices::BusError),
+    BusError(vm_device::BusError),
 
     /// Failed to allocate IO port
     AllocateIOPort,
@@ -234,8 +233,8 @@ pub struct Vcpu {
     vcpu: Arc<dyn hypervisor::Vcpu>,
     id: u8,
     #[cfg(target_arch = "x86_64")]
-    io_bus: Arc<devices::Bus>,
-    mmio_bus: Arc<devices::Bus>,
+    io_bus: Arc<Bus>,
+    mmio_bus: Arc<Bus>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -279,8 +278,8 @@ impl Vcpu {
     pub fn new(
         id: u8,
         vm: &Arc<dyn hypervisor::Vm>,
-        #[cfg(target_arch = "x86_64")] io_bus: Arc<devices::Bus>,
-        mmio_bus: Arc<devices::Bus>,
+        #[cfg(target_arch = "x86_64")] io_bus: Arc<Bus>,
+        mmio_bus: Arc<Bus>,
         interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
         creation_ts: std::time::Instant,
         guest_memory: GuestMemoryAtomic<GuestMemoryMmap>,
@@ -347,7 +346,11 @@ impl Vcpu {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]
                 VmExit::IoIn(addr, data) => {
-                    self.io_bus.read(u64::from(addr), data);
+                    if let Err(e) = self.io_bus.read(u64::from(addr), data) {
+                        if let vm_device::BusError::MissingAddressRange = e {
+                            warn!("Guest PIO read to unregistered address 0x{:x}", addr);
+                        }
+                    }
                     Ok(true)
                 }
                 #[cfg(target_arch = "x86_64")]
@@ -355,15 +358,27 @@ impl Vcpu {
                     if addr == DEBUG_IOPORT && data.len() == 1 {
                         self.log_debug_ioport(data[0]);
                     }
-                    self.io_bus.write(u64::from(addr), data);
+                    if let Err(e) = self.io_bus.write(u64::from(addr), data) {
+                        if let vm_device::BusError::MissingAddressRange = e {
+                            warn!("Guest PIO write to unregistered address 0x{:x}", addr);
+                        }
+                    }
                     Ok(true)
                 }
                 VmExit::MmioRead(addr, data) => {
-                    self.mmio_bus.read(addr as u64, data);
+                    if let Err(e) = self.mmio_bus.read(addr as u64, data) {
+                        if let vm_device::BusError::MissingAddressRange = e {
+                            warn!("Guest MMIO read to unregistered address 0x{:x}", addr);
+                        }
+                    }
                     Ok(true)
                 }
                 VmExit::MmioWrite(addr, data) => {
-                    self.mmio_bus.write(addr as u64, data);
+                    if let Err(e) = self.mmio_bus.write(addr as u64, data) {
+                        if let vm_device::BusError::MissingAddressRange = e {
+                            warn!("Guest MMIO write to unregistered address 0x{:x}", addr);
+                        }
+                    }
                     Ok(true)
                 }
                 #[cfg(target_arch = "x86_64")]
@@ -426,7 +441,7 @@ impl Snapshottable for Vcpu {
         VCPU_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let snapshot = serde_json::to_vec(&self.saved_state)
             .map_err(|e| MigratableError::Snapshot(e.into()))?;
 
@@ -468,9 +483,9 @@ impl Snapshottable for Vcpu {
 pub struct CpuManager {
     config: CpusConfig,
     #[cfg(target_arch = "x86_64")]
-    io_bus: Arc<devices::Bus>,
+    io_bus: Arc<Bus>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    mmio_bus: Arc<devices::Bus>,
+    mmio_bus: Arc<Bus>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -1008,12 +1023,10 @@ impl CpuManager {
 
     #[cfg(target_arch = "aarch64")]
     pub fn get_mpidrs(&self) -> Vec<u64> {
-        let vcpu_mpidrs = self
-            .vcpus
+        self.vcpus
             .iter()
             .map(|cpu| cpu.lock().unwrap().get_mpidr())
-            .collect();
-        vcpu_mpidrs
+            .collect()
     }
 
     #[cfg(feature = "acpi")]
@@ -1397,7 +1410,7 @@ impl Snapshottable for CpuManager {
         CPU_MANAGER_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         let mut cpu_manager_snapshot = Snapshot::new(CPU_MANAGER_SNAPSHOT_ID);
 
         // The CpuManager snapshot is a collection of all vCPUs snapshots.

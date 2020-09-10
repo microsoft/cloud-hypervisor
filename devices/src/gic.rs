@@ -47,8 +47,7 @@ impl Gic {
 
 impl InterruptController for Gic {
     fn enable(&self) -> Result<()> {
-        &self
-            .interrupt_source_group
+        self.interrupt_source_group
             .enable()
             .map_err(Error::EnableInterrupt)?;
         Ok(())
@@ -71,7 +70,7 @@ impl Snapshottable for Gic {
         GIC_SNAPSHOT_ID.to_string()
     }
 
-    fn snapshot(&self) -> std::result::Result<Snapshot, MigratableError> {
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         unimplemented!();
     }
 

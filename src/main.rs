@@ -115,6 +115,19 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
+            Arg::with_name("memory-zone")
+                .long("memory-zone")
+                .help(
+                    "User defined memory zone parameters \
+                     \"size=<guest_memory_region_size>,file=<backing_file>,\
+                     shared=on|off,hugepages=on|off,host_numa_node=<node_id>,\
+                     id=<zone_identifier>\"",
+                )
+                .takes_value(true)
+                .min_values(1)
+                .group("vm-config"),
+        )
+        .arg(
             Arg::with_name("kernel")
                 .long("kernel")
                 .help("Path to kernel image (vmlinux)")
@@ -206,6 +219,14 @@ fn create_app<'a, 'b>(
                 .help(config::VsockConfig::SYNTAX)
                 .takes_value(true)
                 .number_of_values(1)
+                .group("vm-config"),
+        )
+        .arg(
+            Arg::with_name("numa")
+                .long("numa")
+                .help(config::NumaConfig::SYNTAX)
+                .takes_value(true)
+                .min_values(1)
                 .group("vm-config"),
         )
         .arg(
@@ -514,7 +535,6 @@ mod unit_tests {
                 },
                 memory: MemoryConfig {
                     size: 536_870_912,
-                    file: None,
                     mergeable: false,
                     hotplug_method: HotplugMethod::Acpi,
                     hotplug_size: None,
@@ -522,6 +542,7 @@ mod unit_tests {
                     hugepages: false,
                     balloon: false,
                     balloon_size: 0,
+                    zones: None,
                 },
                 kernel: Some(KernelConfig {
                     path: PathBuf::from("/path/to/kernel"),
@@ -553,6 +574,7 @@ mod unit_tests {
                 iommu: false,
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc: None,
+                numa: None,
             };
 
             aver_eq!(tb, expected_vm_config, result_vm_config);
@@ -628,18 +650,6 @@ mod unit_tests {
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory": {"size": 1073741824}
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory",
-                    "size=1G,file=/path/to/shared/file",
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory": {"size": 1073741824, "file": "/path/to/shared/file"}
                 }"#,
                 true,
             ),
