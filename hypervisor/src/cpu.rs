@@ -10,13 +10,13 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::VcpuInit;
+use crate::cpu;
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{CpuId, LapicState};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
-use crate::cpu;
 use crate::CpuState;
 #[cfg(feature = "kvm")]
 use crate::{MpState, Xsave};
@@ -346,5 +346,5 @@ pub trait VcpuRun {
     fn mmio_write(&self, addr: u64, data: &[u8]);
     fn pio_in(&self, addr: u64, data: &mut [u8]);
     fn pio_out(&self, addr: u64, data: &[u8]);
-    fn write_to_guest_mem(&self, buf: &[u8], gpa:u64,) -> cpu::Result<usize>;
+    fn write_to_guest_mem(&self, buf: &[u8], gpa: u64) -> cpu::Result<usize>;
 }
