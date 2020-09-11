@@ -40,7 +40,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::{cmp, io, result, thread};
 use vm_device::{Bus, BusDevice};
 #[cfg(target_arch = "x86_64")]
-use vm_memory::{GuestAddress, GuestAddressSpace, Bytes};
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace};
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -243,7 +243,6 @@ pub struct Vcpu {
     mpidr: u64,
     saved_state: Option<CpuState>,
     guest_memory_map: GuestMemoryAtomic<GuestMemoryMmap>,
-
 }
 
 impl hypervisor::cpu::VcpuRun for Vcpu {
@@ -262,9 +261,11 @@ impl hypervisor::cpu::VcpuRun for Vcpu {
         }
         self.io_bus.write(u64::from(addr), data);
     }
-    fn write_to_guest_mem(&self, buf: &[u8], gpa:u64) -> hypervisor::cpu::Result<usize>{
+    fn write_to_guest_mem(&self, buf: &[u8], gpa: u64) -> hypervisor::cpu::Result<usize> {
         let guest_memory = self.guest_memory_map.memory();
-        guest_memory.write(buf, GuestAddress(gpa)).map_err(|e| hypervisor::cpu::HypervisorCpuError::GuestMemWrite(e.into()))
+        guest_memory
+            .write(buf, GuestAddress(gpa))
+            .map_err(|e| hypervisor::cpu::HypervisorCpuError::GuestMemWrite(e.into()))
     }
 }
 
