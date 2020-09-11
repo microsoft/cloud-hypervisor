@@ -15,6 +15,7 @@ use crate::vm;
 pub use hyperv_bindings::*;
 use hyperv_ioctls::{set_registers_64, Hyperv, VcpuFd, VmFd};
 
+use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
 // x86_64 dependencies
@@ -46,6 +47,12 @@ use std::thread;
 
 pub const PAGE_SHIFT: usize = 12;
 
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+pub struct HvState {
+    hypercall_page: u64,
+}
+
+pub use HvState as VmState;
 struct IrqfdCtrlEpollHandler {
     vm: Arc<dyn vm::Vm>, /* For issuing hypercall */
     irqfd: EventFd,      /* Registered by caller */
@@ -1097,6 +1104,19 @@ impl vm::Vm for HypervVm {
             .map_err(|e| vm::HypervisorVmError::RequestVirtualInterrupt(e.into()))?;
         Ok(())
     }
+    ///
+    /// Get the Vm state. Return VM specific data
+    ///
+    fn state(&self) -> vm::Result<VmState> {
+        Ok(self.hv_state.read().unwrap().clone())
+    }
+    ///
+    /// Set the VM state
+    ///
+    fn set_state(&self, state: &VmState) -> vm::Result<()> {
+        self.hv_state.write().unwrap().hypercall_page = state.hypercall_page;
+        Ok(())
+    }
 }
 
 pub use hv_cpuid_entry2 as CpuIdEntry;
@@ -1117,11 +1137,6 @@ pub enum HypervIrqRouting {
 pub struct HypervIrqRoutingEntry {
     pub gsi: u32,
     pub route: HypervIrqRouting,
-}
-
-#[derive(Debug, Default)]
-pub struct HvState {
-    hypercall_page: u64,
 }
 pub type IrqRoutingEntry = HypervIrqRoutingEntry;
 
