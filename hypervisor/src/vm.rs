@@ -16,6 +16,8 @@ use crate::device::Device;
 use crate::ClockData;
 #[cfg(feature = "kvm")]
 use crate::CreateDevice;
+#[cfg(feature = "hyperv")]
+use crate::HvState as VmState;
 #[cfg(feature = "kvm")]
 use crate::KvmVmState as VmState;
 use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
