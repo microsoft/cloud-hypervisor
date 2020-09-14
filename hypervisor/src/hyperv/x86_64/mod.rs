@@ -13,16 +13,16 @@ use crate::arch::x86::{msr_index, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
 ///
 use serde_derive::{Deserialize, Serialize};
 ///
-/// Export generically-named wrappers of hyperv-bindings for Unix-based platforms
+/// Export generically-named wrappers of mshv_bindings for Unix-based platforms
 ///
 pub use {
-    hyperv_bindings::hv_userspace_memory_region as MemoryRegion,
-    hyperv_bindings::msr_entry as MsrEntry, hyperv_bindings::CpuId,
-    hyperv_bindings::DebugRegisters, hyperv_bindings::FloatingPointUnit as FpuState,
-    hyperv_bindings::LapicState, hyperv_bindings::MsrList, hyperv_bindings::Msrs as MsrEntries,
-    hyperv_bindings::Msrs, hyperv_bindings::SegmentRegister, hyperv_bindings::SpecialRegisters,
-    hyperv_bindings::StandardRegisters, hyperv_bindings::VcpuEvents,
-    hyperv_bindings::Xcrs as ExtendedControlRegisters,
+    mshv_bindings::hv_userspace_memory_region as MemoryRegion,
+    mshv_bindings::msr_entry as MsrEntry, mshv_bindings::CpuId, mshv_bindings::DebugRegisters,
+    mshv_bindings::FloatingPointUnit as FpuState, mshv_bindings::LapicState,
+    mshv_bindings::MsrList, mshv_bindings::Msrs as MsrEntries, mshv_bindings::Msrs,
+    mshv_bindings::SegmentRegister, mshv_bindings::SpecialRegisters,
+    mshv_bindings::StandardRegisters, mshv_bindings::VcpuEvents,
+    mshv_bindings::Xcrs as ExtendedControlRegisters,
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuHypervState {

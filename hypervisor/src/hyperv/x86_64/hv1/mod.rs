@@ -3,11 +3,11 @@
 // Copyright © 2020, Microsoft Corporation
 //
 use crate::hyperv::{raise_general_page_fault, HvState, PAGE_SHIFT};
-use hyperv_bindings::*;
+use mshv_bindings::*;
 use std::sync::{Arc, Mutex, RwLock};
 pub const X86X_IA32_MSR_PLATFORM_ID: u32 = 0x17;
 use crate::cpu::VcpuRun;
-use hyperv_ioctls::VcpuFd;
+use mshv_ioctls::VcpuFd;
 
 pub fn process_cpuid(rax: u32) -> (u32, u32, u32, u32) {
     match rax {

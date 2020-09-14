@@ -12,8 +12,8 @@
 use crate::cpu;
 use crate::hypervisor;
 use crate::vm;
-pub use hyperv_bindings::*;
-use hyperv_ioctls::{set_registers_64, Hyperv, VcpuFd, VmFd};
+pub use mshv_bindings::*;
+use mshv_ioctls::{set_registers_64, Hyperv, VcpuFd, VmFd};
 
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
