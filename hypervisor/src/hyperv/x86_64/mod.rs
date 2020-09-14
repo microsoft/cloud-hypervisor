@@ -34,6 +34,7 @@ pub struct VcpuHypervState {
     pub xcrs: ExtendedControlRegisters,
     pub lapic: LapicState,
     pub dbg: DebugRegisters,
+    pub xsave: Xsave,
 }
 
 pub struct CreateDevice {}

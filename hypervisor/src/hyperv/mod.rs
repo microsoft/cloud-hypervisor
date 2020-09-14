@@ -868,6 +868,7 @@ impl cpu::Vcpu for HypervVcpu {
         self.set_fpu(&state.fpu)?;
         self.set_xcrs(&state.xcrs)?;
         self.set_lapic(&state.lapic)?;
+        self.set_xsave(&state.xsave)?;
         self.fd
             .set_dregs(&state.dbg)
             .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()))?;
@@ -882,6 +883,7 @@ impl cpu::Vcpu for HypervVcpu {
         let mut msrs = self.msrs.clone();
         self.get_msrs(&mut msrs)?;
         let lapic = self.get_lapic()?;
+        let xsave = self.get_xsave()?;
         let dbg = self
             .fd
             .get_dregs()
@@ -895,6 +897,7 @@ impl cpu::Vcpu for HypervVcpu {
             xcrs,
             lapic,
             dbg,
+            xsave,
         })
     }
 }
