@@ -842,6 +842,24 @@ impl cpu::Vcpu for HypervVcpu {
             .set_lapic(lapic)
             .map_err(|e| cpu::HypervisorCpuError::SetLapicState(e.into()))
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call that returns the vcpu's current "xsave struct".
+    ///
+    fn get_xsave(&self) -> cpu::Result<Xsave> {
+        self.fd
+            .get_xsave()
+            .map_err(|e| cpu::HypervisorCpuError::GetXsaveState(e.into()))
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call that sets the vcpu's current "xsave struct".
+    ///
+    fn set_xsave(&self, xsave: &Xsave) -> cpu::Result<()> {
+        self.fd
+            .set_xsave(*xsave)
+            .map_err(|e| cpu::HypervisorCpuError::SetXsaveState(e.into()))
+    }
     fn set_state(&self, state: &CpuState) -> cpu::Result<()> {
         self.set_msrs(&state.msrs)?;
         self.set_vcpu_events(&state.vcpu_events)?;

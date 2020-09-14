@@ -17,9 +17,9 @@ use crate::x86_64::{CpuId, LapicState};
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
-use crate::CpuState;
 #[cfg(feature = "kvm")]
-use crate::{MpState, Xsave};
+use crate::MpState;
+use crate::{CpuState, Xsave};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -271,12 +271,12 @@ pub trait Vcpu: Send + Sync {
     /// Sets the vcpu's current "multiprocessing state".
     ///
     fn set_mp_state(&self, mp_state: MpState) -> Result<()>;
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call that returns the vcpu's current "xsave struct".
     ///
     fn get_xsave(&self) -> Result<Xsave>;
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call that sets the vcpu's current "xsave struct".
     ///
