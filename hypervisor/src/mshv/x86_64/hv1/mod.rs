@@ -2,7 +2,7 @@
 //
 // Copyright © 2020, Microsoft Corporation
 //
-use crate::hyperv::{raise_general_page_fault, HvState, PAGE_SHIFT};
+use crate::mshv::{raise_general_page_fault, HvState, PAGE_SHIFT};
 use mshv_bindings::*;
 use std::sync::{Arc, Mutex, RwLock};
 pub const X86X_IA32_MSR_PLATFORM_ID: u32 = 0x17;

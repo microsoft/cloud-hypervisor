@@ -16,7 +16,7 @@ use crate::device::Device;
 use crate::ClockData;
 #[cfg(feature = "kvm")]
 use crate::CreateDevice;
-#[cfg(feature = "hyperv")]
+#[cfg(feature = "mshv")]
 use crate::HvState as VmState;
 #[cfg(feature = "kvm")]
 use crate::KvmVmState as VmState;

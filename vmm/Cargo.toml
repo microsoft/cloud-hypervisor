@@ -12,7 +12,7 @@ mmio_support = ["virtio-devices/mmio_support"]
 cmos = ["devices/cmos"]
 fwdebug = ["devices/fwdebug"]
 kvm = ["hypervisor/kvm"]
-hyperv = ["hypervisor/hyperv"]
+mshv = ["hypervisor/mshv"]
 io_uring = ["virtio-devices/io_uring"]
 
 [dependencies]

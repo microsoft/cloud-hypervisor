@@ -31,10 +31,10 @@ extern crate thiserror;
 /// KVM implementation module
 pub mod kvm;
 
-#[cfg(all(feature = "hyperv", target_arch = "x86_64"))]
-pub mod hyperv;
 /// Hypevisor related module
 pub mod hypervisor;
+#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+pub mod mshv;
 
 /// Vm related module
 pub mod vm;
@@ -51,10 +51,10 @@ mod device;
 pub use crate::hypervisor::{Hypervisor, HypervisorError};
 pub use cpu::{HypervisorCpuError, Vcpu, VmExit};
 pub use device::{Device, HypervisorDeviceError};
-#[cfg(all(feature = "hyperv", target_arch = "x86_64"))]
-pub use hyperv::*;
 #[cfg(feature = "kvm")]
 pub use kvm::*;
+#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+pub use mshv::*;
 pub use vm::{DataMatch, HypervisorVmError, Vm};
 
 use std::sync::Arc;
@@ -63,8 +63,8 @@ pub fn new() -> std::result::Result<Arc<dyn Hypervisor>, HypervisorError> {
     #[cfg(feature = "kvm")]
     let hv = kvm::KvmHypervisor::new()?;
 
-    #[cfg(feature = "hyperv")]
-    let hv = hyperv::HypervHypervisor::new()?;
+    #[cfg(feature = "mshv")]
+    let hv = mshv::HypervHypervisor::new()?;
 
     Ok(Arc::new(hv))
 }

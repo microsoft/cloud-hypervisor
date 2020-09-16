@@ -14,10 +14,10 @@ use crate::config::ConsoleOutputMode;
 use crate::config::DeviceConfig;
 use crate::config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VmConfig, VsockConfig};
 use crate::device_tree::{DeviceNode, DeviceTree};
-#[cfg(feature = "hyperv")]
-use crate::interrupt::hyperv::HypervMsiInterruptManager as MsiInterruptManager;
 #[cfg(feature = "kvm")]
 use crate::interrupt::kvm::KvmMsiInterruptManager as MsiInterruptManager;
+#[cfg(feature = "mshv")]
+use crate::interrupt::mshv::HypervMsiInterruptManager as MsiInterruptManager;
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "pci_support")]
@@ -48,7 +48,7 @@ use devices::{
 use hypervisor::kvm_ioctls::*;
 #[cfg(feature = "mmio_support")]
 use hypervisor::vm::DataMatch;
-#[cfg(all(feature = "mmio_support", feature = "hyperv"))]
+#[cfg(all(feature = "mmio_support", feature = "mshv"))]
 use hypervisor::IoEventAddress;
 use libc::TIOCGWINSZ;
 use libc::{MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, O_TMPFILE, PROT_READ, PROT_WRITE};

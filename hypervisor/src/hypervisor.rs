@@ -109,7 +109,7 @@ pub trait Hypervisor: Send + Sync {
     /// Get the supported CpuID
     ///
     fn get_cpuid(&self) -> Result<CpuId>;
-    #[cfg(not(feature = "hyperv"))]
+    #[cfg(not(feature = "mshv"))]
     ///
     /// Check particular extensions if any
     ///

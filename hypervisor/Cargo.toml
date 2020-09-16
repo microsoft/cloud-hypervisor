@@ -6,7 +6,7 @@ edition = "2018"
 
 [features]
 kvm = []
-hyperv = []
+mshv = []
 
 [dependencies]
 anyhow = "1.0"

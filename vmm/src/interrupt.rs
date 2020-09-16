@@ -393,10 +393,10 @@ pub mod kvm {
     }
 }
 
-#[cfg(feature = "hyperv")]
-pub mod hyperv {
+#[cfg(feature = "mshv")]
+pub mod mshv {
     use super::*;
-    use hypervisor::hyperv::*;
+    use hypervisor::mshv::*;
 
     type HypervMsiInterruptGroup = MsiInterruptGroup<HypervIrqRoutingEntry>;
     type HypervRoutingEntry = RoutingEntry<HypervIrqRoutingEntry>;

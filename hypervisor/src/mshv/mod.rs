@@ -13,7 +13,7 @@ use crate::cpu;
 use crate::hypervisor;
 use crate::vm;
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, Hyperv, VcpuFd, VmFd};
+use mshv_ioctls::{set_registers_64, Mshv, VcpuFd, VmFd};
 
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -273,29 +273,29 @@ pub fn raise_general_page_fault(
         .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))
 }
 
-/// Wrapper over Hyperv system ioctls.
+/// Wrapper over mshv system ioctls.
 pub struct HypervHypervisor {
-    hyperv: Hyperv,
+    mshv: Mshv,
 }
 
 impl HypervHypervisor {
-    /// Create a hypervisor based on Hyperv
+    /// Create a hypervisor based on Mshv
     pub fn new() -> hypervisor::Result<HypervHypervisor> {
         let hyperv_obj =
-            Hyperv::new().map_err(|e| hypervisor::HypervisorError::HypervisorCreate(e.into()))?;
-        Ok(HypervHypervisor { hyperv: hyperv_obj })
+            Mshv::new().map_err(|e| hypervisor::HypervisorError::HypervisorCreate(e.into()))?;
+        Ok(HypervHypervisor { mshv: hyperv_obj })
     }
 }
-/// Implementation of Hypervisor trait for Hyperv
+/// Implementation of Hypervisor trait for Mshv
 /// Example:
-/// #[cfg(feature = "hyperv")]
+/// #[cfg(feature = "mshv")]
 /// extern crate hypervisor
-/// let hyperv = hypervisor::hyperv::HypervHypervisor::new().unwrap();
-/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(hyperv);
+/// let mshv = hypervisor::mshv::HypervHypervisor::new().unwrap();
+/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 ///
 impl hypervisor::Hypervisor for HypervHypervisor {
-    /// Create a hyperv vm object and return the object as Vm trait object
+    /// Create a mshv vm object and return the object as Vm trait object
     /// Example
     /// # extern crate hypervisor;
     /// # use hypervisor::HypervHypervisor;
@@ -306,7 +306,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
     fn create_vm(&self) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let fd: VmFd;
         loop {
-            match self.hyperv.create_vm() {
+            match self.mshv.create_vm() {
                 Ok(res) => fd = res,
                 Err(e) => {
                     if e.errno() == libc::EINTR {
@@ -380,7 +380,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
     /// Retrieve the list of MSRs supported by KVM.
     ///
     fn get_msr_list(&self) -> hypervisor::Result<MsrList> {
-        self.hyperv
+        self.mshv
             .get_msr_index_list()
             .map_err(|e| hypervisor::HypervisorError::GetMsrList(e.into()))
     }
@@ -393,14 +393,14 @@ pub struct HypervVcpu {
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
-    hv_state: Arc<RwLock<HvState>>, // Hyperv State
+    hv_state: Arc<RwLock<HvState>>, // Mshv State
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
-/// #[cfg(feature = "hyperv")]
+/// #[cfg(feature = "mshv")]
 /// extern crate hypervisor
-/// let hyperv = hypervisor::hyperv::HypervHypervisor::new().unwrap();
-/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(hyperv);
+/// let mshv = hypervisor::mshv::HypervHypervisor::new().unwrap();
+/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 /// let vcpu = vm.create_vcpu(0).unwrap();
 /// vcpu.get/set().unwrap()
@@ -926,7 +926,7 @@ fn emu_reg64_to_hv_reg64(name: emulator::Register64) -> hv_register_name {
     }
 }
 
-/// Wrapper over Hyperv VM ioctls.
+/// Wrapper over Mshv VM ioctls.
 pub struct HypervVm {
     fd: Arc<VmFd>,
     msrs: MsrEntries,
@@ -945,13 +945,13 @@ fn hv_state_init() -> Arc<RwLock<HvState>> {
 }
 
 ///
-/// Implementation of Vm trait for Hyperv
+/// Implementation of Vm trait for Mshv
 /// Example:
-/// #[cfg(feature = "hyperv")]
+/// #[cfg(feature = "mshv")]
 /// # extern crate hypervisor;
 /// # use hypervisor::HypervHypervisor;
-/// let hypervisor = HypervHypervisor::new().unwrap();
-/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(hyperv);
+/// let mshv = HypervHypervisor::new().unwrap();
+/// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 /// vm.set/get().unwrap()
 ///
