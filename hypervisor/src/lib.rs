@@ -64,7 +64,7 @@ pub fn new() -> std::result::Result<Arc<dyn Hypervisor>, HypervisorError> {
     let hv = kvm::KvmHypervisor::new()?;
 
     #[cfg(feature = "mshv")]
-    let hv = mshv::HypervHypervisor::new()?;
+    let hv = mshv::MshvHypervisor::new()?;
 
     Ok(Arc::new(hv))
 }

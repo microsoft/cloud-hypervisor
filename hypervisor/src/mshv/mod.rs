@@ -274,33 +274,33 @@ pub fn raise_general_page_fault(
 }
 
 /// Wrapper over mshv system ioctls.
-pub struct HypervHypervisor {
+pub struct MshvHypervisor {
     mshv: Mshv,
 }
 
-impl HypervHypervisor {
+impl MshvHypervisor {
     /// Create a hypervisor based on Mshv
-    pub fn new() -> hypervisor::Result<HypervHypervisor> {
-        let hyperv_obj =
+    pub fn new() -> hypervisor::Result<MshvHypervisor> {
+        let mshv_obj =
             Mshv::new().map_err(|e| hypervisor::HypervisorError::HypervisorCreate(e.into()))?;
-        Ok(HypervHypervisor { mshv: hyperv_obj })
+        Ok(MshvHypervisor { mshv: mshv_obj })
     }
 }
 /// Implementation of Hypervisor trait for Mshv
 /// Example:
 /// #[cfg(feature = "mshv")]
 /// extern crate hypervisor
-/// let mshv = hypervisor::mshv::HypervHypervisor::new().unwrap();
+/// let mshv = hypervisor::mshv::MshvHypervisor::new().unwrap();
 /// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 ///
-impl hypervisor::Hypervisor for HypervHypervisor {
+impl hypervisor::Hypervisor for MshvHypervisor {
     /// Create a mshv vm object and return the object as Vm trait object
     /// Example
     /// # extern crate hypervisor;
-    /// # use hypervisor::HypervHypervisor;
-    /// use hypervisor::HypervVm;
-    /// let hypervisor = HypervHypervisor::new().unwrap();
+    /// # use hypervisor::MshvHypervisor;
+    /// use hypervisor::MshvVm;
+    /// let hypervisor = MshvHypervisor::new().unwrap();
     /// let vm = hypervisor.create_vm().unwrap()
     ///
     fn create_vm(&self) -> hypervisor::Result<Arc<dyn vm::Vm>> {
@@ -323,22 +323,22 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         }
 
         /* Install enlightenment intercepts */
-        let intercept_args = hv_install_intercept_args {
-            access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+        let intercept_args = mshv_install_intercept {
+            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
             intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_GLOBAL_CPUID,
             intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
-        let intercept_args = hv_install_intercept_args {
-            access_type: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
+        let intercept_args = mshv_install_intercept {
+            access_type_mask: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
             intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_MSR,
             intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
         };
         fd.install_intercept(intercept_args).unwrap();
 
-        let intercept_args = hv_install_intercept_args {
-            access_type: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
+        let intercept_args = mshv_install_intercept {
+            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
             intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION,
             intercept_parameter: hv_intercept_parameters {
                 exception_vector: 0x6,
@@ -360,7 +360,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
         let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
         let gsi_routes = Arc::new(RwLock::new(HashMap::new()));
 
-        Ok(Arc::new(HypervVm {
+        Ok(Arc::new(MshvVm {
             fd: vm_fd,
             msrs,
             irqfds,
@@ -386,7 +386,7 @@ impl hypervisor::Hypervisor for HypervHypervisor {
     }
 }
 /// Vcpu struct for Hyper-V
-pub struct HypervVcpu {
+pub struct MshvVcpu {
     fd: VcpuFd,
     vp_index: u8,
     cpuid: CpuId,
@@ -399,13 +399,13 @@ pub struct HypervVcpu {
 /// Example:
 /// #[cfg(feature = "mshv")]
 /// extern crate hypervisor
-/// let mshv = hypervisor::mshv::HypervHypervisor::new().unwrap();
+/// let mshv = hypervisor::mshv::MshvHypervisor::new().unwrap();
 /// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 /// let vcpu = vm.create_vcpu(0).unwrap();
 /// vcpu.get/set().unwrap()
 ///
-impl cpu::Vcpu for HypervVcpu {
+impl cpu::Vcpu for MshvVcpu {
     #[cfg(target_arch = "x86_64")]
     ///
     /// Returns the vCPU general purpose registers.
@@ -927,7 +927,7 @@ fn emu_reg64_to_hv_reg64(name: emulator::Register64) -> hv_register_name {
 }
 
 /// Wrapper over Mshv VM ioctls.
-pub struct HypervVm {
+pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: MsrEntries,
     // Emulate irqfd
@@ -949,13 +949,13 @@ fn hv_state_init() -> Arc<RwLock<HvState>> {
 /// Example:
 /// #[cfg(feature = "mshv")]
 /// # extern crate hypervisor;
-/// # use hypervisor::HypervHypervisor;
-/// let mshv = HypervHypervisor::new().unwrap();
+/// # use hypervisor::MshvHypervisor;
+/// let mshv = MshvHypervisor::new().unwrap();
 /// let hypervisor: Arc<dyn hypervisor::Hypervisor> = Arc::new(mshv);
 /// let vm = hypervisor.create_vm().expect("new VM fd creation failed");
 /// vm.set/get().unwrap()
 ///
-impl vm::Vm for HypervVm {
+impl vm::Vm for MshvVm {
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the address of the three-page region in the VM's address space.
@@ -1013,7 +1013,7 @@ impl vm::Vm for HypervVm {
             .fd
             .create_vcpu(id)
             .map_err(|e| vm::HypervisorVmError::CreateVcpu(e.into()))?;
-        let vcpu = HypervVcpu {
+        let vcpu = MshvVcpu {
             fd: vc,
             vp_index: id,
             cpuid: CpuId::new(1 as usize),
@@ -1077,10 +1077,10 @@ impl vm::Vm for HypervVm {
             flags |= HV_MAP_GPA_WRITABLE;
         }
 
-        hv_userspace_memory_region {
+        mshv_user_mem_region {
             flags,
             guest_pfn: guest_phys_addr >> PAGE_SHIFT,
-            memory_size,
+            size: memory_size,
             userspace_addr: userspace_addr as u64,
         }
     }
