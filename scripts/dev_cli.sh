@@ -7,7 +7,7 @@
 CLI_NAME="Cloud Hypervisor"
 
 CTR_IMAGE_TAG="cloudhypervisor/dev"
-CTR_IMAGE_VERSION="v4"
+CTR_IMAGE_VERSION="latest"
 CTR_IMAGE="${CTR_IMAGE_TAG}:${CTR_IMAGE_VERSION}"
 
 DOCKER_RUNTIME="docker"
@@ -367,11 +367,14 @@ cmd_build-container() {
     mkdir -p $BUILD_DIR
     cp $CLH_DOCKERFILE $BUILD_DIR
 
+    [ $(uname -m) = "aarch64" ] && TARGETARCH="arm64"
+    [ $(uname -m) = "x86_64" ] && TARGETARCH="amd64"
+
     $DOCKER_RUNTIME build \
 	   --target $container_type \
 	   -t $CTR_IMAGE \
 	   -f $BUILD_DIR/Dockerfile \
-	   --build-arg TARGETARCH="$(uname -m)" \
+	   --build-arg TARGETARCH=$TARGETARCH \
 	   $BUILD_DIR
 }
 
@@ -425,11 +428,6 @@ shift
 ensure_build_dir
 if [ $(uname -m) = "x86_64" ]; then
     ensure_latest_ctr
-fi
-
-# Before a public image for AArch64 ready, we build the container if needed.
-if [ $(uname -m) = "aarch64" ]; then
-    cmd_build-container
 fi
 
 $cmd "$@"

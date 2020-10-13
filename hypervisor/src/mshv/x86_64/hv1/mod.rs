@@ -6,7 +6,8 @@ use crate::mshv::{raise_general_page_fault, HvState, PAGE_SHIFT};
 use mshv_bindings::*;
 use std::sync::{Arc, Mutex, RwLock};
 pub const X86X_IA32_MSR_PLATFORM_ID: u32 = 0x17;
-use crate::cpu::VcpuRun;
+use crate::vm::{self, VmmOps};
+use arc_swap::ArcSwapOption;
 use mshv_ioctls::VcpuFd;
 
 pub fn process_cpuid(rax: u32) -> (u32, u32, u32, u32) {
@@ -70,7 +71,7 @@ pub fn process_msr_write(
     n: u32,
     input: u64,
     hv_state: Arc<RwLock<HvState>>,
-    vr: &dyn VcpuRun,
+    _vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
     fd_ref: &VcpuFd,
 ) -> Option<()> {
     Some(match n {
@@ -84,10 +85,13 @@ pub fn process_msr_write(
                 if input & MSR_HYPERCALL_ACTIVE != 0 {
                     //Vmcall Opcode
                     let vmcall = [0xf, 0x1, 0xc1, 0xc3];
-                    let nr_bytes = vr.write_to_guest_mem(&vmcall, guest_gpa).unwrap();
-                    if nr_bytes != 4 {
-                        raise_general_page_fault(fd_ref);
-                        panic!("Failed while writing vmcall Page to Guest VM\n");
+                    if let Some(vmmops) = _vmmops.load_full() {
+                        let nr_bytes = vmmops.guest_mem_write(&vmcall, guest_gpa).unwrap();
+
+                        if nr_bytes != 4 {
+                            raise_general_page_fault(fd_ref);
+                            panic!("Failed while writing vmcall Page to Guest VM\n");
+                        }
                     }
                 }
                 //Store input

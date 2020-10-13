@@ -10,7 +10,6 @@ use std::sync::Arc;
 mod gdt;
 pub mod interrupts;
 pub mod layout;
-#[cfg(not(feature = "acpi"))]
 mod mptable;
 pub mod regs;
 use crate::InitramfsConfig;
@@ -26,6 +25,7 @@ use vm_memory::{
     GuestMemoryMmap, GuestMemoryRegion, GuestUsize,
 };
 mod smbios;
+use std::arch::x86_64;
 
 #[derive(Debug, Copy, Clone)]
 pub enum BootProtocol {
@@ -141,7 +141,7 @@ unsafe impl ByteValued for BootParamsWrapper {}
 pub enum Error {
     /// Invalid e820 setup params.
     E820Configuration,
-    #[cfg(not(feature = "acpi"))]
+
     /// Error writing MP table to memory.
     MpTableSetup(mptable::Error),
 
@@ -174,6 +174,9 @@ pub enum Error {
 
     /// Missing SGX_LC CPU feature
     MissingSgxLaunchControlFeature,
+
+    // Error populating Cpuid
+    PopulatingCpuid,
 }
 
 impl From<Error> for super::Error {
@@ -333,12 +336,95 @@ pub fn configure_vcpu(
     kernel_entry_point: Option<EntryPoint>,
     vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     cpuid: CpuId,
+    kvm_hyperv: bool,
+    phys_bits: u8,
 ) -> super::Result<()> {
     let mut cpuid = cpuid;
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
+
+    if kvm_hyperv {
+        // Remove conflicting entries
+        cpuid.retain(|c| c.function != 0x4000_0000);
+        cpuid.retain(|c| c.function != 0x4000_0001);
+
+        // See "Hypervisor Top Level Functional Specification" for details
+        // Compliance with "Hv#1" requires leaves up to 0x4000_000a
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x40000000,
+                eax: 0x4000000a, // Maximum cpuid leaf
+                ebx: 0x756e694c, // "Linu"
+                ecx: 0x564b2078, // "x KV"
+                edx: 0x7648204d, // "M Hv"
+                ..Default::default()
+            })
+            .map_err(|_| Error::PopulatingCpuid)?;
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x40000001,
+                eax: 0x31237648, // "Hv#1"
+                ..Default::default()
+            })
+            .map_err(|_| Error::PopulatingCpuid)?;
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x40000002,
+                eax: 0x3839,  // "Build number"
+                ebx: 0xa0000, // "Version"
+                ..Default::default()
+            })
+            .map_err(|_| Error::PopulatingCpuid)?;
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x4000_0003,
+                eax: 1 << 1 // AccessPartitionReferenceCounter
+                   | 1 << 2 // AccessSynicRegs
+                   | 1 << 3 // AccessSyntheticTimerRegs
+                   | 1 << 9, // AccessPartitionReferenceTsc
+                ..Default::default()
+            })
+            .map_err(|_| Error::PopulatingCpuid)?;
+        for i in 0x4000_0004..=0x4000_000a {
+            cpuid
+                .push(CpuIdEntry {
+                    function: i,
+                    ..Default::default()
+                })
+                .map_err(|_| Error::PopulatingCpuid)?;
+        }
+    }
+
+    // Copy CPU identification string
+    for i in 0x8000_0002..=0x8000_0004 {
+        cpuid.retain(|c| c.function != i);
+        let leaf = unsafe { x86_64::__cpuid(i) };
+        cpuid
+            .push(CpuIdEntry {
+                function: i,
+                eax: leaf.eax,
+                ebx: leaf.ebx,
+                ecx: leaf.ecx,
+                edx: leaf.edx,
+                ..Default::default()
+            })
+            .map_err(|_| Error::PopulatingCpuid)?;
+    }
+
+    // Set CPU physical bits
+    for entry in cpuid.as_mut_slice().iter_mut() {
+        if entry.function == 0x8000_0008 {
+            entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
+        }
+    }
+
     fd.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
+
+    if kvm_hyperv {
+        #[cfg(feature = "kvm")]
+        fd.enable_hyperv_synic().unwrap();
+    }
 
     regs::setup_msrs(fd).map_err(Error::MSRSConfiguration)?;
     if let Some(kernel_entry_point) = kernel_entry_point {
@@ -426,11 +512,12 @@ pub fn configure_system(
     boot_prot: BootProtocol,
     sgx_epc_region: Option<SgxEpcRegion>,
 ) -> super::Result<()> {
-    smbios::setup_smbios(guest_mem).map_err(Error::SmbiosSetup)?;
+    let size = smbios::setup_smbios(guest_mem).map_err(Error::SmbiosSetup)?;
 
-    // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
-    #[cfg(not(feature = "acpi"))]
-    mptable::setup_mptable(guest_mem, _num_cpus).map_err(Error::MpTableSetup)?;
+    // Place the MP table after the SMIOS table aligned to 16 bytes
+    let offset = GuestAddress(layout::SMBIOS_START).unchecked_add(size);
+    let offset = GuestAddress((offset.0 + 16) & !0xf);
+    mptable::setup_mptable(offset, guest_mem, _num_cpus).map_err(Error::MpTableSetup)?;
 
     // Check that the RAM is not smaller than the RSDP start address
     if let Some(rsdp_addr) = rsdp_addr {
@@ -747,7 +834,6 @@ pub fn initramfs_load_addr(
 }
 
 pub fn get_host_cpu_phys_bits() -> u8 {
-    use std::arch::x86_64;
     unsafe {
         let leaf = x86_64::__cpuid(0x8000_0000);
 

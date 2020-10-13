@@ -465,9 +465,17 @@ impl Vmm {
                     None => VmState::Created,
                 };
 
+                let config = Arc::clone(config);
+
+                let mut memory_actual_size = config.lock().unwrap().memory.total_size();
+                if let Some(vm) = &self.vm {
+                    memory_actual_size -= vm.get_balloon_actual();
+                }
+
                 Ok(VmInfo {
-                    config: Arc::clone(config),
+                    config,
                     state,
+                    memory_actual_size,
                 })
             }
             None => Err(VmError::VmNotCreated),
@@ -507,6 +515,19 @@ impl Vmm {
     ) -> result::Result<(), VmError> {
         if let Some(ref mut vm) = self.vm {
             if let Err(e) = vm.resize(desired_vcpus, desired_ram, desired_ram_w_balloon) {
+                error!("Error when resizing VM: {:?}", e);
+                Err(e)
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(VmError::VmNotRunning)
+        }
+    }
+
+    fn vm_resize_zone(&mut self, id: String, desired_ram: u64) -> result::Result<(), VmError> {
+        if let Some(ref mut vm) = self.vm {
+            if let Err(e) = vm.resize_zone(id, desired_ram) {
                 error!("Error when resizing VM: {:?}", e);
                 Err(e)
             } else {
@@ -783,6 +804,16 @@ impl Vmm {
                                             resize_data.desired_ram_w_balloon,
                                         )
                                         .map_err(ApiError::VmResize)
+                                        .map(|_| ApiResponsePayload::Empty);
+                                    sender.send(response).map_err(Error::ApiResponseSend)?;
+                                }
+                                ApiRequest::VmResizeZone(resize_zone_data, sender) => {
+                                    let response = self
+                                        .vm_resize_zone(
+                                            resize_zone_data.id.clone(),
+                                            resize_zone_data.desired_ram,
+                                        )
+                                        .map_err(ApiError::VmResizeZone)
                                         .map(|_| ApiResponsePayload::Empty);
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }

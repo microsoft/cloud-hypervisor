@@ -1,36 +1,34 @@
 [![Build Status](https://travis-ci.com/cloud-hypervisor/cloud-hypervisor.svg?branch=master)](https://travis-ci.com/cloud-hypervisor/cloud-hypervisor)
 
-1. [What is Cloud Hypervisor?](#1-what-is-cloud-hypervisor)
-   * [Requirements](#requirements)
-	 + [High Level](#high-level)
-     + [Architectures](#architectures)
-	 + [Guest OS](#guest-os)
-2. [Getting Started](#2-getting-started)
-   * [Clone and build](#clone-and-build)
-   * [Run](#run)
-	 + [Cloud image](#cloud-image)
-	 + [Custom kernel and disk image](#custom-kernel-and-disk-image)
-		 - [Building your kernel](#building-your-kernel)
-		 - [Disk image](#disk-image)
-		 - [Booting the guest VM](#booting-the-guest-vm)
-3. [Status](#2-status)
-	* [Device Model](#device-model)
-	* [TODO](#todo)
-4. [rust-vmm dependency](#4-rust-vmm-dependency)
-	* [Firecracker and crosvm](#firecracker-and-crosvm)
-5. [Community](#5-community)
-	* [Contribute](#contribute)
-	* [Join us](#join-us)
-6. [Security](#6-security)
+- [1. What is Cloud Hypervisor?](#1-what-is-cloud-hypervisor)
+  - [Objectives](#objectives)
+    - [High Level](#high-level)
+    - [Architectures](#architectures)
+    - [Guest OS](#guest-os)
+- [2. Getting Started](#2-getting-started)
+  - [Clone and build](#clone-and-build)
+    - [Containerized builds and tests](#containerized-builds-and-tests)
+  - [Run](#run)
+    - [Cloud image](#cloud-image)
+    - [Custom kernel and disk image](#custom-kernel-and-disk-image)
+      - [Building your kernel](#building-your-kernel)
+      - [Disk image](#disk-image)
+      - [Booting the guest VM](#booting-the-guest-vm)
+- [3. Status](#3-status)
+  - [Hot Plug](#hot-plug)
+  - [Device Model](#device-model)
+  - [TODO](#todo)
+- [4. `rust-vmm` project dependency](#4-rust-vmm-project-dependency)
+  - [Firecracker and crosvm](#firecracker-and-crosvm)
+- [5. Community](#5-community)
+  - [Contribute](#contribute)
+  - [Join us](#join-us)
 
 # 1. What is Cloud Hypervisor?
 
-**This project is an experiment and should not be used with production workloads.**
-
 Cloud Hypervisor is an open source Virtual Machine Monitor (VMM) that runs on top of [KVM](https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt).
 The project focuses on exclusively running modern, cloud workloads, on top of a limited set of hardware architectures and platforms.
-Cloud workloads refers to those that are usually run by customers inside a cloud provider. For our purposes this means modern
-Linux* distributions with most I/O handled by paravirtualised devices (i.e. virtio), no requirement for legacy devices and recent CPUs and KVM.
+Cloud workloads refers to those that are usually run by customers inside a cloud provider. For our purposes this means modern operating systems with most I/O handled by paravirtualised devices (i.e. virtio), no requirement for legacy devices, and 64-bit CPUs.
 
 Cloud Hypervisor is implemented in [Rust](https://www.rust-lang.org/) and is based on the [rust-vmm](https://github.com/rust-vmm) crates.
 
@@ -38,27 +36,24 @@ Cloud Hypervisor is implemented in [Rust](https://www.rust-lang.org/) and is bas
 
 ### High Level
 
-* KVM and KVM only based
-* Minimal emulation
-* Low latency
-* Low memory footprint
-* Low complexity
-* High performance
-* Small attack surface
-* 64-bit support only
-* Build time configurable CPU, memory, PCI and NVDIMM hotplug
-* Machine to machine migration
+- KVM based
+- Minimal emulation
+- Low latency
+- Low memory footprint
+- Low complexity
+- High performance
+- Small attack surface
+- 64-bit support only
+- CPU, memory, PCI hotplug
+- Machine to machine migration
 
 ### Architectures
 
-`cloud-hypervisor` only supports the `x86-64` CPU architecture for now.
-
-We're planning to add support for the `AArch64` architecture in the future.
+Cloud Hypervisor supports the `x86-64` and `AArch64` architecture. There are some small differences in functionality between the two architecture (see #1125).
 
 ### Guest OS
-* `64-bit Linux`
 
-Support for *modern* 64-bit Windows guest is being evaluated.
+Cloud Hypervisor supports `64-bit Linux` with support for _modern_ 64-bit Windows guests currently under development.
 
 # 2. Getting Started
 
@@ -67,6 +62,23 @@ We create a folder to build and run `cloud-hypervisor` at `$HOME/cloud-hyperviso
 ```shell
 $ export CLOUDH=$HOME/cloud-hypervisor
 $ mkdir $CLOUDH
+```
+
+## Install prerequisites
+
+You need to install some prerequisite packages in order to build and test Cloud Hypervisor.
+Here, all the steps are based on Ubuntu, for other Linux distributions please replace the
+package manager and package name.
+
+```shell
+# Install git
+$ sudo apt install git
+# Install rust tool chain
+$ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Install build-essential
+$ sudo apt install build-essential
+# If you want to build statically linked binary please add musl target
+$ rustup target add x86_64-unknown-linux-musl
 ```
 
 ## Clone and build
@@ -82,6 +94,8 @@ $ cargo build --release
 # We need to give the cloud-hypervisor binary the NET_ADMIN capabilities for it to set TAP interfaces up on the host.
 $ sudo setcap cap_net_admin+ep ./target/release/cloud-hypervisor
 
+# If you want to build statically linked binary
+$ cargo build --release --target=x86_64-unknown-linux-musl --all
 $ popd
 ```
 
@@ -121,8 +135,8 @@ You can run a guest VM by either using an existing cloud image or booting into y
 
 ### Cloud image
 
-`cloud-hypervisor` supports booting disk images containing all needed
-components to run cloud workloads, a.k.a. cloud images.  To do that we rely on
+Cloud Hypervisor supports booting disk images containing all needed
+components to run cloud workloads, a.k.a. cloud images. To do that we rely on
 the [Rust Hypervisor
 Firmware](https://github.com/cloud-hypervisor/rust-hypervisor-firmware) project to provide
 an ELF
@@ -157,8 +171,7 @@ Multiple arguments can be given to the `--disk` parameter.
 
 #### Building your kernel
 
-`cloud-hypervisor` also supports direct kernel boot into a `vmlinux` ELF kernel
-image. In order to support virtio-fs and virtio-iommu we have our own development branch. You are of course able to use your own kernel but these instructions will continue with the version that we develop and test against.
+Cloud Hypervisor also supports direct kernel boot into a `vmlinux` ELF kernel or `bzImage`. In order to support virtio-fs and virtio-iommu we have our own development branch. You are of course able to use your own kernel but these instructions will continue with the version that we develop and test against.
 
 To build the kernel:
 
@@ -228,51 +241,52 @@ $ ./cloud-hypervisor/target/release/cloud-hypervisor \
 
 # 3. Status
 
-`cloud-hypervisor` is in a very early, pre-alpha stage. Use at your own risk!
+Cloud Hypervisor is under active development. No API or feature stability is guaranteed.
 
 As of 2020-07-02, the following cloud images are supported:
-* [Ubuntu Bionic](https://cloud-images.ubuntu.com/bionic/current/) (cloudimg)
-* [Ubuntu Focal](https://cloud-images.ubuntu.com/focal/current/) (cloudimg)
 
-Direct kernel boot to userspace should work with most rootfs.
+- [Ubuntu Bionic](https://cloud-images.ubuntu.com/bionic/current/) (cloudimg)
+- [Ubuntu Focal](https://cloud-images.ubuntu.com/focal/current/) (cloudimg)
+
+Direct kernel boot to userspace should work with a rootfs from most distributions.
 
 ## Hot Plug
 
-This [document](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/hotplug.md) details how to add devices to
-a running VM. Currently only CPU hot plug is supported.
+Cloud Hypervisor supports hotplug of CPUs, passthrough devices (VFIO), `virtio-{net,block,pmem,fs,vsock}` and memory resizing. This [document](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/hotplug.md) details how to add devices to
+a running VM.
 
 ## Device Model
 
-Follow this [documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/device_model.md).
+Details of the device model can be found in this [documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/device_model.md).
 
 ## TODO
 
-We are not tracking the `cloud-hypervisor` TODO list from a specific git tracked file but through
+We are not tracking the Cloud Hypervisor TODO list from a specific git tracked file but through
 [github issues](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/new) instead.
 
 # 4. `rust-vmm` project dependency
 
 In order to satisfy the design goal of having a high-performance, security-focused hypervisor the decision
 was made to use the [Rust](https://www.rust-lang.org/) programming language.
-The language's strong focus on memory and thread safety makes it an ideal candidate for implementing VMMs
+The language's strong focus on memory and thread safety makes it an ideal candidate for implementing VMMs.
 
-Instead of implementing the VMM components from scratch, `cloud-hypervisor` is importing the [rust-vmm](https://github.com/rust-vmm)
+Instead of implementing the VMM components from scratch, Cloud Hypervisor is importing the [rust-vmm](https://github.com/rust-vmm)
 crates, and sharing code and architecture together with other VMMs like e.g. Amazon's [Firecracker](https://firecracker-microvm.github.io/)
 and Google's [crosvm](https://chromium.googlesource.com/chromiumos/platform/crosvm/).
 
-`cloud-hypervisor` embraces the rust-vmm project goals, which is to be able to share and re-use
-as many virtualization crates as possible. As such, the `cloud-hypervisor` relationship with the rust-vmm
+Cloud Hypervisor embraces the rust-vmm project goals, which is to be able to share and re-use
+as many virtualization crates as possible. As such, the Cloud Hypervisor relationship with the rust-vmm
 project is twofold:
 
 1. It will use as much of the rust-vmm code as possible. Any new rust-vmm crate that's relevant to the project
    goals will be integrated as soon as possible.
-2. As it is likely that the rust-vmm project will lack some of the features that `cloud-hypervisor` needs (e.g. ACPI,
-   VFIO, vhost-user, etc), we will be using the `cloud-hypervisor` VMM to implement and test them, and contribute them
+2. As it is likely that the rust-vmm project will lack some of the features that Cloud Hypervisor needs (e.g. ACPI,
+   VFIO, vhost-user, etc), we will be using the Cloud Hypervisor VMM to implement and test them, and contribute them
    back to the rust-vmm project.
 
 ## Firecracker and crosvm
 
-A large part of the `cloud-hypervisor` code is based on either the Firecracker or the crosvm projects implementations.
+A large part of the Cloud Hypervisor code is based on either the Firecracker or the crosvm projects implementations.
 Both of these are VMMs written in Rust with a focus on safety and security, like Cloud Hypervisor.
 
 However we want to emphasize that the Cloud Hypervisor project is neither a fork nor a reimplementation of any of those
@@ -303,27 +317,3 @@ etc, are all equal and welcome means of contribution. See the [CONTRIBUTING](CON
 
 Get an [invite to our Slack channel](https://join.slack.com/t/cloud-hypervisor/shared_invite/enQtNjY3MTE3MDkwNDQ4LWQ1MTA1ZDVmODkwMWQ1MTRhYzk4ZGNlN2UwNTI3ZmFlODU0OTcwOWZjMTkwZDExYWE3YjFmNzgzY2FmNDAyMjI)
 and [join us on Slack](https://cloud-hypervisor.slack.com/).
-
-# 6. Security
-
-**Reporting a Potential Security Vulnerability**: If you have discovered
-potential security vulnerability in this project, please send an e-mail to
-secure@intel.com. For issues related to Intel Products, please visit
-https://security-center.intel.com.
-
-It is important to include the following details:
-  - The projects and versions affected
-  - Detailed description of the vulnerability
-  - Information on known exploits
-
-Vulnerability information is extremely sensitive. Please encrypt all security
-vulnerability reports using our *PGP key*
-
-A member of the Intel Product Security Team will review your e-mail and
-contact you to to collaborate on resolving the issue. For more information on
-how Intel works to resolve security issues, see: *Vulnerability Handling
-Guidelines*
-
-PGP Key: https://www.intel.com/content/www/us/en/security-center/pgp-public-key.html
-
-Vulnerability Handling Guidelines: https://www.intel.com/content/www/us/en/security-center/vulnerability-handling-guidelines.html

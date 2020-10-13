@@ -32,7 +32,7 @@ pub enum Error {
     ParseFsSockMissing,
     /// Cannot have dax=off along with cache_size parameter.
     InvalidCacheSizeWithDaxOff,
-    /// Missing persistant memory file parameter.
+    /// Missing persistent memory file parameter.
     ParsePmemFileMissing,
     /// Missing vsock socket path parameter.
     ParseVsockSockMissing,
@@ -56,7 +56,7 @@ pub enum Error {
     ParseRNG(OptionParserError),
     /// Error parsing filesystem parameters
     ParseFileSystem(OptionParserError),
-    /// Error parsing persistent memorry parameters
+    /// Error parsing persistent memory parameters
     ParsePersistentMemory(OptionParserError),
     /// Failed parsing console
     ParseConsole(OptionParserError),
@@ -318,12 +318,21 @@ pub struct CpusConfig {
     pub max_vcpus: u8,
     #[serde(default)]
     pub topology: Option<CpuTopology>,
+    #[serde(default)]
+    pub kvm_hyperv: bool,
+    #[serde(default)]
+    pub max_phys_bits: Option<u8>,
 }
 
 impl CpusConfig {
     pub fn parse(cpus: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("boot").add("max").add("topology");
+        parser
+            .add("boot")
+            .add("max")
+            .add("topology")
+            .add("kvm_hyperv")
+            .add("max_phys_bits");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u8 = parser
@@ -335,11 +344,21 @@ impl CpusConfig {
             .map_err(Error::ParseCpus)?
             .unwrap_or(boot_vcpus);
         let topology = parser.convert("topology").map_err(Error::ParseCpus)?;
+        let kvm_hyperv = parser
+            .convert::<Toggle>("kvm_hyperv")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or(Toggle(false))
+            .0;
+        let max_phys_bits = parser
+            .convert::<u8>("max_phys_bits")
+            .map_err(Error::ParseCpus)?;
 
         Ok(CpusConfig {
             boot_vcpus,
             max_vcpus,
             topology,
+            kvm_hyperv,
+            max_phys_bits,
         })
     }
 }
@@ -350,6 +369,8 @@ impl Default for CpusConfig {
             boot_vcpus: DEFAULT_VCPUS,
             max_vcpus: DEFAULT_VCPUS,
             topology: None,
+            kvm_hyperv: false,
+            max_phys_bits: None,
         }
     }
 }
@@ -366,6 +387,10 @@ pub struct MemoryZoneConfig {
     pub hugepages: bool,
     #[serde(default)]
     pub host_numa_node: Option<u32>,
+    #[serde(default)]
+    pub hotplug_size: Option<u64>,
+    #[serde(default)]
+    pub hotplugged_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -377,6 +402,8 @@ pub struct MemoryConfig {
     pub hotplug_method: HotplugMethod,
     #[serde(default)]
     pub hotplug_size: Option<u64>,
+    #[serde(default)]
+    pub hotplugged_size: Option<u64>,
     #[serde(default)]
     pub shared: bool,
     #[serde(default)]
@@ -398,6 +425,7 @@ impl MemoryConfig {
             .add("mergeable")
             .add("hotplug_method")
             .add("hotplug_size")
+            .add("hotplugged_size")
             .add("shared")
             .add("hugepages")
             .add("balloon");
@@ -419,6 +447,10 @@ impl MemoryConfig {
             .unwrap_or_default();
         let hotplug_size = parser
             .convert::<ByteSized>("hotplug_size")
+            .map_err(Error::ParseMemory)?
+            .map(|v| v.0);
+        let hotplugged_size = parser
+            .convert::<ByteSized>("hotplugged_size")
             .map_err(Error::ParseMemory)?
             .map(|v| v.0);
         let shared = parser
@@ -447,7 +479,9 @@ impl MemoryConfig {
                     .add("file")
                     .add("shared")
                     .add("hugepages")
-                    .add("host_numa_node");
+                    .add("host_numa_node")
+                    .add("hotplug_size")
+                    .add("hotplugged_size");
                 parser.parse(memory_zone).map_err(Error::ParseMemoryZone)?;
 
                 let id = parser.get("id").ok_or(Error::ParseMemoryZoneIdMissing)?;
@@ -470,6 +504,14 @@ impl MemoryConfig {
                 let host_numa_node = parser
                     .convert::<u32>("host_numa_node")
                     .map_err(Error::ParseMemoryZone)?;
+                let hotplug_size = parser
+                    .convert::<ByteSized>("hotplug_size")
+                    .map_err(Error::ParseMemoryZone)?
+                    .map(|v| v.0);
+                let hotplugged_size = parser
+                    .convert::<ByteSized>("hotplugged_size")
+                    .map_err(Error::ParseMemoryZone)?
+                    .map(|v| v.0);
 
                 zones.push(MemoryZoneConfig {
                     id,
@@ -478,6 +520,8 @@ impl MemoryConfig {
                     shared,
                     hugepages,
                     host_numa_node,
+                    hotplug_size,
+                    hotplugged_size,
                 });
             }
             Some(zones)
@@ -490,12 +534,31 @@ impl MemoryConfig {
             mergeable,
             hotplug_method,
             hotplug_size,
+            hotplugged_size,
             shared,
             hugepages,
             balloon,
             balloon_size: 0,
             zones,
         })
+    }
+
+    pub fn total_size(&self) -> u64 {
+        let mut size = self.size;
+        if let Some(hotplugged_size) = self.hotplugged_size {
+            size += hotplugged_size;
+        }
+
+        if let Some(zones) = &self.zones {
+            for zone in zones.iter() {
+                size += zone.size;
+                if let Some(hotplugged_size) = zone.hotplugged_size {
+                    size += hotplugged_size;
+                }
+            }
+        }
+
+        size
     }
 }
 
@@ -506,6 +569,7 @@ impl Default for MemoryConfig {
             mergeable: false,
             hotplug_method: HotplugMethod::Acpi,
             hotplug_size: None,
+            hotplugged_size: None,
             shared: false,
             hugepages: false,
             balloon: false,
@@ -1032,10 +1096,7 @@ pub enum ConsoleOutputMode {
 
 impl ConsoleOutputMode {
     pub fn input_enabled(&self) -> bool {
-        match self {
-            ConsoleOutputMode::Tty => true,
-            _ => false,
-        }
+        matches!(self, ConsoleOutputMode::Tty)
     }
 }
 
@@ -1595,7 +1656,7 @@ mod tests {
             CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 1,
-                topology: None
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1603,7 +1664,7 @@ mod tests {
             CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 2,
-                topology: None
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -1616,13 +1677,22 @@ mod tests {
                     cores_per_die: 2,
                     dies_per_package: 1,
                     packages: 2
-                })
+                }),
+                ..Default::default()
             }
         );
 
         assert!(CpusConfig::parse("boot=8,topology=2:2:1").is_err());
         assert!(CpusConfig::parse("boot=8,topology=2:2:1:x").is_err());
-
+        assert_eq!(
+            CpusConfig::parse("boot=1,kvm_hyperv=on")?,
+            CpusConfig {
+                boot_vcpus: 1,
+                max_vcpus: 1,
+                kvm_hyperv: true,
+                ..Default::default()
+            }
+        );
         Ok(())
     }
 
@@ -2081,13 +2151,14 @@ mod tests {
             cpus: CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 1,
-                topology: None,
+                ..Default::default()
             },
             memory: MemoryConfig {
                 size: 536_870_912,
                 mergeable: false,
                 hotplug_method: HotplugMethod::Acpi,
                 hotplug_size: None,
+                hotplugged_size: None,
                 shared: false,
                 hugepages: false,
                 balloon: false,

@@ -6,9 +6,6 @@
 pub mod fdt;
 /// Module for the global interrupt controller configuration.
 pub mod gic;
-mod gicv2;
-mod gicv3;
-mod gicv3_its;
 /// Layout for this aarch64 system.
 pub mod layout;
 /// Logic for configuring aarch64 registers.
@@ -17,7 +14,7 @@ pub mod regs;
 pub use self::fdt::DeviceInfoForFDT;
 use crate::DeviceType;
 use crate::RegionType;
-use hypervisor::kvm::kvm_bindings;
+use aarch64::gic::GICDevice;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
@@ -42,11 +39,8 @@ pub enum Error {
     /// Error configuring the general purpose registers
     REGSConfiguration(regs::Error),
 
-    /// Error fetching prefered target
-    VcpuArmPreferredTarget(hypervisor::HypervisorVmError),
-
-    /// Error doing Vcpu Init on Arm.
-    VcpuArmInit(hypervisor::HypervisorCpuError),
+    /// Error configuring the MPIDR register
+    VcpuRegMPIDR(hypervisor::HypervisorCpuError),
 }
 
 impl From<Error> for super::Error {
@@ -67,23 +61,10 @@ pub struct EntryPoint {
 pub fn configure_vcpu(
     fd: &Arc<dyn hypervisor::Vcpu>,
     id: u8,
-    vm: &Arc<dyn hypervisor::Vm>,
     kernel_entry_point: Option<EntryPoint>,
     vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    _phys_bits: u8,
 ) -> super::Result<u64> {
-    let mut kvi: kvm_bindings::kvm_vcpu_init = kvm_bindings::kvm_vcpu_init::default();
-
-    // This reads back the kernel's preferred target type.
-    vm.get_preferred_target(&mut kvi)
-        .map_err(Error::VcpuArmPreferredTarget)?;
-    // We already checked that the capability is supported.
-    kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_PSCI_0_2;
-    // Non-boot cpus are powered off initially.
-    if id > 0 {
-        kvi.features[0] |= 1 << kvm_bindings::KVM_ARM_VCPU_POWER_OFF;
-    }
-
-    fd.vcpu_init(&kvi).map_err(Error::VcpuArmInit)?;
     if let Some(kernel_entry_point) = kernel_entry_point {
         regs::setup_regs(
             fd,
@@ -94,7 +75,7 @@ pub fn configure_vcpu(
         .map_err(Error::REGSConfiguration)?;
     }
 
-    let mpidr = regs::read_mpidr(fd).map_err(Error::REGSConfiguration)?;
+    let mpidr = fd.read_mpidr().map_err(Error::VcpuRegMPIDR)?;
     Ok(mpidr)
 }
 
@@ -146,7 +127,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug, S: ::std::hash::Bui
     device_info: &HashMap<(DeviceType, String), T, S>,
     initrd: &Option<super::InitramfsConfig>,
     pci_space_address: &Option<(u64, u64)>,
-) -> super::Result<()> {
+) -> super::Result<Box<dyn GICDevice>> {
     // If pci_space_address is present, it means PCI devices are used ("pci" feature enabled).
     // Then GITv3-ITS is required for MSI messaging.
     // Otherwise ("mmio" feature enabled), any version of GIC is OK.
@@ -164,7 +145,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug, S: ::std::hash::Bui
     )
     .map_err(Error::SetupFDT)?;
 
-    Ok(())
+    Ok(gic_device)
 }
 
 /// Returns the memory address where the initramfs could be loaded.
@@ -210,10 +191,10 @@ fn get_fdt_addr(mem: &GuestMemoryMmap) -> u64 {
 pub fn get_host_cpu_phys_bits() -> u8 {
     // The value returned here is used to determine the physical address space size
     // for a VM (IPA size).
-    // In recent kernel versions, the maxium IPA size supported by the host can be
+    // In recent kernel versions, the maximum IPA size supported by the host can be
     // known by querying cap KVM_CAP_ARM_VM_IPA_SIZE. And the IPA size for a
     // guest can be configured smaller.
-    // But in Cloud-Hypervisor we simply use the maxium value for the VM.
+    // But in Cloud-Hypervisor we simply use the maximum value for the VM.
     // Reference https://lwn.net/Articles/766767/.
     //
     // The correct way to query KVM_CAP_ARM_VM_IPA_SIZE is via rust-vmm/kvm-ioctls,
