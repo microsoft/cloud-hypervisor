@@ -11,10 +11,11 @@
 
 use crate::cpu;
 use crate::hypervisor;
-use crate::vm;
+use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, VcpuFd, VmFd};
 
+use arc_swap::ArcSwapOption;
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
@@ -367,6 +368,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             ioeventfds,
             gsi_routes,
             hv_state: hv_state_init(),
+            vmmops: ArcSwapOption::from(None),
         }))
     }
     ///
@@ -394,6 +396,7 @@ pub struct MshvVcpu {
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
+    vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -519,10 +522,7 @@ impl cpu::Vcpu for MshvVcpu {
             .set_vcpu_events(events)
             .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
     }
-    fn run(
-        &self,
-        vr: &dyn cpu::VcpuRun,
-    ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
+    fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         // Safe because this is just only done during initialization.
         // TODO don't zero it everytime we enter this function.
         let hv_message: hv_message = unsafe { std::mem::zeroed() };
@@ -557,9 +557,13 @@ impl cpu::Vcpu for MshvVcpu {
                         data[1] = (info.rax >> 8) as u8;
                         data[2] = (info.rax >> 16) as u8;
                         data[3] = (info.rax >> 24) as u8;
-                        vr.pio_out(port.into(), &data[0..len]);
+                        if let Some(vmmops) = self.vmmops.load_full() {
+                            vmmops.pio_write(port.into(), &data[0..len]);
+                        }
                     } else {
-                        vr.pio_in(port.into(), &mut data[0..len]);
+                        if let Some(vmmops) = self.vmmops.load_full() {
+                            vmmops.pio_read(port.into(), &mut data[0..len]);
+                        }
                         // debug!("data {:x?}", &data[0..len]);
                         let v = data[0] as u32
                             | (data[1] as u32) << 8
@@ -631,10 +635,12 @@ impl cpu::Vcpu for MshvVcpu {
                             emulator::Output::ReadMemory(size) => {
                                 assert!(size <= 4);
                                 let mut data: [u8; 4] = [0; 4];
-                                vr.mmio_read(
-                                    info.guest_physical_address,
-                                    &mut data[0..size as usize],
-                                );
+                                if let Some(vmmops) = self.vmmops.load_full() {
+                                    vmmops.mmio_read(
+                                        info.guest_physical_address,
+                                        &mut data[0..size as usize],
+                                    );
+                                }
                                 let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
                                 // debug!(
                                 //     "emulator read mem {:x?} {:x?}",
@@ -666,12 +672,12 @@ impl cpu::Vcpu for MshvVcpu {
                                     /* TODO: use datamatch to provide the correct semantics */
                                     efd.write(1).unwrap();
                                 }
-
-                                vr.mmio_write(
-                                    info.guest_physical_address,
-                                    &reg_value[0..value.length as usize],
-                                );
-
+                                if let Some(vmmops) = self.vmmops.load_full() {
+                                    vmmops.mmio_write(
+                                        info.guest_physical_address,
+                                        &reg_value[0..value.length as usize],
+                                    );
+                                }
                                 emulator_input = emulator::Input::Continue;
                             }
                             emulator::Output::Done => break,
@@ -757,7 +763,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 info.msr_number,
                                 msr_input,
                                 self.hv_state.clone(),
-                                vr,
+                                self.vmmops.clone(),
                                 &self.fd,
                             ),
                             _ => None,
@@ -938,6 +944,7 @@ pub struct MshvVm {
     gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
+    vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
 }
 
 fn hv_state_init() -> Arc<RwLock<HvState>> {
@@ -1021,6 +1028,7 @@ impl vm::Vm for MshvVm {
             ioeventfds: self.ioeventfds.clone(),
             gsi_routes: self.gsi_routes.clone(),
             hv_state: self.hv_state.clone(),
+            vmmops: self.vmmops.clone(),
         };
         Ok(Arc::new(vcpu))
     }
@@ -1134,8 +1142,16 @@ impl vm::Vm for MshvVm {
     ///
     /// Set the VM state
     ///
-    fn set_state(&self, state: &VmState) -> vm::Result<()> {
+    fn set_state(&self, state: VmState) -> vm::Result<()> {
         self.hv_state.write().unwrap().hypercall_page = state.hypercall_page;
+        Ok(())
+    }
+
+    ///
+    /// Set the VmmOps interface
+    ///
+    fn set_vmmops(&self, vmmops: Box<dyn VmmOps>) -> vm::Result<()> {
+        self.vmmops.store(Some(Arc::new(vmmops)));
         Ok(())
     }
 }

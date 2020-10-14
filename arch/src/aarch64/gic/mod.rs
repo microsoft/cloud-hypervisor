@@ -1,6 +1,17 @@
 // Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod dist_regs;
+pub mod gicv2;
+pub mod gicv3;
+pub mod gicv3_its;
+pub mod icc_regs;
+pub mod redist_regs;
+
+pub use self::dist_regs::{get_dist_regs, read_ctlr, set_dist_regs, write_ctlr};
+pub use self::icc_regs::{get_icc_regs, set_icc_regs};
+pub use self::redist_regs::{get_redist_regs, set_redist_regs};
+use std::any::Any;
 use std::result;
 use std::sync::Arc;
 
@@ -11,10 +22,12 @@ pub enum Error {
     CreateGIC(hypervisor::HypervisorVmError),
     /// Error while setting device attributes for the GIC.
     SetDeviceAttribute(hypervisor::HypervisorDeviceError),
+    /// Error while getting device attributes for the GIC.
+    GetDeviceAttribute(hypervisor::HypervisorDeviceError),
 }
 type Result<T> = result::Result<T, Error>;
 
-pub trait GICDevice {
+pub trait GICDevice: Send {
     /// Returns the hypervisor agnostic Device of the GIC device
     fn device(&self) -> &Arc<dyn hypervisor::Device>;
 
@@ -36,7 +49,7 @@ pub trait GICDevice {
     }
 
     /// Returns the MSI compatibility property of the device
-    fn msi_compatiblility(&self) -> &str {
+    fn msi_compatibility(&self) -> &str {
         ""
     }
 
@@ -44,14 +57,20 @@ pub trait GICDevice {
     fn msi_properties(&self) -> &[u64] {
         &[]
     }
+
+    /// Get the values of GICR_TYPER for each vCPU.
+    fn set_gicr_typers(&mut self, gicr_typers: Vec<u64>);
+
+    /// Downcast the trait object to its concrete type.
+    fn as_any_concrete_mut(&mut self) -> &mut dyn Any;
 }
 
 pub mod kvm {
     use super::GICDevice;
     use super::Result;
-    use crate::aarch64::gicv2::kvm::KvmGICv2;
-    use crate::aarch64::gicv3::kvm::KvmGICv3;
-    use crate::aarch64::gicv3_its::kvm::KvmGICv3ITS;
+    use crate::aarch64::gic::gicv2::kvm::KvmGICv2;
+    use crate::aarch64::gic::gicv3::kvm::KvmGICv3;
+    use crate::aarch64::gic::gicv3_its::kvm::KvmGICv3ITS;
     use crate::layout;
     use hypervisor::kvm::kvm_bindings;
     use std::boxed::Box;
@@ -103,6 +122,27 @@ pub mod kvm {
             device
                 .set_device_attr(&attr)
                 .map_err(super::Error::SetDeviceAttribute)?;
+
+            Ok(())
+        }
+
+        /// Get a GIC device attribute
+        fn get_device_attribute(
+            device: &Arc<dyn hypervisor::Device>,
+            group: u32,
+            attr: u64,
+            addr: u64,
+            flags: u32,
+        ) -> Result<()> {
+            let mut attr = kvm_bindings::kvm_device_attr {
+                group,
+                attr,
+                addr,
+                flags,
+            };
+            device
+                .get_device_attr(&mut attr)
+                .map_err(super::Error::GetDeviceAttribute)?;
 
             Ok(())
         }
@@ -160,15 +200,28 @@ pub mod kvm {
         its_required: bool,
     ) -> Result<Box<dyn GICDevice>> {
         if its_required {
+            debug!("GICv3-ITS is required, creating a GICv3-ITS here.");
             KvmGICv3ITS::new(vm, vcpu_count)
         } else {
-            KvmGICv3ITS::new(vm, vcpu_count).or_else(|_| {
-                debug!("Failed to create GICv3-ITS, will try GICv3 instead.");
-                KvmGICv3::new(vm, vcpu_count).or_else(|_| {
-                    debug!("Failed to create GICv3, will try GICv2 instead.");
-                    KvmGICv2::new(vm, vcpu_count)
-                })
+            debug!("GICv3-ITS is not required, will try GICv3 instead.");
+            KvmGICv3::new(vm, vcpu_count).or_else(|_| {
+                debug!("Failed to create GICv3, will try GICv2 instead.");
+                KvmGICv2::new(vm, vcpu_count)
             })
         }
+    }
+
+    /// Function that saves RDIST pending tables into guest RAM.
+    ///
+    /// The tables get flushed to guest RAM whenever the VM gets stopped.
+    pub fn save_pending_tables(gic: &Arc<dyn hypervisor::Device>) -> Result<()> {
+        let init_gic_attr = kvm_bindings::kvm_device_attr {
+            group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_CTRL,
+            attr: u64::from(kvm_bindings::KVM_DEV_ARM_VGIC_SAVE_PENDING_TABLES),
+            addr: 0,
+            flags: 0,
+        };
+        gic.set_device_attr(&init_gic_attr)
+            .map_err(super::Error::SetDeviceAttribute)
     }
 }

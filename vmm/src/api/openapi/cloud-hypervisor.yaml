@@ -150,6 +150,22 @@ paths:
         404:
           description: The VM instance could not be resized because it is not created.
 
+  /vm.resize-zone:
+    put:
+      summary: Resize a memory zone
+      requestBody:
+        description: The target size for the memory zone
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmResizeZone'
+        required: true
+      responses:
+        204:
+          description: The memory zone was successfully resized.
+        500:
+          description: The memory zone could not be resized.
+
   /vm.add-device:
     put:
       summary: Add a new device to the VM
@@ -344,6 +360,9 @@ components:
         state:
           type: string
           enum: [Created, Running, Shutdown, Paused]
+        memory_actual_size:
+          type: integer
+          format: int64
       description: Virtual Machine information
 
     VmCounters:
@@ -352,7 +371,7 @@ components:
         type: object
         additionalProperties:
           type: integer
-          format: uint64
+          format: int64
 
     PciDeviceInfo:
       required:
@@ -450,6 +469,8 @@ components:
           type: integer
         topology:
             $ref: '#/components/schemas/CpuTopology'
+        max_phys_bits:
+          type: integer
 
     MemoryZoneConfig:
       required:
@@ -476,7 +497,13 @@ components:
           default: false
         host_numa_node:
           type: integer
-          format: uint32
+          format: int32
+        hotplug_size:
+          type: integer
+          format: int64
+        hotplugged_size:
+          type: integer
+          format: int64
 
     MemoryConfig:
       required:
@@ -488,6 +515,9 @@ components:
           format: int64
           default: 512 MB
         hotplug_size:
+          type: integer
+          format: int64
+        hotplugged_size:
           type: integer
           format: int64
         mergeable:
@@ -507,7 +537,7 @@ components:
           default: false
         balloon_size:
           type: integer
-          format: uint64
+          format: int64
         zones:
           type: array
           items:
@@ -716,7 +746,7 @@ components:
       properties:
         size:
           type: integer
-          format: uint64
+          format: int64
         prefault:
           type: boolean
           default: false
@@ -729,10 +759,10 @@ components:
       properties:
         destination:
           type: integer
-          format: uint32
+          format: int32
         distance:
           type: integer
-          format: uint8
+          format: int32
 
     NumaConfig:
       required:
@@ -741,12 +771,12 @@ components:
       properties:
         guest_numa_id:
           type: integer
-          format: uint32
+          format: int32
         cpus:
           type: array
           items:
             type: integer
-            format: uint8
+            format: int32
         distances:
           type: array
           items:
@@ -771,10 +801,25 @@ components:
           type: integer
           format: int64
 
+    VmResizeZone:
+      type: object
+      properties:
+        id:
+          type: string
+        desired_ram:
+          description: desired memory zone size in bytes
+          type: integer
+          format: int64
+
     VmAddDevice:
       type: object
       properties:
         path:
+          type: string
+        iommu:
+          type: boolean
+          default: false
+        id:
           type: string
 
     VmRemoveDevice:

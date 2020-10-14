@@ -42,8 +42,11 @@ use vmm_sys_util::eventfd::EventFd;
 const QUEUE_SIZE: u16 = 128;
 const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 
+// 128MiB is the standard memory block size in Linux. A virtio-mem region must
+// be aligned on this size, and the region size must be a multiple of it.
+pub const VIRTIO_MEM_ALIGN_SIZE: u64 = 128 * 1024 * 1024;
 // Use 2 MiB alignment so transparent hugepages can be used by KVM.
-pub const VIRTIO_MEM_DEFAULT_BLOCK_SIZE: u64 = 512 * 4096;
+const VIRTIO_MEM_DEFAULT_BLOCK_SIZE: u64 = 512 * 4096;
 const VIRTIO_MEM_USABLE_EXTENT: u64 = 256 * 1024 * 1024;
 
 // Request processed successfully, applicable for
@@ -63,7 +66,7 @@ const VIRTIO_MEM_RESP_NACK: u16 = 1;
 // - VIRTIO_MEM_REQ_UNPLUG_ALL
 // VIRTIO_MEM_RESP_BUSY: u16 = 2;
 
-// Error in request (e.g. addresses/alignemnt), applicable for
+// Error in request (e.g. addresses/alignment), applicable for
 // - VIRTIO_MEM_REQ_PLUG
 // - VIRTIO_MEM_REQ_UNPLUG
 // - VIRTIO_MEM_REQ_STATE
@@ -89,6 +92,9 @@ const VIRTIO_MEM_REQ_STATE: u16 = 3;
 const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
+
+// Virtio features
+const VIRTIO_MEM_F_ACPI_PXM: u8 = 0;
 
 #[derive(Debug)]
 pub enum Error {
@@ -153,7 +159,7 @@ struct VirtioMemResp {
 unsafe impl ByteValued for VirtioMemResp {}
 
 // Got from qemu/include/standard-headers/linux/virtio_mem.h
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct VirtioMemConfig {
     // Block size and alignment. Cannot change.
@@ -178,6 +184,36 @@ struct VirtioMemConfig {
 
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioMemConfig {}
+
+fn virtio_mem_config_resize(config: &mut VirtioMemConfig, size: u64) -> result::Result<(), Error> {
+    if config.requested_size == size {
+        return Err(Error::ResizeInval(format!(
+            "Virtio-mem resize {} is same with current config.requested_size",
+            size
+        )));
+    } else if size > config.region_size {
+        let region_size = config.region_size;
+        return Err(Error::ResizeInval(format!(
+            "Virtio-mem resize {} is bigger than config.region_size {}",
+            size, region_size
+        )));
+    } else if size % (config.block_size as u64) != 0 {
+        let block_size = config.block_size;
+        return Err(Error::ResizeInval(format!(
+            "Virtio-mem resize {} is not aligned with config.block_size {}",
+            size, block_size
+        )));
+    }
+
+    config.requested_size = size;
+    let tmp_size = cmp::min(
+        config.region_size,
+        config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
+    );
+    config.usable_region_size = cmp::max(config.usable_region_size, tmp_size);
+
+    Ok(())
+}
 
 struct Request {
     req: VirtioMemReq,
@@ -616,40 +652,19 @@ impl EpollHelperHandler for MemEpollHandler {
                     let size = self.resize.get_size();
                     let mut config = self.config.lock().unwrap();
                     let mut signal_error = false;
-                    let r = if config.requested_size == size {
-                        Err(Error::ResizeInval(format!(
-                            "Virtio-mem resize {} is same with current config.requested_size",
-                            size
-                        )))
-                    } else if size > config.region_size {
-                        let region_size = config.region_size;
-                        Err(Error::ResizeInval(format!(
-                            "Virtio-mem resize {} is bigger than config.region_size {}",
-                            size, region_size
-                        )))
-                    } else if size % (config.block_size as u64) != 0 {
-                        let block_size = config.block_size;
-                        Err(Error::ResizeInval(format!(
-                            "Virtio-mem resize {} is not aligned with config.block_size {}",
-                            size, block_size
-                        )))
-                    } else {
-                        config.requested_size = size;
-                        let tmp_size = cmp::min(
-                            config.region_size,
-                            config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
-                        );
-                        config.usable_region_size = cmp::max(config.usable_region_size, tmp_size);
-                        if let Err(e) = self.signal(&VirtioInterruptType::Config) {
-                            signal_error = true;
-                            error!("Error signalling config: {:?}", e);
-                            Err(Error::ResizeTriggerFail(e))
-                        } else {
-                            Ok(())
-                        }
+                    let mut r = virtio_mem_config_resize(&mut config, size);
+                    r = match r {
+                        Err(e) => Err(e),
+                        _ => match self.signal(&VirtioInterruptType::Config) {
+                            Err(e) => {
+                                signal_error = true;
+                                Err(Error::ResizeTriggerFail(e))
+                            }
+                            _ => Ok(()),
+                        },
                     };
                     if let Err(e) = self.resize.send(r) {
-                        error!("Sending \"resize\" reponse: {:?}", e);
+                        error!("Sending \"resize\" response: {:?}", e);
                         return true;
                     }
                     if signal_error {
@@ -695,22 +710,22 @@ impl Mem {
         region: &Arc<GuestRegionMmap>,
         resize: Resize,
         seccomp_action: SeccompAction,
+        numa_node_id: Option<u16>,
+        initial_size: u64,
     ) -> io::Result<Mem> {
         let region_len = region.len();
 
-        if region_len != region_len / VIRTIO_MEM_DEFAULT_BLOCK_SIZE * VIRTIO_MEM_DEFAULT_BLOCK_SIZE
-        {
+        if region_len != region_len / VIRTIO_MEM_ALIGN_SIZE * VIRTIO_MEM_ALIGN_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
                     "Virtio-mem size is not aligned with {}",
-                    VIRTIO_MEM_DEFAULT_BLOCK_SIZE
+                    VIRTIO_MEM_ALIGN_SIZE
                 ),
             ));
         }
 
-        // Fixme: Not support VIRTIO_MEM_F_ACPI_PXM
-        let avail_features = 1u64 << VIRTIO_F_VERSION_1;
+        let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
         let mut config = VirtioMemConfig::default();
         config.block_size = VIRTIO_MEM_DEFAULT_BLOCK_SIZE;
@@ -720,6 +735,20 @@ impl Mem {
             config.region_size,
             config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
         );
+
+        if initial_size != 0 {
+            virtio_mem_config_resize(&mut config, initial_size).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Virtio-mem resize {} got {:?}", initial_size, e),
+                )
+            })?;
+        }
+
+        if let Some(node_id) = numa_node_id {
+            avail_features |= 1u64 << VIRTIO_MEM_F_ACPI_PXM;
+            config.node_id = node_id;
+        }
 
         let host_fd = if let Some(f_offset) = region.file_offset() {
             Some(f_offset.file().as_raw_fd())

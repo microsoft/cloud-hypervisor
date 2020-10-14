@@ -130,11 +130,10 @@ if [ ! -f "$VIRTIOFSD" ]; then
     git clone --depth 1 "https://gitlab.com/virtio-fs/qemu.git" -b "virtio-fs-dev" $QEMU_DIR
     pushd $QEMU_DIR
     time ./configure --prefix=$PWD --target-list=x86_64-softmmu
-    time make virtiofsd -j `nproc`
-    cp virtiofsd $VIRTIOFSD || exit 1
+    time make -j `nproc`
+    cp build/tools/virtiofsd/virtiofsd $VIRTIOFSD || exit 1
     popd
     rm -rf $QEMU_DIR
-    sudo setcap cap_chown,cap_dac_override,cap_dac_read_search,cap_fowner,cap_fsetid,cap_setgid,cap_setuid,cap_mknod,cap_setfcap,cap_sys_admin+epi "virtiofsd" || exit 1
     popd
 fi
 
@@ -189,9 +188,9 @@ sudo ip tuntap add vfio-tap3 mode tap
 sudo ip link set vfio-tap3 master vfio-br0
 sudo ip link set vfio-tap3 up
 
-# Create tap interface without multipe queues support for vhost_user_net test.
+# Create tap interface without multiple queues support for vhost_user_net test.
 sudo ip tuntap add name vunet-tap0 mode tap
-# Create tap interface with multipe queues support for vhost_user_net test.
+# Create tap interface with multiple queues support for vhost_user_net test.
 sudo ip tuntap add name vunet-tap1 mode tap multi_queue
 
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
@@ -207,12 +206,6 @@ strip target/$BUILD_TARGET/release/cloud-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
 
-# Copy for non-privileged net test
-cp target/$BUILD_TARGET/release/cloud-hypervisor target/$BUILD_TARGET/release/cloud-hypervisor-unprivileged
-
-sudo setcap cap_net_admin+ep target/$BUILD_TARGET/release/cloud-hypervisor
-sudo setcap cap_net_admin+ep target/$BUILD_TARGET/release/vhost_user_net
-
 # We always copy a fresh version of our binary for our L2 guest.
 cp target/$BUILD_TARGET/release/cloud-hypervisor $VFIO_DIR
 cp target/$BUILD_TARGET/release/ch-remote $VFIO_DIR
@@ -227,24 +220,15 @@ sudo bash -c "echo 1 > /sys/kernel/mm/ksm/run"
 echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
-# Ensure test binary has the same caps as the cloud-hypervisor one
-time cargo test --no-run --features "integration_tests" || exit 1
-ls target/debug/deps/cloud_hypervisor-* | xargs -n 1 sudo setcap cap_net_admin+ep
-
-sudo adduser $USER kvm
-newgrp kvm << EOF
 export RUST_BACKTRACE=1
 time cargo test --features "integration_tests" "tests::parallel::$@"
-EOF
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
-    newgrp kvm << EOF
-export RUST_BACKTRACE=1
-time cargo test --features "integration_tests" "tests::sequential::$@" -- --test-threads=1
-EOF
+    export RUST_BACKTRACE=1
+    time cargo test --features "integration_tests" "tests::sequential::$@" -- --test-threads=1
     RES=$?
 fi
 
@@ -255,26 +239,15 @@ if [ $RES -eq 0 ]; then
     strip target/$BUILD_TARGET/release/vhost_user_net
     strip target/$BUILD_TARGET/release/ch-remote
 
-    sudo setcap cap_net_admin+ep target/$BUILD_TARGET/release/cloud-hypervisor
-
-    # Ensure test binary has the same caps as the cloud-hypervisor one
-    time cargo test --no-run --features "integration_tests,mmio" || exit 1
-    ls target/debug/deps/cloud_hypervisor-* | xargs -n 1 sudo setcap cap_net_admin+ep
-
-    newgrp kvm << EOF
-export RUST_BACKTRACE=1
-time cargo test --features "integration_tests,mmio" "tests::parallel::$@" 
-EOF
-
+    export RUST_BACKTRACE=1
+    time cargo test --features "integration_tests,mmio" "tests::parallel::$@" 
     RES=$?
 
     # Run some tests in sequence since the result could be affected by other tests
     # running in parallel.
     if [ $RES -eq 0 ]; then
-        newgrp kvm << EOF
-export RUST_BACKTRACE=1
-time cargo test --features "integration_tests,mmio" "tests::sequential::$@" -- --test-threads=1
-EOF
+        export RUST_BACKTRACE=1
+        time cargo test --features "integration_tests,mmio" "tests::sequential::$@" -- --test-threads=1
         RES=$?
     fi
 fi

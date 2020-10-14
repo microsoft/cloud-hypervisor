@@ -10,16 +10,18 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::VcpuInit;
-use crate::cpu;
+#[cfg(target_arch = "aarch64")]
+use crate::aarch64::{RegList, Register, StandardRegisters};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{CpuId, LapicState};
+use crate::{CpuState, Xsave};
+
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
 #[cfg(feature = "kvm")]
 use crate::MpState;
-use crate::{CpuState, Xsave};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -140,12 +142,12 @@ pub enum HypervisorCpuError {
     /// Setting one reg error
     ///
     #[error("Failed to init vcpu: {0}")]
-    SetOneReg(#[source] anyhow::Error),
+    SetRegister(#[source] anyhow::Error),
     ///
     /// Getting one reg error
     ///
     #[error("Failed to init vcpu: {0}")]
-    GetOneReg(#[source] anyhow::Error),
+    GetRegister(#[source] anyhow::Error),
     ///
     /// Getting guest clock paused error
     ///
@@ -176,6 +178,35 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to write to Guest Mem at: {0}")]
     GuestMemWrite(#[source] anyhow::Error),
+    /// Enabling HyperV SynIC error
+    ///
+    #[error("Failed to enable HyperV SynIC")]
+    EnableHyperVSynIC(#[source] anyhow::Error),
+    ///
+    /// Getting AArch64 core register error
+    ///
+    #[error("Failed to get core register: {0}")]
+    GetCoreRegister(#[source] anyhow::Error),
+    ///
+    /// Setting AArch64 core register error
+    ///
+    #[error("Failed to set core register: {0}")]
+    SetCoreRegister(#[source] anyhow::Error),
+    ///
+    /// Getting AArch64 registers list error
+    ///
+    #[error("Failed to retrieve list of registers: {0}")]
+    GetRegList(#[source] anyhow::Error),
+    ///
+    /// Getting AArch64 system register error
+    ///
+    #[error("Failed to get system register: {0}")]
+    GetSysRegister(#[source] anyhow::Error),
+    ///
+    /// Setting AArch64 system register error
+    ///
+    #[error("Failed to set system register: {0}")]
+    SetSysRegister(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -190,6 +221,7 @@ pub enum VmExit<'a> {
     MmioWrite(u64 /* address */, &'a [u8]),
     Ignore,
     Reset,
+    Hyperv,
 }
 
 ///
@@ -236,6 +268,11 @@ pub trait Vcpu: Send + Sync {
     /// X86 specific call to setup the CPUID registers.
     ///
     fn set_cpuid2(&self, cpuid: &CpuId) -> Result<()>;
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    ///
+    /// X86 specific call to enable HyperV SynIC
+    ///
+    fn enable_hyperv_synic(&self) -> Result<()>;
     #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call to retrieve the CPUID registers.
@@ -318,12 +355,43 @@ pub trait Vcpu: Send + Sync {
     /// Sets the value of one register for this vCPU.
     ///
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-    fn set_one_reg(&self, reg_id: u64, data: u64) -> Result<()>;
+    fn set_reg(&self, reg_id: u64, data: u64) -> Result<()>;
     ///
     /// Sets the value of one register for this vCPU.
     ///
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-    fn get_one_reg(&self, reg_id: u64) -> Result<u64>;
+    fn get_reg(&self, reg_id: u64) -> Result<u64>;
+    ///
+    /// Gets a list of the guest registers that are supported for the
+    /// KVM_GET_ONE_REG/KVM_SET_ONE_REG calls.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn get_reg_list(&self, reg_list: &mut RegList) -> Result<()>;
+    ///
+    /// Save the state of the core registers.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn core_registers(&self, state: &mut StandardRegisters) -> Result<()>;
+    ///
+    /// Restore the state of the core registers.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn set_core_registers(&self, state: &StandardRegisters) -> Result<()>;
+    ///
+    /// Save the state of the system registers.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn system_registers(&self, state: &mut Vec<Register>) -> Result<()>;
+    ///
+    /// Restore the state of the system registers.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn set_system_registers(&self, state: &[Register]) -> Result<()>;
+    ///
+    /// Read the MPIDR - Multiprocessor Affinity Register.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn read_mpidr(&self) -> Result<u64>;
     ///
     /// Retrieve the vCPU state.
     /// This function is necessary to snapshot the VM
@@ -334,17 +402,8 @@ pub trait Vcpu: Send + Sync {
     /// This function is required when restoring the VM
     ///
     fn set_state(&self, state: &CpuState) -> Result<()>;
-
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
-    fn run(&self, vr: &dyn VcpuRun) -> std::result::Result<VmExit, HypervisorCpuError>;
-}
-
-pub trait VcpuRun {
-    fn mmio_read(&self, addr: u64, data: &mut [u8]);
-    fn mmio_write(&self, addr: u64, data: &[u8]);
-    fn pio_in(&self, addr: u64, data: &mut [u8]);
-    fn pio_out(&self, addr: u64, data: &[u8]);
-    fn write_to_guest_mem(&self, buf: &[u8], gpa: u64) -> cpu::Result<usize>;
+    fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError>;
 }

@@ -97,7 +97,8 @@ fn create_app<'a, 'b>(
                 .long("cpus")
                 .help(
                     "boot=<boot_vcpus>,max=<max_vcpus>,\
-                    topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>",
+                    topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,\
+                    kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>",
                 )
                 .default_value(&default_vcpus)
                 .group("vm-config"),
@@ -109,7 +110,9 @@ fn create_app<'a, 'b>(
                     "Memory parameters \
                      \"size=<guest_memory_size>,mergeable=on|off,shared=on|off,hugepages=on|off,\
                      hotplug_method=acpi|virtio-mem,\
-                     hotplug_size=<hotpluggable_memory_size>\"",
+                     hotplug_size=<hotpluggable_memory_size>,\
+                     hotplugged_size=<hotplugged_memory_size>,\
+                     balloon=on|off\"",
                 )
                 .default_value(&default_memory)
                 .group("vm-config"),
@@ -121,7 +124,8 @@ fn create_app<'a, 'b>(
                     "User defined memory zone parameters \
                      \"size=<guest_memory_region_size>,file=<backing_file>,\
                      shared=on|off,hugepages=on|off,host_numa_node=<node_id>,\
-                     id=<zone_identifier>\"",
+                     id=<zone_identifier>,hotplug_size=<hotpluggable_memory_size>,\
+                     hotplugged_size=<hotplugged_memory_size>\"",
                 )
                 .takes_value(true)
                 .min_values(1)
@@ -130,7 +134,10 @@ fn create_app<'a, 'b>(
         .arg(
             Arg::with_name("kernel")
                 .long("kernel")
-                .help("Path to kernel image (vmlinux)")
+                .help(
+                    "Path to loaded kernel. This may be a kernel or firmware that supports a PVH \
+                entry point, a vmlinux ELF file or a Linux bzImage or achitecture equivalent",
+                )
                 .takes_value(true)
                 .group("vm-config"),
         )
@@ -322,7 +329,16 @@ fn start_vmm(cmd_arguments: ArgMatches) {
     } else {
         SeccompAction::Trap
     };
-    let hypervisor = hypervisor::new().unwrap();
+    let hypervisor = match hypervisor::new() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "Failed to open hypervisor interface (is /dev/kvm available?): {:?}",
+                e
+            );
+            process::exit(1);
+        }
+    };
     let vmm_thread = match vmm::start_vmm_thread(
         env!("CARGO_PKG_VERSION").to_string(),
         api_socket_path,
@@ -433,10 +449,9 @@ fn main() {
     .get_matches();
 
     let log_level = match cmd_arguments.occurrences_of("v") {
-        0 => LevelFilter::Error,
-        1 => LevelFilter::Warn,
-        2 => LevelFilter::Info,
-        3 => LevelFilter::Debug,
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
         _ => LevelFilter::Trace,
     };
 
@@ -532,12 +547,15 @@ mod unit_tests {
                     boot_vcpus: 1,
                     max_vcpus: 1,
                     topology: None,
+                    kvm_hyperv: false,
+                    max_phys_bits: None,
                 },
                 memory: MemoryConfig {
                     size: 536_870_912,
                     mergeable: false,
                     hotplug_method: HotplugMethod::Acpi,
                     hotplug_size: None,
+                    hotplugged_size: None,
                     shared: false,
                     hugepages: false,
                     balloon: false,

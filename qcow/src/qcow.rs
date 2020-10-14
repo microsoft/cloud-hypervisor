@@ -769,11 +769,14 @@ impl QcowFile {
             let mut ref_table = vec![0; refcount_table_entries as usize];
             let mut first_free_cluster: u64 = 0;
             for refblock_addr in &mut ref_table {
-                while refcounts[first_free_cluster as usize] != 0 {
-                    first_free_cluster += 1;
+                loop {
                     if first_free_cluster >= refcounts.len() as u64 {
                         return Err(Error::NotEnoughSpaceForRefcounts);
                     }
+                    if refcounts[first_free_cluster as usize] == 0 {
+                        break;
+                    }
+                    first_free_cluster += 1;
                 }
 
                 *refblock_addr = first_free_cluster * cluster_size;
@@ -1056,7 +1059,7 @@ impl QcowFile {
             // Free the previously used cluster if one exists. Modified tables are always
             // witten to new clusters so the L1 table can be committed to disk after they
             // are and L1 never points at an invalid table.
-            // The index must be valid from when it was insterted.
+            // The index must be valid from when it was inserted.
             let addr = self.l1_table[l1_index];
             if addr != 0 {
                 self.unref_clusters.push(addr);
@@ -1354,7 +1357,7 @@ impl QcowFile {
     fn sync_caches(&mut self) -> std::io::Result<()> {
         // Write out all dirty L2 tables.
         for (l1_index, l2_table) in self.l2_cache.iter_mut().filter(|(_k, v)| v.dirty()) {
-            // The index must be valid from when we insterted it.
+            // The index must be valid from when we inserted it.
             let addr = self.l1_table[*l1_index];
             if addr != 0 {
                 self.raw_file.write_pointer_table(

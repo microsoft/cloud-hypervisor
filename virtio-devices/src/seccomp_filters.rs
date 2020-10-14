@@ -181,16 +181,21 @@ fn virtio_iommu_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
 fn virtio_mem_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_brk),
+        allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_epoll_create1),
         allow_syscall(libc::SYS_epoll_ctl),
         allow_syscall(libc::SYS_epoll_pwait),
         #[cfg(target_arch = "x86_64")]
         allow_syscall(libc::SYS_epoll_wait),
+        allow_syscall(libc::SYS_exit),
         allow_syscall(libc::SYS_fallocate),
         allow_syscall(libc::SYS_futex),
         allow_syscall(libc::SYS_madvise),
+        allow_syscall(libc::SYS_munmap),
         allow_syscall(libc::SYS_read),
+        allow_syscall(libc::SYS_rt_sigprocmask),
+        allow_syscall(libc::SYS_sigaltstack),
         allow_syscall(libc::SYS_write),
     ])
 }
@@ -333,6 +338,7 @@ fn virtio_vhost_fs_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
 fn virtio_vhost_net_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_brk),
+        allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_epoll_create1),
         allow_syscall(libc::SYS_epoll_ctl),
@@ -342,7 +348,6 @@ fn virtio_vhost_net_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall(libc::SYS_futex),
         allow_syscall(libc::SYS_read),
         allow_syscall(libc::SYS_write),
-        allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_sigaltstack),
         allow_syscall(libc::SYS_munmap),
         #[cfg(target_arch = "aarch64")]
@@ -355,6 +360,7 @@ fn virtio_vhost_net_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
 fn virtio_vhost_net_ctl_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_brk),
+        allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_epoll_create1),
         allow_syscall(libc::SYS_epoll_ctl),
@@ -363,7 +369,6 @@ fn virtio_vhost_net_ctl_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall(libc::SYS_epoll_wait),
         allow_syscall(libc::SYS_futex),
         allow_syscall(libc::SYS_read),
-        allow_syscall(libc::SYS_close),
         #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_sigaltstack),
         #[cfg(target_arch = "aarch64")]
@@ -382,6 +387,7 @@ fn create_vsock_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
 fn virtio_vsock_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_accept4),
+        allow_syscall(libc::SYS_brk),
         allow_syscall(libc::SYS_close),
         allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_epoll_create1),

@@ -4,16 +4,23 @@
 pub mod kvm {
     use crate::aarch64::gic::kvm::KvmGICDevice;
     use crate::aarch64::gic::{Error, GICDevice};
+    use std::any::Any;
     use std::{boxed::Box, result};
     type Result<T> = result::Result<T, Error>;
     use crate::layout;
     use hypervisor::kvm::kvm_bindings;
+    use std::convert::TryInto;
     use std::sync::Arc;
 
     /// Represent a GIC v2 device
     pub struct KvmGICv2 {
         /// The hypervisor agnostic device
         device: Arc<dyn hypervisor::Device>,
+
+        /// Vector holding values of GICR_TYPER for each vCPU
+        /// As GICv2 does not have redistributor, this field is always
+        /// a zero vector.
+        gicr_typers: Vec<u64>,
 
         /// GIC device properties, to be used for setting up the fdt entry
         properties: [u64; 4],
@@ -72,6 +79,14 @@ pub mod kvm {
         fn vcpu_count(&self) -> u64 {
             self.vcpu_count
         }
+
+        fn set_gicr_typers(&mut self, gicr_typers: Vec<u64>) {
+            self.gicr_typers = gicr_typers;
+        }
+
+        fn as_any_concrete_mut(&mut self) -> &mut dyn Any {
+            self
+        }
     }
 
     impl KvmGICDevice for KvmGICv2 {
@@ -85,6 +100,7 @@ pub mod kvm {
         ) -> Box<dyn GICDevice> {
             Box::new(KvmGICv2 {
                 device,
+                gicr_typers: vec![0; vcpu_count.try_into().unwrap()],
                 properties: [
                     KvmGICv2::get_dist_addr(),
                     KvmGICv2::get_dist_size(),

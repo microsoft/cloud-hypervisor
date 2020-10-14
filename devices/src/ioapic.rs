@@ -67,10 +67,12 @@ fn trigger_mode(entry: RedirectionTableEntry) -> u8 {
 fn interrupt_mask(entry: RedirectionTableEntry) -> u8 {
     ((entry >> 16) & 0x1u64) as u8
 }
-fn destination_field_physical(entry: RedirectionTableEntry) -> u8 {
-    ((entry >> 56) & 0xfu64) as u8
-}
-fn destination_field_logical(entry: RedirectionTableEntry) -> u8 {
+fn destination_field(entry: RedirectionTableEntry) -> u8 {
+    // When the destination mode is physical, the destination field should only
+    // be defined through bits 56-59, as defined in the IOAPIC specification.
+    // But from the APIC specification, the APIC ID is always defined on 8 bits
+    // no matter which destination mode is selected. That's why we always
+    // retrieve the destination field based on bits 56-63.
     ((entry >> 56) & 0xffu64) as u8
 }
 fn set_delivery_status(entry: &mut RedirectionTableEntry, val: u8) {
@@ -99,12 +101,6 @@ const IOREGSEL_OFF: u8 = 0x0;
 const IOWIN_OFF: u8 = 0x10;
 const IOWIN_SCALE: u8 = 0x2;
 const REG_MAX_OFFSET: u8 = IOWIN_OFF + (NUM_IOAPIC_PINS as u8 * 2) - 1;
-
-#[repr(u8)]
-enum DestinationMode {
-    Physical = 0,
-    Logical = 1,
-}
 
 #[repr(u8)]
 enum TriggerMode {
@@ -201,15 +197,13 @@ impl Ioapic {
             })
             .map_err(Error::CreateInterruptSourceGroup)?;
 
-        interrupt_source_group
-            .enable()
-            .map_err(Error::EnableInterrupt)?;
-
+        // The IOAPIC is created with entries already masked. The guest will be
+        // in charge of unmasking them if/when necessary.
         Ok(Ioapic {
             id,
             id_reg: 0,
             reg_sel: 0,
-            reg_entries: [0; NUM_IOAPIC_PINS],
+            reg_entries: [0x10000; NUM_IOAPIC_PINS],
             used_entries: [false; NUM_IOAPIC_PINS],
             apic_address,
             interrupt_source_group,
@@ -220,6 +214,16 @@ impl Ioapic {
         debug!("IOAPIC_W reg 0x{:x}, val 0x{:x}", self.reg_sel, val);
 
         match self.reg_sel as u8 {
+            IOAPIC_REG_VERSION => {
+                if val == 0 {
+                    // Windows writes zero here (see #1791)
+                } else {
+                    error!(
+                        "IOAPIC: invalid write to version register (0x{:x}): 0x{:x}",
+                        self.reg_sel, val
+                    );
+                }
+            }
             IOAPIC_REG_ID => self.id_reg = (val >> 24) & 0xf,
             IOWIN_OFF..=REG_MAX_OFFSET => {
                 let (index, is_high_bits) = decode_irq_from_selector(self.reg_sel as u8);
@@ -241,7 +245,10 @@ impl Ioapic {
                 // Store the information this IRQ is now being used.
                 self.used_entries[index] = true;
             }
-            _ => error!("IOAPIC: invalid write to register offset"),
+            _ => error!(
+                "IOAPIC: invalid write to register offset 0x{:x}",
+                self.reg_sel
+            ),
         }
     }
 
@@ -260,7 +267,10 @@ impl Ioapic {
                 }
             }
             _ => {
-                error!("IOAPIC: invalid read from register offset");
+                error!(
+                    "IOAPIC: invalid read from register offset 0x{:x}",
+                    self.reg_sel
+                );
                 0
             }
         }
@@ -296,11 +306,7 @@ impl Ioapic {
 
         // Validate Destination Mode value, and retrieve Destination ID
         let destination_mode = destination_mode(entry);
-        let destination_id: u8 = match destination_mode {
-            x if x == DestinationMode::Physical as u8 => destination_field_physical(entry),
-            x if x == DestinationMode::Logical as u8 => destination_field_logical(entry),
-            _ => return Err(Error::InvalidDestinationMode),
-        };
+        let destination_id = destination_field(entry);
 
         // When this bit is set, the message is directed to the processor with
         // the lowest interrupt priority among processors that can receive the

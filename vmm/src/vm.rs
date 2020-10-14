@@ -33,25 +33,31 @@ use crate::cpu;
 use crate::device_manager::{self, get_win_size, Console, DeviceManager, DeviceManagerError};
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::migration::{get_vm_snapshot, url_to_path, VM_SNAPSHOT_FILE};
+use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
+use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
 use arch::BootProtocol;
 use arch::EntryPoint;
 use devices::HotPlugNotificationFlags;
+use hypervisor::vm::{HypervisorVmError, VmmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::Error::InvalidElfMagicNumber;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 use linux_loader::loader::KernelLoader;
-use seccomp::SeccompAction;
+use seccomp::{SeccompAction, SeccompFilter};
 use signal_hook::{iterator::Signals, SIGINT, SIGTERM, SIGWINCH};
+use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
 use std::ffi::CString;
+#[cfg(target_arch = "x86_64")]
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::io::{Seek, SeekFrom};
@@ -61,8 +67,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
 use url::Url;
+use vm_device::Bus;
 use vm_memory::{
-    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryMmap, GuestRegionMmap,
+    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap,
+    GuestRegionMmap,
 };
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -70,6 +78,11 @@ use vm_migration::{
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::terminal::Terminal;
+
+#[cfg(target_arch = "aarch64")]
+use arch::aarch64::gic::gicv3::kvm::{KvmGICv3, GIC_V3_SNAPSHOT_ID};
+#[cfg(target_arch = "aarch64")]
+use arch::aarch64::gic::kvm::create_gic;
 
 // 64 bit direct boot entry offset for bzImage
 #[cfg(target_arch = "x86_64")]
@@ -202,19 +215,37 @@ pub enum Error {
 
     /// Invalid configuration for NUMA.
     InvalidNumaConfig,
+
+    /// Cannot create seccomp filter
+    CreateSeccompFilter(seccomp::SeccompError),
+
+    /// Cannot apply seccomp filter
+    ApplySeccompFilter(seccomp::Error),
+
+    /// Failed resizing a memory zone.
+    ResizeZone,
+
+    /// Failed setting the VmmOps interface.
+    SetVmmOpsInterface(hypervisor::HypervisorVmError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NumaNode {
     memory_regions: Vec<Arc<GuestRegionMmap>>,
+    hotplug_regions: Vec<Arc<GuestRegionMmap>>,
     cpus: Vec<u8>,
     distances: BTreeMap<u32, u8>,
+    memory_zones: Vec<String>,
 }
 
 impl NumaNode {
     pub fn memory_regions(&self) -> &Vec<Arc<GuestRegionMmap>> {
         &self.memory_regions
+    }
+
+    pub fn hotplug_regions(&self) -> &Vec<Arc<GuestRegionMmap>> {
+        &self.hotplug_regions
     }
 
     pub fn cpus(&self) -> &Vec<u8> {
@@ -223,6 +254,10 @@ impl NumaNode {
 
     pub fn distances(&self) -> &BTreeMap<u32, u8> {
         &self.distances
+    }
+
+    pub fn memory_zones(&self) -> &Vec<String> {
+        &self.memory_zones
     }
 }
 
@@ -270,6 +305,139 @@ impl VmState {
     }
 }
 
+// Debug I/O port
+#[cfg(target_arch = "x86_64")]
+const DEBUG_IOPORT: u16 = 0x80;
+#[cfg(target_arch = "x86_64")]
+const DEBUG_IOPORT_PREFIX: &str = "Debug I/O port";
+
+#[cfg(target_arch = "x86_64")]
+/// Debug I/O port, see:
+/// https://www.intel.com/content/www/us/en/support/articles/000005500/boards-and-kits.html
+///
+/// Since we're not a physical platform, we can freely assign code ranges for
+/// debugging specific parts of our virtual platform.
+pub enum DebugIoPortRange {
+    Firmware,
+    Bootloader,
+    Kernel,
+    Userspace,
+    Custom,
+}
+#[cfg(target_arch = "x86_64")]
+impl DebugIoPortRange {
+    fn from_u8(value: u8) -> DebugIoPortRange {
+        match value {
+            0x00..=0x1f => DebugIoPortRange::Firmware,
+            0x20..=0x3f => DebugIoPortRange::Bootloader,
+            0x40..=0x5f => DebugIoPortRange::Kernel,
+            0x60..=0x7f => DebugIoPortRange::Userspace,
+            _ => DebugIoPortRange::Custom,
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl fmt::Display for DebugIoPortRange {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DebugIoPortRange::Firmware => write!(f, "{}: Firmware", DEBUG_IOPORT_PREFIX),
+            DebugIoPortRange::Bootloader => write!(f, "{}: Bootloader", DEBUG_IOPORT_PREFIX),
+            DebugIoPortRange::Kernel => write!(f, "{}: Kernel", DEBUG_IOPORT_PREFIX),
+            DebugIoPortRange::Userspace => write!(f, "{}: Userspace", DEBUG_IOPORT_PREFIX),
+            DebugIoPortRange::Custom => write!(f, "{}: Custom", DEBUG_IOPORT_PREFIX),
+        }
+    }
+}
+
+struct VmOps {
+    memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    #[cfg(target_arch = "x86_64")]
+    io_bus: Arc<Bus>,
+    mmio_bus: Arc<Bus>,
+    #[cfg(target_arch = "x86_64")]
+    timestamp: std::time::Instant,
+}
+
+impl VmOps {
+    #[cfg(target_arch = "x86_64")]
+    // Log debug io port codes.
+    fn log_debug_ioport(&self, code: u8) {
+        let elapsed = self.timestamp.elapsed();
+
+        debug!(
+            "[{} code 0x{:x}] {}.{:>06} seconds",
+            DebugIoPortRange::from_u8(code),
+            code,
+            elapsed.as_secs(),
+            elapsed.as_micros()
+        );
+    }
+}
+
+impl VmmOps for VmOps {
+    fn guest_mem_write(&self, buf: &[u8], gpa: u64) -> hypervisor::vm::Result<usize> {
+        self.memory
+            .memory()
+            .write(buf, GuestAddress(gpa))
+            .map_err(|e| HypervisorVmError::GuestMemWrite(e.into()))
+    }
+
+    fn guest_mem_read(&self, buf: &mut [u8], gpa: u64) -> hypervisor::vm::Result<usize> {
+        self.memory
+            .memory()
+            .read(buf, GuestAddress(gpa))
+            .map_err(|e| HypervisorVmError::GuestMemRead(e.into()))
+    }
+
+    fn mmio_read(&self, addr: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
+        if let Err(e) = self.mmio_bus.read(addr, data) {
+            if let vm_device::BusError::MissingAddressRange = e {
+                warn!("Guest MMIO read to unregistered address 0x{:x}", addr);
+            }
+        }
+        Ok(())
+    }
+
+    fn mmio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
+        if let Err(e) = self.mmio_bus.write(addr, data) {
+            if let vm_device::BusError::MissingAddressRange = e {
+                warn!("Guest MMIO write to unregistered address 0x{:x}", addr);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn pio_read(&self, addr: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
+        if let Err(e) = self.io_bus.read(addr, data) {
+            if let vm_device::BusError::MissingAddressRange = e {
+                warn!("Guest PIO read to unregistered address 0x{:x}", addr);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn pio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
+        if addr == DEBUG_IOPORT as u64 && data.len() == 1 {
+            self.log_debug_ioport(data[0]);
+        }
+
+        if let Err(e) = self.io_bus.write(addr, data) {
+            if let vm_device::BusError::MissingAddressRange = e {
+                warn!("Guest PIO write to unregistered address 0x{:x}", addr);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn physical_bits(max_phys_bits: Option<u8>) -> u8 {
+    let host_phys_bits = get_host_cpu_phys_bits();
+    cmp::min(host_phys_bits, max_phys_bits.unwrap_or(host_phys_bits))
+}
+
 pub struct Vm {
     kernel: File,
     initramfs: Option<File>,
@@ -288,6 +456,8 @@ pub struct Vm {
     saved_clock: Option<hypervisor::ClockData>,
     #[cfg(feature = "acpi")]
     numa_nodes: NumaNodes,
+    seccomp_action: SeccompAction,
+    exit_evt: EventFd,
 }
 
 impl Vm {
@@ -311,6 +481,11 @@ impl Vm {
             .validate()
             .map_err(Error::ConfigValidation)?;
 
+        // Create NUMA nodes based on NumaConfig.
+        #[cfg(feature = "acpi")]
+        let numa_nodes =
+            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+
         let device_manager = DeviceManager::new(
             vm.clone(),
             config.clone(),
@@ -319,8 +494,26 @@ impl Vm {
             &reset_evt,
             vmm_path,
             seccomp_action.clone(),
+            #[cfg(feature = "acpi")]
+            numa_nodes.clone(),
         )
         .map_err(Error::DeviceManager)?;
+
+        let memory = memory_manager.lock().unwrap().guest_memory();
+        #[cfg(target_arch = "x86_64")]
+        let io_bus = Arc::clone(device_manager.lock().unwrap().io_bus());
+        let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
+        // Create the VmOps structure, which implements the VmmOps trait.
+        // And send it to the hypervisor.
+        let vm_ops = Box::new(VmOps {
+            memory,
+            #[cfg(target_arch = "x86_64")]
+            io_bus,
+            mmio_bus,
+            #[cfg(target_arch = "x86_64")]
+            timestamp: std::time::Instant::now(),
+        });
+        vm.set_vmmops(vm_ops).map_err(Error::SetVmmOpsInterface)?;
 
         let cpu_manager = cpu::CpuManager::new(
             &config.lock().unwrap().cpus.clone(),
@@ -329,6 +522,7 @@ impl Vm {
             vm.clone(),
             reset_evt,
             hypervisor,
+            seccomp_action.clone(),
         )
         .map_err(Error::CpuManager)?;
 
@@ -344,11 +538,6 @@ impl Vm {
             .map(|i| File::open(&i.path))
             .transpose()
             .map_err(Error::InitramfsFile)?;
-
-        // Create NUMA nodes based on NumaConfig.
-        #[cfg(feature = "acpi")]
-        let numa_nodes =
-            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
 
         Ok(Vm {
             kernel,
@@ -366,6 +555,8 @@ impl Vm {
             saved_clock: _saved_clock,
             #[cfg(feature = "acpi")]
             numa_nodes,
+            seccomp_action: seccomp_action.clone(),
+            exit_evt,
         })
     }
 
@@ -387,16 +578,16 @@ impl Vm {
                     return Err(Error::InvalidNumaConfig);
                 }
 
-                let mut node = NumaNode {
-                    memory_regions: Vec::new(),
-                    cpus: Vec::new(),
-                    distances: BTreeMap::new(),
-                };
+                let mut node = NumaNode::default();
 
                 if let Some(memory_zones) = &config.memory_zones {
                     for memory_zone in memory_zones.iter() {
                         if let Some(mm_zone) = mm_zones.get(memory_zone) {
-                            node.memory_regions.extend(mm_zone.clone());
+                            node.memory_regions.extend(mm_zone.regions().clone());
+                            if let Some(virtiomem_zone) = mm_zone.virtio_mem_zone() {
+                                node.hotplug_regions.push(virtiomem_zone.region().clone());
+                            }
+                            node.memory_zones.push(memory_zone.clone());
                         } else {
                             error!("Unknown memory zone '{}'", memory_zone);
                             return Err(Error::InvalidNumaConfig);
@@ -447,11 +638,13 @@ impl Vm {
         let vm = hypervisor.create_vm().unwrap();
         #[cfg(target_arch = "x86_64")]
         vm.enable_split_irq().unwrap();
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
         let memory_manager = MemoryManager::new(
             vm.clone(),
             &config.lock().unwrap().memory.clone(),
             None,
             false,
+            phys_bits,
         )
         .map_err(Error::MemoryManager)?;
 
@@ -487,7 +680,6 @@ impl Vm {
             .unwrap()
             .create_devices()
             .map_err(Error::DeviceManager)?;
-
         Ok(new_vm)
     }
 
@@ -510,19 +702,21 @@ impl Vm {
         let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
         let config = vm_snapshot.config;
         if let Some(state) = vm_snapshot.state {
-            vm.set_state(&state)
+            vm.set_state(state)
                 .map_err(|e| Error::Restore(MigratableError::Restore(e.into())))?;
         }
 
         let memory_manager = if let Some(memory_manager_snapshot) =
             snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID)
         {
+            let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
             MemoryManager::new_from_snapshot(
                 memory_manager_snapshot,
                 vm.clone(),
                 &config.lock().unwrap().memory.clone(),
                 source_url,
                 prefault,
+                phys_bits,
             )
             .map_err(Error::MemoryManager)?
         } else {
@@ -673,11 +867,10 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     fn configure_system(&mut self, entry_addr: EntryPoint) -> Result<()> {
         let cmdline_cstring = self.get_cmdline()?;
-        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
-        let mem = guest_memory.memory();
+        let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
         let initramfs_config = match self.initramfs {
-            Some(_) => Some(self.load_initramfs(mem.deref())?),
+            Some(_) => Some(self.load_initramfs(&mem)?),
             None => None,
         };
 
@@ -689,7 +882,7 @@ impl Vm {
         #[cfg(feature = "acpi")]
         {
             rsdp_addr = Some(crate::acpi::create_acpi_tables(
-                mem.deref(),
+                &mem,
                 &self.device_manager,
                 &self.cpu_manager,
                 &self.memory_manager,
@@ -742,10 +935,9 @@ impl Vm {
     fn configure_system(&mut self, _entry_addr: EntryPoint) -> Result<()> {
         let cmdline_cstring = self.get_cmdline()?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
-        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
-        let mem = guest_memory.memory();
+        let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
         let initramfs_config = match self.initramfs {
-            Some(_) => Some(self.load_initramfs(mem.deref())?),
+            Some(_) => Some(self.load_initramfs(&mem)?),
             None => None,
         };
 
@@ -781,7 +973,9 @@ impl Vm {
             None
         };
 
-        arch::configure_system(
+        // Call `configure_system` and pass the GIC devices out, so that
+        // we can register the GIC device to the device manager.
+        let gic_device = arch::configure_system(
             &self.memory_manager.lock().as_ref().unwrap().vm,
             &mem,
             &cmdline_cstring,
@@ -792,6 +986,12 @@ impl Vm {
             &pci_space,
         )
         .map_err(Error::ConfigureSystem)?;
+
+        // Update the GIC entity in device manager
+        self.device_manager
+            .lock()
+            .unwrap()
+            .set_gic_device_entity(Arc::new(Mutex::new(gic_device)));
 
         self.device_manager
             .lock()
@@ -875,6 +1075,8 @@ impl Vm {
                 .resize(desired_memory)
                 .map_err(Error::MemoryManager)?;
 
+            let mut memory_config = &mut self.config.lock().unwrap().memory;
+
             if let Some(new_region) = &new_region {
                 self.device_manager
                     .lock()
@@ -882,7 +1084,6 @@ impl Vm {
                     .update_memory(&new_region)
                     .map_err(Error::DeviceManager)?;
 
-                let memory_config = &self.config.lock().unwrap().memory;
                 match memory_config.hotplug_method {
                     HotplugMethod::Acpi => {
                         self.device_manager
@@ -898,7 +1099,16 @@ impl Vm {
             // We update the VM config regardless of the actual guest resize
             // operation result (happened or not), so that if the VM reboots
             // it will be running with the last configure memory size.
-            self.config.lock().unwrap().memory.size = desired_memory;
+            match memory_config.hotplug_method {
+                HotplugMethod::Acpi => memory_config.size = desired_memory,
+                HotplugMethod::VirtioMem => {
+                    if desired_memory > memory_config.size {
+                        memory_config.hotplugged_size = Some(desired_memory - memory_config.size);
+                    } else {
+                        memory_config.hotplugged_size = None;
+                    }
+                }
+            }
         }
 
         if let Some(desired_ram_w_balloon) = desired_ram_w_balloon {
@@ -913,6 +1123,42 @@ impl Vm {
         }
 
         Ok(())
+    }
+
+    pub fn resize_zone(&mut self, id: String, desired_memory: u64) -> Result<()> {
+        let memory_config = &mut self.config.lock().unwrap().memory;
+
+        if let Some(zones) = &mut memory_config.zones {
+            for zone in zones.iter_mut() {
+                if zone.id == id {
+                    if desired_memory >= zone.size {
+                        let hotplugged_size = desired_memory - zone.size;
+                        self.memory_manager
+                            .lock()
+                            .unwrap()
+                            .resize_zone(&id, desired_memory - zone.size)
+                            .map_err(Error::MemoryManager)?;
+                        // We update the memory zone config regardless of the
+                        // actual 'resize-zone' operation result (happened or
+                        // not), so that if the VM reboots it will be running
+                        // with the last configured memory zone size.
+                        zone.hotplugged_size = Some(hotplugged_size);
+
+                        return Ok(());
+                    } else {
+                        error!(
+                            "Invalid to ask less ({}) than boot RAM ({}) for \
+                            this memory zone",
+                            desired_memory, zone.size,
+                        );
+                        return Err(Error::ResizeZone);
+                    }
+                }
+            }
+        }
+
+        error!("Could not find the memory zone {} for the resize", id);
+        Err(Error::ResizeZone)
     }
 
     #[cfg(not(feature = "pci_support"))]
@@ -1178,7 +1424,12 @@ impl Vm {
         Ok(self.device_manager.lock().unwrap().counters())
     }
 
-    fn os_signal_handler(signals: Signals, console_input_clone: Arc<Console>, on_tty: bool) {
+    fn os_signal_handler(
+        signals: Signals,
+        console_input_clone: Arc<Console>,
+        on_tty: bool,
+        exit_evt: EventFd,
+    ) {
         for signal in signals.forever() {
             match signal {
                 SIGWINCH => {
@@ -1192,7 +1443,9 @@ impl Vm {
                             .set_canon_mode()
                             .expect("failed to restore terminal mode");
                     }
-                    std::process::exit((signal != SIGTERM) as i32);
+                    if exit_evt.write(1).is_err() {
+                        std::process::exit(1);
+                    }
                 }
                 _ => (),
             }
@@ -1237,12 +1490,24 @@ impl Vm {
             match signals {
                 Ok(signals) => {
                     self.signals = Some(signals.clone());
-
+                    let exit_evt = self.exit_evt.try_clone().map_err(Error::EventFdClone)?;
                     let on_tty = self.on_tty;
+                    let signal_handler_seccomp_filter =
+                        get_seccomp_filter(&self.seccomp_action, Thread::SignalHandler)
+                            .map_err(Error::CreateSeccompFilter)?;
                     self.threads.push(
                         thread::Builder::new()
                             .name("signal_handler".to_string())
-                            .spawn(move || Vm::os_signal_handler(signals, console, on_tty))
+                            .spawn(move || {
+                                if let Err(e) = SeccompFilter::apply(signal_handler_seccomp_filter)
+                                    .map_err(Error::ApplySeccompFilter)
+                                {
+                                    error!("Error applying seccomp filter: {:?}", e);
+                                    return;
+                                }
+
+                                Vm::os_signal_handler(signals, console, on_tty, exit_evt);
+                            })
                             .map_err(Error::SignalHandlerSpawn)?,
                     );
                 }
@@ -1269,6 +1534,11 @@ impl Vm {
             .lock()
             .read_raw(&mut out)
             .map_err(Error::Console)?;
+
+        // Replace "\n" with "\r" to deal with Windows SAC (#1170)
+        if count == 1 && out[0] == 0x0a {
+            out[0] = 0x0d;
+        }
 
         if self
             .device_manager
@@ -1299,6 +1569,99 @@ impl Vm {
             .try_read()
             .map_err(|_| Error::PoisonedState)
             .map(|state| *state)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// Add the vGIC section to the VM snapshot.
+    fn add_vgic_snapshot_section(
+        &self,
+        vm_snapshot: &mut Snapshot,
+    ) -> std::result::Result<(), MigratableError> {
+        let saved_vcpu_states = self.cpu_manager.lock().unwrap().get_saved_states();
+        self.device_manager
+            .lock()
+            .unwrap()
+            .construct_gicr_typers(&saved_vcpu_states);
+
+        vm_snapshot.add_snapshot(
+            self.device_manager
+                .lock()
+                .unwrap()
+                .get_gic_device_entity()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .as_any_concrete_mut()
+                .downcast_mut::<KvmGICv3>()
+                .unwrap()
+                .snapshot()?,
+        );
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// Restore the vGIC from the VM snapshot and enable the interrupt controller routing.
+    fn restore_vgic_and_enable_interrupt(
+        &self,
+        vm_snapshot: &Snapshot,
+    ) -> std::result::Result<(), MigratableError> {
+        let saved_vcpu_states = self.cpu_manager.lock().unwrap().get_saved_states();
+        // The number of vCPUs is the same as the number of saved vCPU states.
+        let vcpu_numbers = saved_vcpu_states.len();
+
+        // Creating a GIC device here, as the GIC will not be created when
+        // restoring the device manager. Note that currently only the bare GICv3
+        // without ITS is supported.
+        let gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap(), false)
+            .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
+
+        // Update the GIC entity in device manager
+        self.device_manager
+            .lock()
+            .unwrap()
+            .set_gic_device_entity(Arc::new(Mutex::new(gic_device)));
+
+        // Here we prepare the GICR_TYPER registers from the restored vCPU states.
+        self.device_manager
+            .lock()
+            .unwrap()
+            .construct_gicr_typers(&saved_vcpu_states);
+
+        // Restore GIC states.
+        if let Some(gic_v3_snapshot) = vm_snapshot.snapshots.get(GIC_V3_SNAPSHOT_ID) {
+            self.device_manager
+                .lock()
+                .unwrap()
+                .get_gic_device_entity()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .as_any_concrete_mut()
+                .downcast_mut::<KvmGICv3>()
+                .unwrap()
+                .restore(*gic_v3_snapshot.clone())?;
+        } else {
+            return Err(MigratableError::Restore(anyhow!("Missing GICv3 snapshot")));
+        }
+
+        self.device_manager
+            .lock()
+            .unwrap()
+            .enable_interrupt_controller()
+            .map_err(|e| {
+                MigratableError::Restore(anyhow!(
+                    "Could not enable interrupt controller routing: {:#?}",
+                    e
+                ))
+            })?;
+
+        Ok(())
+    }
+
+    /// Gets the actual size of the balloon.
+    pub fn get_balloon_actual(&self) -> u64 {
+        self.memory_manager.lock().unwrap().get_balloon_actual()
     }
 }
 
@@ -1398,6 +1761,11 @@ impl Snapshottable for Vm {
 
         vm_snapshot.add_snapshot(self.cpu_manager.lock().unwrap().snapshot()?);
         vm_snapshot.add_snapshot(self.memory_manager.lock().unwrap().snapshot()?);
+
+        #[cfg(target_arch = "aarch64")]
+        self.add_vgic_snapshot_section(&mut vm_snapshot)
+            .map_err(|e| MigratableError::Snapshot(e.into()))?;
+
         vm_snapshot.add_snapshot(self.device_manager.lock().unwrap().snapshot()?);
         vm_snapshot.add_data_section(SnapshotDataSection {
             id: format!("{}-section", VM_SNAPSHOT_ID),
@@ -1427,6 +1795,17 @@ impl Snapshottable for Vm {
             )));
         }
 
+        if let Some(cpu_manager_snapshot) = snapshot.snapshots.get(CPU_MANAGER_SNAPSHOT_ID) {
+            self.cpu_manager
+                .lock()
+                .unwrap()
+                .restore(*cpu_manager_snapshot.clone())?;
+        } else {
+            return Err(MigratableError::Restore(anyhow!(
+                "Missing CPU manager snapshot"
+            )));
+        }
+
         if let Some(device_manager_snapshot) = snapshot.snapshots.get(DEVICE_MANAGER_SNAPSHOT_ID) {
             self.device_manager
                 .lock()
@@ -1438,16 +1817,17 @@ impl Snapshottable for Vm {
             )));
         }
 
-        if let Some(cpu_manager_snapshot) = snapshot.snapshots.get(CPU_MANAGER_SNAPSHOT_ID) {
-            self.cpu_manager
-                .lock()
-                .unwrap()
-                .restore(*cpu_manager_snapshot.clone())?;
-        } else {
-            return Err(MigratableError::Restore(anyhow!(
-                "Missing CPU manager snapshot"
-            )));
-        }
+        #[cfg(target_arch = "aarch64")]
+        self.restore_vgic_and_enable_interrupt(&snapshot)?;
+
+        // Now we can start all vCPUs from here.
+        self.cpu_manager
+            .lock()
+            .unwrap()
+            .start_restored_vcpus()
+            .map_err(|e| {
+                MigratableError::Restore(anyhow!("Cannot start restored vCPUs: {:#?}", e))
+            })?;
 
         if self
             .device_manager
@@ -1463,10 +1843,32 @@ impl Snapshottable for Vm {
                     self.signals = Some(signals.clone());
 
                     let on_tty = self.on_tty;
+                    let signal_handler_seccomp_filter =
+                        get_seccomp_filter(&self.seccomp_action, Thread::SignalHandler).map_err(
+                            |e| {
+                                MigratableError::Restore(anyhow!(
+                                    "Could not create seccomp filter: {:#?}",
+                                    Error::CreateSeccompFilter(e)
+                                ))
+                            },
+                        )?;
+                    let exit_evt = self.exit_evt.try_clone().map_err(|e| {
+                        MigratableError::Restore(anyhow!("Could not clone exit event fd: {:?}", e))
+                    })?;
+
                     self.threads.push(
                         thread::Builder::new()
                             .name("signal_handler".to_string())
-                            .spawn(move || Vm::os_signal_handler(signals, console, on_tty))
+                            .spawn(move || {
+                                if let Err(e) = SeccompFilter::apply(signal_handler_seccomp_filter)
+                                    .map_err(Error::ApplySeccompFilter)
+                                {
+                                    error!("Error applying seccomp filter: {:?}", e);
+                                    return;
+                                }
+
+                                Vm::os_signal_handler(signals, console, on_tty, exit_evt)
+                            })
                             .map_err(|e| {
                                 MigratableError::Restore(anyhow!(
                                     "Could not start console signal thread: {:#?}",

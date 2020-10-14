@@ -714,20 +714,17 @@ impl PciDevice for VfioPciDevice {
 
             // Is this an IO BAR?
             let io_bar = if bar_id != VFIO_PCI_ROM_REGION_INDEX {
-                match lsb_flag & PCI_CONFIG_IO_BAR {
-                    PCI_CONFIG_IO_BAR => true,
-                    _ => false,
-                }
+                matches!(lsb_flag & PCI_CONFIG_IO_BAR, PCI_CONFIG_IO_BAR)
             } else {
                 false
             };
 
             // Is this a 64-bit BAR?
             let is_64bit_bar = if bar_id != VFIO_PCI_ROM_REGION_INDEX {
-                match lsb_flag & PCI_CONFIG_MEMORY_BAR_64BIT {
-                    PCI_CONFIG_MEMORY_BAR_64BIT => true,
-                    _ => false,
-                }
+                matches!(
+                    lsb_flag & PCI_CONFIG_MEMORY_BAR_64BIT,
+                    PCI_CONFIG_MEMORY_BAR_64BIT
+                )
             } else {
                 false
             };
@@ -785,7 +782,7 @@ impl PciDevice for VfioPciDevice {
                 // We need to allocate a guest MMIO address range for that BAR.
                 // In case the BAR is mappable directly, this means it might be
                 // set as user memory region, which expects to deal with 4K
-                // pages. Therefore, the aligment has to be set accordingly.
+                // pages. Therefore, the alignment has to be set accordingly.
                 let bar_alignment = if (bar_id == VFIO_PCI_ROM_REGION_INDEX)
                     || (self.device.get_region_flags(bar_id) & VFIO_REGION_INFO_FLAG_MMAP != 0)
                 {

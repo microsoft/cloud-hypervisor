@@ -128,6 +128,35 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to request virtual interupt: {0}")]
     RequestVirtualInterrupt(#[source] anyhow::Error),
+    /// Write to Guest memory
+    ///
+    #[error("Failed to write to guest memory: {0}")]
+    GuestMemWrite(#[source] anyhow::Error),
+    ///
+    /// Read Guest memory
+    ///
+    #[error("Failed to read guest memory: {0}")]
+    GuestMemRead(#[source] anyhow::Error),
+    ///
+    /// Read from MMIO Bus
+    ///
+    #[error("Failed to read from MMIO Bus: {0}")]
+    MmioBusRead(#[source] anyhow::Error),
+    ///
+    /// Write to MMIO Bus
+    ///
+    #[error("Failed to write to MMIO Bus: {0}")]
+    MmioBusWrite(#[source] anyhow::Error),
+    ///
+    /// Read from IO Bus
+    ///
+    #[error("Failed to read from IO Bus: {0}")]
+    IoBusRead(#[source] anyhow::Error),
+    ///
+    /// Write to IO Bus
+    ///
+    #[error("Failed to write to IO Bus: {0}")]
+    IoBusWrite(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -208,5 +237,18 @@ pub trait Vm: Send + Sync {
     /// Get the Vm state. Return VM specific data
     fn state(&self) -> Result<VmState>;
     /// Set the VM state
-    fn set_state(&self, state: &VmState) -> Result<()>;
+    fn set_state(&self, state: VmState) -> Result<()>;
+    /// Set VmmOps interface
+    fn set_vmmops(&self, vmmops: Box<dyn VmmOps>) -> Result<()>;
+}
+
+pub trait VmmOps: Send + Sync {
+    fn guest_mem_write(&self, buf: &[u8], gpa: u64) -> Result<usize>;
+    fn guest_mem_read(&self, buf: &mut [u8], gpa: u64) -> Result<usize>;
+    fn mmio_read(&self, addr: u64, data: &mut [u8]) -> Result<()>;
+    fn mmio_write(&self, addr: u64, data: &[u8]) -> Result<()>;
+    #[cfg(target_arch = "x86_64")]
+    fn pio_read(&self, addr: u64, data: &mut [u8]) -> Result<()>;
+    #[cfg(target_arch = "x86_64")]
+    fn pio_write(&self, addr: u64, data: &[u8]) -> Result<()>;
 }
