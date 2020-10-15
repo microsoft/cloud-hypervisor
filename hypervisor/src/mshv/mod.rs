@@ -1156,7 +1156,7 @@ impl vm::Vm for MshvVm {
     }
 }
 
-pub use hv_cpuid_entry2 as CpuIdEntry;
+pub use hv_cpuid_entry as CpuIdEntry;
 
 #[derive(Copy, Clone, Debug)]
 pub struct MshvIrqRoutingMsi {
