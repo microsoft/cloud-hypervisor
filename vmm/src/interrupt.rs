@@ -401,26 +401,26 @@ pub mod mshv {
     use super::*;
     use hypervisor::mshv::*;
 
-    type HypervMsiInterruptGroup = MsiInterruptGroup<HypervIrqRoutingEntry>;
-    type HypervRoutingEntry = RoutingEntry<HypervIrqRoutingEntry>;
-    pub type HypervMsiInterruptManager = MsiInterruptManager<HypervIrqRoutingEntry>;
+    type MshvMsiInterruptGroup = MsiInterruptGroup<MshvIrqRoutingEntry>;
+    type MshvRoutingEntry = RoutingEntry<MshvIrqRoutingEntry>;
+    pub type MshvMsiInterruptManager = MsiInterruptManager<MshvIrqRoutingEntry>;
 
-    impl RoutingEntryExt for HypervRoutingEntry {
+    impl RoutingEntryExt for MshvRoutingEntry {
         fn make_entry(
             _vm: &Arc<dyn hypervisor::Vm>,
             gsi: u32,
             config: &InterruptSourceConfig,
         ) -> Result<Box<Self>> {
             if let InterruptSourceConfig::MsiIrq(cfg) = &config {
-                let route = HypervIrqRoutingEntry {
+                let route = MshvIrqRoutingEntry {
                     gsi,
-                    route: HypervIrqRouting::Msi(HypervIrqRoutingMsi {
+                    route: MshvIrqRouting::Msi(MshvIrqRoutingMsi {
                         address_lo: cfg.low_addr,
                         address_hi: cfg.high_addr,
                         data: cfg.data,
                     }),
                 };
-                let entry = HypervRoutingEntry {
+                let entry = MshvRoutingEntry {
                     route,
                     masked: false,
                 };
@@ -435,12 +435,12 @@ pub mod mshv {
         }
     }
 
-    impl MsiInterruptGroupOps<HypervIrqRoutingEntry> for HypervMsiInterruptGroup {
+    impl MsiInterruptGroupOps<MshvIrqRoutingEntry> for MshvMsiInterruptGroup {
         fn set_gsi_routes(
             &self,
-            routes: &HashMap<u32, RoutingEntry<HypervIrqRoutingEntry>>,
+            routes: &HashMap<u32, RoutingEntry<MshvIrqRoutingEntry>>,
         ) -> Result<()> {
-            let mut entry_vec: Vec<HypervIrqRoutingEntry> = Vec::new();
+            let mut entry_vec: Vec<MshvIrqRoutingEntry> = Vec::new();
             for (_, entry) in routes.iter() {
                 if entry.masked {
                     continue;

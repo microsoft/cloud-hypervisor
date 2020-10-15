@@ -32,7 +32,7 @@ use x86_64::hv1;
 
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
-pub use x86_64::VcpuHypervState as CpuState;
+pub use x86_64::VcpuMshvState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
 
@@ -60,7 +60,7 @@ struct IrqfdCtrlEpollHandler {
     kill: EventFd,       /* Created by us, signal thread exit */
     epoll_fd: RawFd,     /* epoll fd */
     gsi: u32,
-    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
+    gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
 }
 
 fn register_listener(
@@ -216,13 +216,13 @@ fn get_level(message_data: u32) -> bool {
     false
 }
 
-fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &HypervIrqRoutingEntry) {
+fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &MshvIrqRoutingEntry) {
     // GSI routing contains MSI information.
     // We still need to translate that to APIC ID etc
 
     debug!("Inject {:x?}", e);
 
-    let HypervIrqRouting::Msi(msi) = e.route;
+    let MshvIrqRouting::Msi(msi) = e.route;
 
     /* Make an assumption here ... */
     if msi.address_hi != 0 {
@@ -394,7 +394,7 @@ pub struct MshvVcpu {
     cpuid: CpuId,
     msrs: MsrEntries,
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
-    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
+    gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
     vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
 }
@@ -941,7 +941,7 @@ pub struct MshvVm {
     // Emulate ioeventfd
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     // GSI routing information
-    gsi_routes: Arc<RwLock<HashMap<u32, HypervIrqRoutingEntry>>>,
+    gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
     vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
@@ -1159,22 +1159,22 @@ impl vm::Vm for MshvVm {
 pub use hv_cpuid_entry2 as CpuIdEntry;
 
 #[derive(Copy, Clone, Debug)]
-pub struct HypervIrqRoutingMsi {
+pub struct MshvIrqRoutingMsi {
     pub address_lo: u32,
     pub address_hi: u32,
     pub data: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub enum HypervIrqRouting {
-    Msi(HypervIrqRoutingMsi),
+pub enum MshvIrqRouting {
+    Msi(MshvIrqRoutingMsi),
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct HypervIrqRoutingEntry {
+pub struct MshvIrqRoutingEntry {
     pub gsi: u32,
-    pub route: HypervIrqRouting,
+    pub route: MshvIrqRouting,
 }
-pub type IrqRoutingEntry = HypervIrqRoutingEntry;
+pub type IrqRoutingEntry = MshvIrqRoutingEntry;
 
 pub const CPUID_FLAG_VALID_INDEX: u32 = 0;

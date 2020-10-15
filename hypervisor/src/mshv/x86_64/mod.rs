@@ -9,8 +9,6 @@
 //
 
 use crate::arch::x86::{msr_index, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
-/// X86_64 specfic definitions for hyperv
-///
 use serde_derive::{Deserialize, Serialize};
 ///
 /// Export generically-named wrappers of mshv_bindings for Unix-based platforms
@@ -25,7 +23,7 @@ pub use {
     mshv_bindings::Xcrs as ExtendedControlRegisters,
 };
 #[derive(Clone, Serialize, Deserialize)]
-pub struct VcpuHypervState {
+pub struct VcpuMshvState {
     pub msrs: MsrEntries,
     pub vcpu_events: VcpuEvents,
     pub regs: StandardRegisters,

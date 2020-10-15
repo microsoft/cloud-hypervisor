@@ -17,7 +17,7 @@ use crate::device_tree::{DeviceNode, DeviceTree};
 #[cfg(feature = "kvm")]
 use crate::interrupt::kvm::KvmMsiInterruptManager as MsiInterruptManager;
 #[cfg(feature = "mshv")]
-use crate::interrupt::mshv::HypervMsiInterruptManager as MsiInterruptManager;
+use crate::interrupt::mshv::MshvMsiInterruptManager as MsiInterruptManager;
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "acpi")]
