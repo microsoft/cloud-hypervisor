@@ -558,11 +558,15 @@ impl cpu::Vcpu for MshvVcpu {
                         data[2] = (info.rax >> 16) as u8;
                         data[3] = (info.rax >> 24) as u8;
                         if let Some(vmmops) = self.vmmops.load_full() {
-                            vmmops.pio_write(port.into(), &data[0..len]);
+                            vmmops
+                                .pio_write(port.into(), &data[0..len])
+                                .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
                     } else {
                         if let Some(vmmops) = self.vmmops.load_full() {
-                            vmmops.pio_read(port.into(), &mut data[0..len]);
+                            vmmops
+                                .pio_read(port.into(), &mut data[0..len])
+                                .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
                         // debug!("data {:x?}", &data[0..len]);
                         let v = data[0] as u32
@@ -636,10 +640,12 @@ impl cpu::Vcpu for MshvVcpu {
                                 assert!(size <= 4);
                                 let mut data: [u8; 4] = [0; 4];
                                 if let Some(vmmops) = self.vmmops.load_full() {
-                                    vmmops.mmio_read(
-                                        info.guest_physical_address,
-                                        &mut data[0..size as usize],
-                                    );
+                                    vmmops
+                                        .mmio_read(
+                                            info.guest_physical_address,
+                                            &mut data[0..size as usize],
+                                        )
+                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                                 }
                                 let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
                                 // debug!(
@@ -673,10 +679,12 @@ impl cpu::Vcpu for MshvVcpu {
                                     efd.write(1).unwrap();
                                 }
                                 if let Some(vmmops) = self.vmmops.load_full() {
-                                    vmmops.mmio_write(
-                                        info.guest_physical_address,
-                                        &reg_value[0..value.length as usize],
-                                    );
+                                    vmmops
+                                        .mmio_write(
+                                            info.guest_physical_address,
+                                            &reg_value[0..value.length as usize],
+                                        )
+                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                                 }
                                 emulator_input = emulator::Input::Continue;
                             }

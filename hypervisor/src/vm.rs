@@ -21,6 +21,7 @@ use crate::HvState as VmState;
 #[cfg(feature = "kvm")]
 use crate::KvmVmState as VmState;
 use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
+#[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
 use std::sync::Arc;
 use thiserror::Error;

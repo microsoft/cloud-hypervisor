@@ -89,7 +89,7 @@ pub fn process_msr_write(
                         let nr_bytes = vmmops.guest_mem_write(&vmcall, guest_gpa).unwrap();
 
                         if nr_bytes != 4 {
-                            raise_general_page_fault(fd_ref);
+                            raise_general_page_fault(fd_ref).unwrap();
                             panic!("Failed while writing vmcall Page to Guest VM\n");
                         }
                     }
