@@ -54,6 +54,8 @@ pub enum Error {
     ParseNetwork(OptionParserError),
     /// Error parsing RNG options
     ParseRNG(OptionParserError),
+    /// Error parsing balloon options
+    ParseBalloon(OptionParserError),
     /// Error parsing filesystem parameters
     ParseFileSystem(OptionParserError),
     /// Error parsing persistent memory parameters
@@ -160,6 +162,7 @@ impl fmt::Display for Error {
             ParseNetwork(o) => write!(f, "Error parsing --net: {}", o),
             ParseDisk(o) => write!(f, "Error parsing --disk: {}", o),
             ParseRNG(o) => write!(f, "Error parsing --rng: {}", o),
+            ParseBalloon(o) => write!(f, "Error parsing --balloon: {}", o),
             ParseRestore(o) => write!(f, "Error parsing --restore: {}", o),
             #[cfg(target_arch = "x86_64")]
             ParseSgxEpc(o) => write!(f, "Error parsing --sgx-epc: {}", o),
@@ -184,6 +187,7 @@ pub struct VmParams<'a> {
     pub disks: Option<Vec<&'a str>>,
     pub net: Option<Vec<&'a str>>,
     pub rng: &'a str,
+    pub balloon: Option<&'a str>,
     pub fs: Option<Vec<&'a str>>,
     pub pmem: Option<Vec<&'a str>>,
     pub serial: &'a str,
@@ -193,6 +197,7 @@ pub struct VmParams<'a> {
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
     pub numa: Option<Vec<&'a str>>,
+    pub watchdog: bool,
 }
 
 impl<'a> VmParams<'a> {
@@ -211,6 +216,7 @@ impl<'a> VmParams<'a> {
         let disks: Option<Vec<&str>> = args.values_of("disk").map(|x| x.collect());
         let net: Option<Vec<&str>> = args.values_of("net").map(|x| x.collect());
         let console = args.value_of("console").unwrap();
+        let balloon = args.value_of("balloon");
         let fs: Option<Vec<&str>> = args.values_of("fs").map(|x| x.collect());
         let pmem: Option<Vec<&str>> = args.values_of("pmem").map(|x| x.collect());
         let devices: Option<Vec<&str>> = args.values_of("device").map(|x| x.collect());
@@ -218,6 +224,7 @@ impl<'a> VmParams<'a> {
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
         let numa: Option<Vec<&str>> = args.values_of("numa").map(|x| x.collect());
+        let watchdog = args.is_present("watchdog");
 
         VmParams {
             cpus,
@@ -229,6 +236,7 @@ impl<'a> VmParams<'a> {
             disks,
             net,
             rng,
+            balloon,
             fs,
             pmem,
             serial,
@@ -238,6 +246,7 @@ impl<'a> VmParams<'a> {
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
             numa,
+            watchdog,
         }
     }
 }
@@ -409,10 +418,6 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub hugepages: bool,
     #[serde(default)]
-    pub balloon: bool,
-    #[serde(default)]
-    pub balloon_size: u64,
-    #[serde(default)]
     pub zones: Option<Vec<MemoryZoneConfig>>,
 }
 
@@ -427,8 +432,7 @@ impl MemoryConfig {
             .add("hotplug_size")
             .add("hotplugged_size")
             .add("shared")
-            .add("hugepages")
-            .add("balloon");
+            .add("hugepages");
         parser.parse(memory).map_err(Error::ParseMemory)?;
 
         let size = parser
@@ -460,11 +464,6 @@ impl MemoryConfig {
             .0;
         let hugepages = parser
             .convert::<Toggle>("hugepages")
-            .map_err(Error::ParseMemory)?
-            .unwrap_or(Toggle(false))
-            .0;
-        let balloon = parser
-            .convert::<Toggle>("balloon")
             .map_err(Error::ParseMemory)?
             .unwrap_or(Toggle(false))
             .0;
@@ -537,8 +536,6 @@ impl MemoryConfig {
             hotplugged_size,
             shared,
             hugepages,
-            balloon,
-            balloon_size: 0,
             zones,
         })
     }
@@ -572,8 +569,6 @@ impl Default for MemoryConfig {
             hotplugged_size: None,
             shared: false,
             hugepages: false,
-            balloon: false,
-            balloon_size: 0,
             zones: None,
         }
     }
@@ -914,6 +909,29 @@ impl Default for RngConfig {
             src: PathBuf::from(DEFAULT_RNG_SOURCE),
             iommu: false,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct BalloonConfig {
+    pub size: u64,
+}
+
+impl BalloonConfig {
+    pub const SYNTAX: &'static str = "Balloon parameters \"size=<balloon_size>\"";
+
+    pub fn parse(balloon: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser.add("size");
+        parser.parse(balloon).map_err(Error::ParseBalloon)?;
+
+        let size = parser
+            .convert::<ByteSized>("size")
+            .map_err(Error::ParseBalloon)?
+            .map(|v| v.0)
+            .unwrap_or(0);
+
+        Ok(BalloonConfig { size })
     }
 }
 
@@ -1388,6 +1406,7 @@ pub struct VmConfig {
     pub net: Option<Vec<NetConfig>>,
     #[serde(default)]
     pub rng: RngConfig,
+    pub balloon: Option<BalloonConfig>,
     pub fs: Option<Vec<FsConfig>>,
     pub pmem: Option<Vec<PmemConfig>>,
     #[serde(default = "ConsoleConfig::default_serial")]
@@ -1401,6 +1420,8 @@ pub struct VmConfig {
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<SgxEpcConfig>>,
     pub numa: Option<Vec<NumaConfig>>,
+    #[serde(default)]
+    pub watchdog: bool,
 }
 
 impl VmConfig {
@@ -1446,15 +1467,6 @@ impl VmConfig {
         if let Some(fses) = &self.fs {
             if !fses.is_empty() && !self.memory.shared {
                 return Err(ValidationError::VhostUserRequiresSharedMemory);
-            }
-        }
-
-        if cfg!(not(feature = "pci_support")) {
-            if self.iommu {
-                return Err(ValidationError::IommuUnsupported);
-            }
-            if self.devices.is_some() {
-                return Err(ValidationError::VfioUnsupported);
             }
         }
 
@@ -1508,6 +1520,11 @@ impl VmConfig {
         let rng = RngConfig::parse(vm_params.rng)?;
         if rng.iommu {
             iommu = true;
+        }
+
+        let mut balloon: Option<BalloonConfig> = None;
+        if let Some(balloon_params) = &vm_params.balloon {
+            balloon = Some(BalloonConfig::parse(balloon_params)?);
         }
 
         let mut fs: Option<Vec<FsConfig>> = None;
@@ -1607,6 +1624,7 @@ impl VmConfig {
             disks,
             net,
             rng,
+            balloon,
             fs,
             pmem,
             serial,
@@ -1617,6 +1635,7 @@ impl VmConfig {
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
             numa,
+            watchdog: vm_params.watchdog,
         };
         config.validate().map_err(Error::Validation)?;
         Ok(config)
@@ -2161,8 +2180,6 @@ mod tests {
                 hotplugged_size: None,
                 shared: false,
                 hugepages: false,
-                balloon: false,
-                balloon_size: 0,
                 zones: None,
             },
             kernel: Some(KernelConfig {
@@ -2178,6 +2195,7 @@ mod tests {
                 src: PathBuf::from("/dev/urandom"),
                 iommu: false,
             },
+            balloon: None,
             fs: None,
             pmem: None,
             serial: ConsoleConfig {
@@ -2196,6 +2214,7 @@ mod tests {
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
             numa: None,
+            watchdog: false,
         };
 
         assert!(valid_config.validate().is_ok());

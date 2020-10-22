@@ -19,7 +19,6 @@ extern crate libc;
 extern crate linux_loader;
 extern crate net_util;
 extern crate signal_hook;
-#[cfg(feature = "pci_support")]
 extern crate vm_allocator;
 extern crate vm_memory;
 
@@ -944,30 +943,26 @@ impl Vm {
             .get_device_info()
             .clone();
 
-        let pci_space: Option<(u64, u64)> = if cfg!(feature = "pci_support") {
-            let pci_space_start: GuestAddress = self
-                .memory_manager
-                .lock()
-                .as_ref()
-                .unwrap()
-                .start_of_device_area();
+        let pci_space_start: GuestAddress = self
+            .memory_manager
+            .lock()
+            .as_ref()
+            .unwrap()
+            .start_of_device_area();
 
-            let pci_space_end: GuestAddress = self
-                .memory_manager
-                .lock()
-                .as_ref()
-                .unwrap()
-                .end_of_device_area();
+        let pci_space_end: GuestAddress = self
+            .memory_manager
+            .lock()
+            .as_ref()
+            .unwrap()
+            .end_of_device_area();
 
-            let pci_space_size = pci_space_end
-                .checked_offset_from(pci_space_start)
-                .ok_or(Error::MemOverflow)?
-                + 1;
+        let pci_space_size = pci_space_end
+            .checked_offset_from(pci_space_start)
+            .ok_or(Error::MemOverflow)?
+            + 1;
 
-            Some((pci_space_start.0, pci_space_size))
-        } else {
-            None
-        };
+        let pci_space = (pci_space_start.0, pci_space_size);
 
         // Call `configure_system` and pass the GIC devices out, so that
         // we can register the GIC device to the device manager.
@@ -1044,7 +1039,7 @@ impl Vm {
         &mut self,
         desired_vcpus: Option<u8>,
         desired_memory: Option<u64>,
-        desired_ram_w_balloon: Option<u64>,
+        desired_balloon: Option<u64>,
     ) -> Result<()> {
         if let Some(desired_vcpus) = desired_vcpus {
             if self
@@ -1107,15 +1102,18 @@ impl Vm {
             }
         }
 
-        if let Some(desired_ram_w_balloon) = desired_ram_w_balloon {
-            // update the configuration value for the balloon size to ensure
-            // a reboot would use the right value.
-            self.config.lock().unwrap().memory.balloon_size = self
-                .memory_manager
+        if let Some(desired_balloon) = desired_balloon {
+            self.device_manager
                 .lock()
                 .unwrap()
-                .balloon_resize(desired_ram_w_balloon)
-                .map_err(Error::MemoryManager)?;
+                .resize_balloon(desired_balloon)
+                .map_err(Error::DeviceManager)?;
+
+            // Update the configuration value for the balloon size to ensure
+            // a reboot would use the right value.
+            if let Some(balloon_config) = &mut self.config.lock().unwrap().balloon {
+                balloon_config.size = desired_balloon;
+            }
         }
 
         Ok(())
@@ -1157,12 +1155,6 @@ impl Vm {
         Err(Error::ResizeZone)
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_device(&mut self, mut _device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_device(&mut self, mut _device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1192,66 +1184,51 @@ impl Vm {
     }
 
     pub fn remove_device(&mut self, _id: String) -> Result<()> {
-        if cfg!(feature = "pci_support") {
-            #[cfg(feature = "pci_support")]
-            {
-                self.device_manager
-                    .lock()
-                    .unwrap()
-                    .remove_device(_id.clone())
-                    .map_err(Error::DeviceManager)?;
+        self.device_manager
+            .lock()
+            .unwrap()
+            .remove_device(_id.clone())
+            .map_err(Error::DeviceManager)?;
 
-                // Update VmConfig by removing the device. This is important to
-                // ensure the device would not be created in case of a reboot.
-                {
-                    let mut config = self.config.lock().unwrap();
+        // Update VmConfig by removing the device. This is important to
+        // ensure the device would not be created in case of a reboot.
+        let mut config = self.config.lock().unwrap();
 
-                    // Remove if VFIO device
-                    if let Some(devices) = config.devices.as_mut() {
-                        devices.retain(|dev| dev.id.as_ref() != Some(&_id));
-                    }
-
-                    // Remove if disk device
-                    if let Some(disks) = config.disks.as_mut() {
-                        disks.retain(|dev| dev.id.as_ref() != Some(&_id));
-                    }
-
-                    // Remove if net device
-                    if let Some(net) = config.net.as_mut() {
-                        net.retain(|dev| dev.id.as_ref() != Some(&_id));
-                    }
-
-                    // Remove if pmem device
-                    if let Some(pmem) = config.pmem.as_mut() {
-                        pmem.retain(|dev| dev.id.as_ref() != Some(&_id));
-                    }
-
-                    // Remove if vsock device
-                    if let Some(vsock) = config.vsock.as_ref() {
-                        if vsock.id.as_ref() == Some(&_id) {
-                            config.vsock = None;
-                        }
-                    }
-                }
-
-                self.device_manager
-                    .lock()
-                    .unwrap()
-                    .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
-                    .map_err(Error::DeviceManager)?;
-            }
-            Ok(())
-        } else {
-            Err(Error::NoPciSupport)
+        // Remove if VFIO device
+        if let Some(devices) = config.devices.as_mut() {
+            devices.retain(|dev| dev.id.as_ref() != Some(&_id));
         }
+
+        // Remove if disk device
+        if let Some(disks) = config.disks.as_mut() {
+            disks.retain(|dev| dev.id.as_ref() != Some(&_id));
+        }
+
+        // Remove if net device
+        if let Some(net) = config.net.as_mut() {
+            net.retain(|dev| dev.id.as_ref() != Some(&_id));
+        }
+
+        // Remove if pmem device
+        if let Some(pmem) = config.pmem.as_mut() {
+            pmem.retain(|dev| dev.id.as_ref() != Some(&_id));
+        }
+
+        // Remove if vsock device
+        if let Some(vsock) = config.vsock.as_ref() {
+            if vsock.id.as_ref() == Some(&_id) {
+                config.vsock = None;
+            }
+        }
+
+        self.device_manager
+            .lock()
+            .unwrap()
+            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .map_err(Error::DeviceManager)?;
+        Ok(())
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_disk(&mut self, mut _disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_disk(&mut self, mut _disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1280,12 +1257,6 @@ impl Vm {
         Ok(pci_device_info)
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_fs(&mut self, mut _fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_fs(&mut self, mut _fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1314,12 +1285,6 @@ impl Vm {
         Ok(pci_device_info)
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_pmem(&mut self, mut _pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_pmem(&mut self, mut _pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1348,12 +1313,6 @@ impl Vm {
         Ok(pci_device_info)
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_net(&mut self, mut _net_cfg: NetConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_net(&mut self, mut _net_cfg: NetConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1382,12 +1341,6 @@ impl Vm {
         Ok(pci_device_info)
     }
 
-    #[cfg(not(feature = "pci_support"))]
-    pub fn add_vsock(&mut self, mut _vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
-        Err(Error::NoPciSupport)
-    }
-
-    #[cfg(feature = "pci_support")]
     pub fn add_vsock(&mut self, mut _vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
         if self.config.lock().unwrap().vsock.is_some() {
             return Err(Error::TooManyVsockDevices);
@@ -1609,7 +1562,7 @@ impl Vm {
         // Creating a GIC device here, as the GIC will not be created when
         // restoring the device manager. Note that currently only the bare GICv3
         // without ITS is supported.
-        let gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap(), false)
+        let gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap())
             .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
 
         // Update the GIC entity in device manager
@@ -1656,8 +1609,8 @@ impl Vm {
     }
 
     /// Gets the actual size of the balloon.
-    pub fn get_balloon_actual(&self) -> u64 {
-        self.memory_manager.lock().unwrap().get_balloon_actual()
+    pub fn balloon_size(&self) -> u64 {
+        self.device_manager.lock().unwrap().balloon_size()
     }
 }
 
@@ -2076,7 +2029,7 @@ mod tests {
 
         let hv = hypervisor::new().unwrap();
         let vm = hv.create_vm().unwrap();
-        let gic = create_gic(&vm, 1, false).unwrap();
+        let gic = create_gic(&vm, 1).unwrap();
         assert!(create_fdt(
             &mem,
             &CString::new("console=tty0").unwrap(),
@@ -2084,7 +2037,7 @@ mod tests {
             &dev_info,
             &*gic,
             &None,
-            &None,
+            &(0x1_0000_0000, 0x1_0000),
         )
         .is_ok())
     }

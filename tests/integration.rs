@@ -91,7 +91,7 @@ mod tests {
 
     const DIRECT_KERNEL_BOOT_CMDLINE: &str = "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw";
 
-    const PIPE_SIZE: i32 = 256 << 10;
+    const PIPE_SIZE: i32 = 32 << 20;
 
     impl UbuntuDiskConfig {
         fn new(image_name: String) -> Self {
@@ -500,7 +500,7 @@ mod tests {
         api_socket: &str,
         desired_vcpus: Option<u8>,
         desired_ram: Option<usize>,
-        desired_ram_w_balloon: Option<usize>,
+        desired_balloon: Option<usize>,
     ) -> bool {
         let mut cmd = Command::new(clh_command("ch-remote"));
         cmd.args(&[&format!("--api-socket={}", api_socket), "resize"]);
@@ -513,8 +513,8 @@ mod tests {
             cmd.arg(format!("--memory={}", desired_ram));
         }
 
-        if let Some(desired_ram_w_balloon) = desired_ram_w_balloon {
-            cmd.arg(format!("--balloon={}", desired_ram_w_balloon));
+        if let Some(desired_balloon) = desired_balloon {
+            cmd.arg(format!("--balloon={}", desired_balloon));
         }
 
         cmd.status().expect("Failed to launch ch-remote").success()
@@ -532,9 +532,21 @@ mod tests {
         cmd.status().expect("Failed to launch ch-remote").success()
     }
 
+    #[derive(Debug)]
+    struct PasswordAuth {
+        username: String,
+        password: String,
+    }
+
     const DEFAULT_SSH_RETRIES: u8 = 6;
     const DEFAULT_SSH_TIMEOUT: u8 = 10;
-    fn ssh_command_ip(command: &str, ip: &str, retries: u8, timeout: u8) -> Result<String, Error> {
+    fn ssh_command_ip_with_auth(
+        command: &str,
+        auth: &PasswordAuth,
+        ip: &str,
+        retries: u8,
+        timeout: u8,
+    ) -> Result<String, Error> {
         let mut s = String::new();
 
         let mut counter = 0;
@@ -545,7 +557,7 @@ mod tests {
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(Error::Handshake)?;
 
-                sess.userauth_password("cloud", "cloud123")
+                sess.userauth_password(&auth.username, &auth.password)
                     .map_err(Error::Authentication)?;
                 assert!(sess.authenticated());
 
@@ -563,6 +575,16 @@ mod tests {
                 Err(e) => {
                     counter += 1;
                     if counter >= retries {
+                        eprintln!(
+                            "\n\n==== Start ssh command output (FAILED) ====\n\n\
+                             command=\"{}\"\n\
+                             auth=\"{:#?}\"\n\
+                             ip=\"{}\"\n\
+                             output=\"{}\"\n\
+                             \n==== End ssh command outout ====\n\n",
+                            command, auth, ip, s
+                        );
+
                         return Err(e);
                     }
                 }
@@ -570,6 +592,19 @@ mod tests {
             thread::sleep(std::time::Duration::new((timeout * counter).into(), 0));
         }
         Ok(s)
+    }
+
+    fn ssh_command_ip(command: &str, ip: &str, retries: u8, timeout: u8) -> Result<String, Error> {
+        ssh_command_ip_with_auth(
+            command,
+            &PasswordAuth {
+                username: String::from("cloud"),
+                password: String::from("cloud123"),
+            },
+            ip,
+            retries,
+            timeout,
+        )
     }
 
     #[derive(Debug)]
@@ -980,9 +1015,17 @@ mod tests {
         }
 
         fn spawn(&mut self) -> io::Result<Child> {
+            println!(
+                "\n\n==== Start cloud-hypervisor command-line ====\n\n\
+                 {:?}\n\
+                 \n==== End cloud-hypervisor command-line ====\n\n",
+                self.command
+            );
+
             if self.capture_output {
                 let child = self
                     .command
+                    .arg("-v")
                     .stderr(Stdio::piped())
                     .stdout(Stdio::piped())
                     .spawn()
@@ -1002,7 +1045,7 @@ mod tests {
                     ))
                 }
             } else {
-                self.command.spawn()
+                self.command.arg("-v").spawn()
             }
         }
 
@@ -1238,27 +1281,22 @@ mod tests {
             // Since virtio-net has 2 queue pairs, its vectors is as follows:
             // 1 virtio-net     with 5 vectors: config, Rx (2), Tx (2)
             // Based on the above, the total vectors should 14.
-            // This is a PCI only feature.
-            #[cfg(not(feature = "mmio"))]
-            {
-                #[cfg(target_arch = "x86_64")]
-                let grep_cmd = "grep -c PCI-MSI /proc/interrupts";
-                #[cfg(target_arch = "aarch64")]
-                let grep_cmd = "grep -c ITS-MSI /proc/interrupts";
-                assert_eq!(
-                    guest
-                        .ssh_command(grep_cmd)
-                        .unwrap_or_default()
-                        .trim()
-                        .parse::<u32>()
-                        .unwrap_or_default(),
-                    10 + (num_queues as u32)
-                );
-            }
+            #[cfg(target_arch = "x86_64")]
+            let grep_cmd = "grep -c PCI-MSI /proc/interrupts";
+            #[cfg(target_arch = "aarch64")]
+            let grep_cmd = "grep -c ITS-MSI /proc/interrupts";
+            assert_eq!(
+                guest
+                    .ssh_command(grep_cmd)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default(),
+                10 + (num_queues as u32)
+            );
 
-            // ACPI is not built with mmio, hence we can't test the resize
-            // feature for mmio.
-            #[cfg(all(not(feature = "mmio"), feature = "acpi"))]
+            // ACPI feature is needed.
+            #[cfg(feature = "acpi")]
             {
                 guest
                     .ssh_command(
@@ -1422,9 +1460,8 @@ mod tests {
                 "bar"
             );
 
-            // ACPI is not built with mmio, hence we can't test the resize
-            // feature for mmio.
-            #[cfg(all(not(feature = "mmio"), feature = "acpi"))]
+            // ACPI feature is needed.
+            #[cfg(feature = "acpi")]
             {
                 guest
                     .ssh_command(
@@ -1543,28 +1580,24 @@ mod tests {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
             if self_spawned {
-                // The reboot is not supported with mmio, so no reason to test it.
-                #[cfg(not(feature = "mmio"))]
-                {
-                    let reboot_count = guest
-                        .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
-                        .unwrap_or_default()
-                        .trim()
-                        .parse::<u32>()
-                        .unwrap_or(1);
+                let reboot_count = guest
+                    .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(1);
 
-                    assert_eq!(reboot_count, 0);
-                    guest.ssh_command("sudo reboot").unwrap_or_default();
+                assert_eq!(reboot_count, 0);
+                guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                    thread::sleep(std::time::Duration::new(20, 0));
-                    let reboot_count = guest
-                        .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
-                        .unwrap_or_default()
-                        .trim()
-                        .parse::<u32>()
-                        .unwrap_or_default();
-                    assert_eq!(reboot_count, 1);
-                }
+                thread::sleep(std::time::Duration::new(20, 0));
+                let reboot_count = guest
+                    .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default();
+                assert_eq!(reboot_count, 1);
             }
         });
         let _ = child.kill();
@@ -1657,9 +1690,6 @@ mod tests {
                 "ok"
             );
 
-            // Check the cache size is the expected one.
-            // With virtio-mmio the cache doesn't appear in /proc/iomem
-            #[cfg(not(feature = "mmio"))]
             assert_eq!(
                 guest
                     .valid_virtio_fs_cache_size(dax, cache_size)
@@ -1691,11 +1721,8 @@ mod tests {
                 "bar"
             );
 
-            // ACPI is not built with mmio, hence we can't test the resize
-            // feature for mmio.
-            // ACPI is currently x86_64 only, we skip this for AArch64.
-            #[cfg(not(feature = "mmio"))]
-            #[cfg(target_arch = "x86_64")]
+            // ACPI feature is needed.
+            #[cfg(feature = "acpi")]
             {
                 guest
                     .ssh_command(
@@ -1938,7 +1965,6 @@ mod tests {
             // Validate vsock works as expected.
             guest.check_vsock(socket.as_str());
 
-            #[cfg(not(feature = "mmio"))]
             // AArch64 currently does not support reboot, and therefore we
             // skip the reboot test here.
             #[cfg(target_arch = "x86_64")]
@@ -2167,7 +2193,7 @@ mod tests {
     mod parallel {
         use crate::tests::*;
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_simple_launch() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
@@ -2209,7 +2235,7 @@ mod tests {
             });
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_multi_cpu() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut bionic);
@@ -2259,25 +2285,25 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_cpu_topology_421() {
             test_cpu_topology(4, 2, 1);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_cpu_topology_142() {
             test_cpu_topology(1, 4, 2);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_cpu_topology_262() {
             test_cpu_topology(2, 6, 2);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_cpu_physical_bits() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -2311,7 +2337,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_large_vm() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2341,7 +2367,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_huge_memory() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2371,8 +2397,8 @@ mod tests {
             handle_child_output(r, &output);
         }
 
+        #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg_attr(not(feature = "mmio"), test)]
         fn test_user_defined_memory_regions() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2455,8 +2481,8 @@ mod tests {
             handle_child_output(r, &output);
         }
 
+        #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg_attr(not(feature = "mmio"), test)]
         fn test_guest_numa_nodes() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2536,7 +2562,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_pci_msi() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2606,7 +2632,6 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
 
-                #[cfg(not(feature = "mmio"))]
                 assert_eq!(
                     guest
                         .ssh_command("grep -c PCI-MSI /proc/interrupts")
@@ -2699,7 +2724,6 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
 
-                #[cfg(not(feature = "mmio"))]
                 assert_eq!(
                     guest
                         .ssh_command("grep -c PCI-MSI /proc/interrupts")
@@ -2746,7 +2770,6 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
 
-                #[cfg(not(feature = "mmio"))]
                 assert_eq!(
                     guest
                         .ssh_command("grep -c PCI-MSI /proc/interrupts")
@@ -2943,7 +2966,7 @@ mod tests {
             test_boot_from_vhost_user_blk(1, false, false, None, true)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_split_irqchip() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3024,43 +3047,43 @@ mod tests {
             test_virtio_fs(false, None, "none", &prepare_vhost_user_fs_daemon, false)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_on() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, true)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_off() {
             test_virtio_fs(false, None, "none", &prepare_virtiofsd, true)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_on_w_vhost_user_fs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_vhost_user_fs_daemon, true)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_off_w_vhost_user_fs_daemon() {
             test_virtio_fs(false, None, "none", &prepare_vhost_user_fs_daemon, true)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_pmem_persist_writes() {
             test_virtio_pmem(false, false)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_pmem_discard_writes() {
             test_virtio_pmem(true, false)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_pmem_with_size() {
             test_virtio_pmem(true, true)
@@ -3185,7 +3208,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_serial_off() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3234,7 +3257,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_serial_null() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3281,7 +3304,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_serial_tty() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3331,7 +3354,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_serial_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3418,7 +3441,7 @@ mod tests {
             let cmd = format!("echo {} | sudo tee /dev/hvc0", text);
 
             let r = std::panic::catch_unwind(|| {
-                #[cfg(all(not(feature = "mmio"), feature = "acpi"))]
+                #[cfg(feature = "acpi")]
                 assert!(guest
                     .does_device_vendor_pair_match("0x1043", "0x1af4")
                     .unwrap_or_default());
@@ -3437,7 +3460,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_console_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3481,7 +3504,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         // The VFIO integration test starts cloud-hypervisor guest with 3 TAP
         // backed networking interfaces, bound through a simple bridge on the host.
@@ -3725,7 +3748,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(feature = "mmio", test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_vmlinux_boot_noacpi() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3763,7 +3786,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_reboot() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
@@ -3832,7 +3855,7 @@ mod tests {
             });
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_bzimage_reboot() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3900,13 +3923,13 @@ mod tests {
             _test_virtio_vsock(false)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_virtio_vsock_hotplug() {
             _test_virtio_vsock(true);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         fn test_api_create_boot() {
@@ -3955,7 +3978,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
@@ -4035,7 +4058,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         // This test validates that it can find the virtio-iommu device at first.
         // It also verifies that both disks and the network card are attached to
@@ -4079,7 +4102,6 @@ mod tests {
 
             let r = std::panic::catch_unwind(|| {
                 // Verify the virtio-iommu device is present.
-                #[cfg(not(feature = "mmio"))]
                 assert!(guest
                     .does_device_vendor_pair_match("0x1057", "0x1af4")
                     .unwrap_or_default());
@@ -4118,6 +4140,8 @@ mod tests {
             handle_child_output(r, &output);
         }
 
+        #[test]
+        #[cfg(target_arch = "x86_64")]
         // We cannot force the software running in the guest to reprogram the BAR
         // with some different addresses, but we have a reliable way of testing it
         // with a standard Linux kernel.
@@ -4127,8 +4151,6 @@ mod tests {
         // This test creates a dedicated PCI network device to be checked as being
         // properly probed first, then removing it, and adding it again by doing a
         // rescan.
-        #[cfg_attr(not(feature = "mmio"), test)]
-        #[cfg(target_arch = "x86_64")]
         fn test_pci_bar_reprogramming() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4213,12 +4235,12 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_memory_mergeable_off() {
             test_memory_mergeable(false)
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_cpu_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -4319,7 +4341,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_memory_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -4332,11 +4354,12 @@ mod tests {
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=2,max=4"])
-                .args(&["--memory", "size=512M,hotplug_size=8192M,balloon=on"])
+                .args(&["--memory", "size=512M,hotplug_size=8192M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .default_net()
+                .args(&["--balloon", "size=0"])
                 .args(&["--api-socket", &api_socket])
                 .capture_output()
                 .spawn()
@@ -4360,9 +4383,9 @@ mod tests {
                 thread::sleep(std::time::Duration::new(10, 0));
                 assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
 
-                // Use balloon remove RAM from the VM
-                let desired_ram = 512 << 20;
-                resize_command(&api_socket, None, None, Some(desired_ram));
+                // Use balloon to remove RAM from the VM
+                let desired_balloon = 512 << 20;
+                resize_command(&api_socket, None, None, Some(desired_balloon));
 
                 thread::sleep(std::time::Duration::new(10, 0));
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
@@ -4390,8 +4413,8 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
 
                 // Use balloon add RAM to the VM
-                let desired_ram = 1024 << 20;
-                resize_command(&api_socket, None, None, Some(desired_ram));
+                let desired_balloon = 0;
+                resize_command(&api_socket, None, None, Some(desired_balloon));
 
                 thread::sleep(std::time::Duration::new(10, 0));
 
@@ -4435,8 +4458,8 @@ mod tests {
             handle_child_output(r, &output);
         }
 
+        #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg_attr(not(feature = "mmio"), test)]
         fn test_virtio_mem() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4522,9 +4545,9 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        // Test both vCPU and memory resizing together
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
+        // Test both vCPU and memory resizing together
         fn test_resize() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4584,7 +4607,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_memory_overhead() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4625,7 +4648,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_disk_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -4802,7 +4825,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_pmem_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -4932,7 +4955,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn test_net_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -5111,17 +5134,10 @@ mod tests {
                 net_id, guest.network.guest_mac, guest.network.host_ip
             );
 
-            let cloudinit_params = if cfg!(feature = "mmio") {
-                format!(
-                    "path={}",
-                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                )
-            } else {
-                format!(
-                    "path={},iommu=on",
-                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                )
-            };
+            let cloudinit_params = format!(
+                "path={},iommu=on",
+                guest.disk_config.disk(DiskType::CloudInit).unwrap()
+            );
 
             let socket = temp_vsock_path(&guest.tmp_dir);
 
@@ -5175,25 +5191,22 @@ mod tests {
 
                 assert!(guest.ssh_command(&console_cmd).is_ok());
 
-                // Only for PCI, we can check that removing and adding back the
-                // virtio-net device does not break the snapshot/restore support
-                // for virtio-pci. This is an important thing to test as the
-                // hotplug will trigger a PCI BAR reprogramming, which is a good
-                // way of checking if the stored resources are correctly restored.
-                #[cfg(not(feature = "mmio"))]
-                {
-                    // Unplug the virtio-net device
-                    assert!(remote_command(&api_socket, "remove-device", Some(net_id),));
-                    thread::sleep(std::time::Duration::new(10, 0));
+                // We check that removing and adding back the virtio-net device
+                // does not break the snapshot/restore support for virtio-pci.
+                // This is an important thing to test as the hotplug will
+                // trigger a PCI BAR reprogramming, which is a good way of
+                // checking if the stored resources are correctly restored.
+                // Unplug the virtio-net device
+                assert!(remote_command(&api_socket, "remove-device", Some(net_id),));
+                thread::sleep(std::time::Duration::new(10, 0));
 
-                    // Plug the virtio-net device again
-                    assert!(remote_command(
-                        &api_socket,
-                        "add-net",
-                        Some(net_params.as_str()),
-                    ));
-                    thread::sleep(std::time::Duration::new(10, 0));
-                }
+                // Plug the virtio-net device again
+                assert!(remote_command(
+                    &api_socket,
+                    "add-net",
+                    Some(net_params.as_str()),
+                ));
+                thread::sleep(std::time::Duration::new(10, 0));
 
                 // Pause the VM
                 assert!(remote_command(&api_socket, "pause", None));
@@ -5272,7 +5285,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_counters() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5311,14 +5324,284 @@ mod tests {
 
             handle_child_output(r, &output);
         }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn test_watchdog() {
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let api_socket = temp_api_path(&guest.tmp_dir);
+
+            let kernel_path = direct_kernel_boot_path().unwrap();
+
+            let mut cmd = GuestCommand::new(&guest);
+            cmd.args(&["--cpus", "boot=1"])
+                .args(&["--memory", "size=512M"])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .default_disks()
+                .args(&["--net", guest.default_net_string().as_str()])
+                .args(&["--watchdog"])
+                .args(&["--api-socket", &api_socket])
+                .capture_output();
+
+            let mut child = cmd.spawn().unwrap();
+
+            thread::sleep(std::time::Duration::new(20, 0));
+            let r = std::panic::catch_unwind(|| {
+                // Check for PCI device
+                assert!(guest
+                    .does_device_vendor_pair_match("0x1063", "0x1af4")
+                    .unwrap_or_default());
+
+                // Enable systemd watchdog
+                guest
+                    .ssh_command(
+                        "echo RuntimeWatchdogSec=15s | sudo tee -a /etc/systemd/system.conf",
+                    )
+                    .unwrap();
+
+                guest.ssh_command("sudo reboot").unwrap();
+                thread::sleep(std::time::Duration::new(20, 0));
+
+                // Check that systemd has activated the watchdog
+                assert_eq!(
+                    guest
+                        .ssh_command("sudo journalctl | grep -c -- \"Watchdog started\"")
+                        .unwrap_or_default()
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or_default(),
+                    2
+                );
+
+                // Ensure that the current boot journal is written so reboot counts are valid
+                guest.ssh_command("sudo journalctl --sync").unwrap();
+
+                let boot_count = guest
+                    .ssh_command("sudo journalctl --list-boots | wc -l")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default();
+                assert_eq!(boot_count, 2);
+                // Allow some normal time to elapse to check we don't get spurious reboots
+                thread::sleep(std::time::Duration::new(40, 0));
+
+                // Check no reboot
+                let boot_count = guest
+                    .ssh_command("sudo journalctl --list-boots | wc -l")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default();
+                assert_eq!(boot_count, 2);
+
+                // Ensure that the current boot journal is written so reboot counts are valid
+                guest.ssh_command("sudo journalctl --sync").unwrap();
+
+                // Trigger a panic (sync first). We need to do this inside a screen with a delay so the SSH command returns.
+                guest.ssh_command("screen -dmS reboot sh -c \"sleep 5; echo s | tee /proc/sysrq-trigger; echo c | sudo tee /proc/sysrq-trigger\"").unwrap();
+
+                // Allow some time for the watchdog to trigger (max 30s) and reboot to happen
+                thread::sleep(std::time::Duration::new(50, 0));
+
+                // Check that watchdog triggered reboot
+                let boot_count = guest
+                    .ssh_command("sudo journalctl --list-boots | wc -l")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default();
+                assert_eq!(boot_count, 3);
+
+                // Now pause the VM and remain offline for 30s
+                assert!(remote_command(&api_socket, "pause", None));
+                thread::sleep(std::time::Duration::new(30, 0));
+                assert!(remote_command(&api_socket, "resume", None));
+
+                // Check no reboot
+                let boot_count = guest
+                    .ssh_command("sudo journalctl --list-boots | wc -l")
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_default();
+                assert_eq!(boot_count, 3);
+            });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
     }
 
     mod sequential {
         use crate::tests::*;
 
-        #[cfg_attr(not(feature = "mmio"), test)]
+        #[test]
         fn test_memory_mergeable_on() {
             test_memory_mergeable(true)
+        }
+    }
+
+    mod windows {
+        use crate::tests::*;
+
+        #[cfg(target_arch = "x86_64")]
+        fn windows_auth() -> PasswordAuth {
+            PasswordAuth {
+                username: String::from("administrator"),
+                password: String::from("Admin123"),
+            }
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn test_windows_guest() {
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+
+            let mut ovmf_path = workload_path.clone();
+            ovmf_path.push("OVMF.fd");
+
+            let mut osdisk_path = workload_path;
+            osdisk_path.push("windows-server-2019.raw");
+
+            let mut child = Command::new(clh_command("cloud-hypervisor"))
+                .args(&["--cpus", "boot=2,kvm_hyperv=on,max_phys_bits=39"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .args(&["--disk", &format!("path={}", osdisk_path.to_str().unwrap())])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .args(&["--net", "tap="])
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let fd = child.stdout.as_ref().unwrap().as_raw_fd();
+            let pipesize = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, PIPE_SIZE) };
+            let fd = child.stderr.as_ref().unwrap().as_raw_fd();
+            let pipesize1 = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, PIPE_SIZE) };
+
+            assert!(pipesize >= PIPE_SIZE && pipesize1 >= PIPE_SIZE);
+
+            thread::sleep(std::time::Duration::new(40, 0));
+            let auth = windows_auth();
+            let r = std::panic::catch_unwind(|| {
+                ssh_command_ip_with_auth(
+                    "shutdown /s",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+                thread::sleep(std::time::Duration::new(40, 0));
+            });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn test_windows_guest_snapshot_restore() {
+            let tmp_dir = TempDir::new("ch").unwrap();
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+
+            let mut ovmf_path = workload_path.clone();
+            ovmf_path.push("OVMF.fd");
+
+            let mut osdisk_path = workload_path;
+            osdisk_path.push("windows-server-2019.raw");
+
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = Command::new(clh_command("cloud-hypervisor"))
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on,max_phys_bits=39"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .args(&["--disk", &format!("path={}", osdisk_path.to_str().unwrap())])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .args(&["--net", "tap="])
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            let fd = child.stdout.as_ref().unwrap().as_raw_fd();
+            let pipesize = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, PIPE_SIZE) };
+            let fd = child.stderr.as_ref().unwrap().as_raw_fd();
+            let pipesize1 = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, PIPE_SIZE) };
+
+            assert!(pipesize >= PIPE_SIZE && pipesize1 >= PIPE_SIZE);
+
+            // Wait to make sure Windows boots up
+            thread::sleep(std::time::Duration::new(20, 0));
+
+            let snapshot_dir = temp_snapshot_dir_path(&tmp_dir);
+
+            // Pause the VM
+            assert!(remote_command(&api_socket, "pause", None));
+
+            // Take a snapshot from the VM
+            assert!(remote_command(
+                &api_socket,
+                "snapshot",
+                Some(format!("file://{}", snapshot_dir).as_str()),
+            ));
+
+            // Wait to make sure the snapshot is completed
+            thread::sleep(std::time::Duration::new(20, 0));
+
+            let _ = child.kill();
+            child.wait().unwrap();
+
+            // Restore the VM from the snapshot
+            let mut child = Command::new(clh_command("cloud-hypervisor"))
+                .args(&["--api-socket", &api_socket])
+                .args(&[
+                    "--restore",
+                    format!("source_url=file://{}", snapshot_dir).as_str(),
+                ])
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+
+            // Wait for the VM to be restored
+            thread::sleep(std::time::Duration::new(10, 0));
+
+            let r = std::panic::catch_unwind(|| {
+                // Resume the VM
+                assert!(remote_command(&api_socket, "resume", None));
+
+                let auth = windows_auth();
+
+                ssh_command_ip_with_auth(
+                    "shutdown /s",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+            });
+
+            thread::sleep(std::time::Duration::new(20, 0));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
         }
     }
 

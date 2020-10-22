@@ -111,8 +111,7 @@ fn create_app<'a, 'b>(
                      \"size=<guest_memory_size>,mergeable=on|off,shared=on|off,hugepages=on|off,\
                      hotplug_method=acpi|virtio-mem,\
                      hotplug_size=<hotpluggable_memory_size>,\
-                     hotplugged_size=<hotplugged_memory_size>,\
-                     balloon=on|off\"",
+                     hotplugged_size=<hotplugged_memory_size>\"",
                 )
                 .default_value(&default_memory)
                 .group("vm-config"),
@@ -181,6 +180,13 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
+            Arg::with_name("balloon")
+                .long("balloon")
+                .help(config::BalloonConfig::SYNTAX)
+                .takes_value(true)
+                .group("vm-config"),
+        )
+        .arg(
             Arg::with_name("fs")
                 .long("fs")
                 .help(config::FsConfig::SYNTAX)
@@ -234,6 +240,13 @@ fn create_app<'a, 'b>(
                 .help(config::NumaConfig::SYNTAX)
                 .takes_value(true)
                 .min_values(1)
+                .group("vm-config"),
+        )
+        .arg(
+            Arg::with_name("watchdog")
+                .long("watchdog")
+                .help("Enable virtio-watchdog")
+                .takes_value(false)
                 .group("vm-config"),
         )
         .arg(
@@ -558,8 +571,6 @@ mod unit_tests {
                     hotplugged_size: None,
                     shared: false,
                     hugepages: false,
-                    balloon: false,
-                    balloon_size: 0,
                     zones: None,
                 },
                 kernel: Some(KernelConfig {
@@ -575,6 +586,7 @@ mod unit_tests {
                     src: PathBuf::from("/dev/urandom"),
                     iommu: false,
                 },
+                balloon: None,
                 fs: None,
                 pmem: None,
                 serial: ConsoleConfig {
@@ -593,6 +605,7 @@ mod unit_tests {
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc: None,
                 numa: None,
+                watchdog: false,
             };
 
             aver_eq!(tb, expected_vm_config, result_vm_config);
