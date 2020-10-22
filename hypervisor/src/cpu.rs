@@ -14,7 +14,9 @@ use crate::aarch64::VcpuInit;
 use crate::aarch64::{RegList, Register, StandardRegisters};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{CpuId, LapicState};
-use crate::{CpuState, Xsave};
+use crate::CpuState;
+#[cfg(target_arch = "x86_64")]
+use crate::Xsave;
 
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{

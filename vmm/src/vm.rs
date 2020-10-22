@@ -471,9 +471,7 @@ impl Vm {
         vmm_path: PathBuf,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))] _saved_clock: Option<
-            hypervisor::ClockData,
-        >,
+        #[cfg(feature = "kvm")] _saved_clock: Option<hypervisor::ClockData>,
     ) -> Result<Self> {
         config
             .lock()
@@ -734,9 +732,7 @@ impl Vm {
             vmm_path,
             seccomp_action,
             hypervisor,
-            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-            vm_snapshot.clock,
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(feature = "kvm")]
             None,
         )
     }
