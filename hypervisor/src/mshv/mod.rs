@@ -532,6 +532,10 @@ impl cpu::Vcpu for MshvVcpu {
                     debug!("HALT");
                     Ok(cpu::VmExit::Reset)
                 }
+                hv_message_type_HVMSG_UNRECOVERABLE_EXCEPTION => {
+                    debug!("TRIPLE FAULT");
+                    Ok(cpu::VmExit::Shutdown)
+                }
                 hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT => {
                     let info = x.to_ioport_info();
                     let access_info = info.access_info;
