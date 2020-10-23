@@ -14,7 +14,6 @@ extern crate arc_swap;
 extern crate epoll;
 #[macro_use]
 extern crate log;
-#[cfg(feature = "pci_support")]
 extern crate pci;
 extern crate serde;
 #[macro_use]
@@ -44,6 +43,7 @@ pub mod seccomp_filters;
 pub mod transport;
 pub mod vhost_user;
 pub mod vsock;
+pub mod watchdog;
 
 pub use self::balloon::*;
 pub use self::block::*;
@@ -58,6 +58,7 @@ pub use self::net_util::*;
 pub use self::pmem::*;
 pub use self::rng::*;
 pub use self::vsock::*;
+pub use self::watchdog::*;
 use vm_virtio::{queue::*, VirtioDeviceType};
 
 const DEVICE_INIT: u32 = 0x00;
@@ -71,11 +72,6 @@ const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_F_IOMMU_PLATFORM: u32 = 33;
 const VIRTIO_F_IN_ORDER: u32 = 35;
 
-#[allow(dead_code)]
-const INTERRUPT_STATUS_USED_RING: u32 = 0x1;
-#[allow(dead_code)]
-const INTERRUPT_STATUS_CONFIG_CHANGED: u32 = 0x2;
-#[cfg(feature = "pci_support")]
 const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
 #[derive(Debug)]

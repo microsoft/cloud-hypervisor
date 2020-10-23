@@ -183,6 +183,7 @@ fn create_vmm_ioctl_seccomp_rule_common() -> Result<Vec<SeccompRule>, Error> {
 fn create_vmm_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
     const KVM_CREATE_PIT2: u64 = 0x4040_ae77;
     const KVM_GET_CLOCK: u64 = 0x8030_ae7c;
+    const KVM_GET_CPUID2: u64 = 0xc008_ae91;
     const KVM_GET_FPU: u64 = 0x81a0_ae8c;
     const KVM_GET_LAPIC: u64 = 0x8400_ae8e;
     const KVM_GET_MSR_INDEX_LIST: u64 = 0xc004_ae02;
@@ -205,6 +206,7 @@ fn create_vmm_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
     let mut arch_rules = or![
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_CREATE_PIT2)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_CLOCK,)?],
+        and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_CPUID2,)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_FPU)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_LAPIC)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, KVM_GET_MSR_INDEX_LIST)?],
@@ -367,6 +369,8 @@ fn vmm_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall(libc::SYS_stat),
         allow_syscall(libc::SYS_statx),
         allow_syscall(libc::SYS_tgkill),
+        allow_syscall(libc::SYS_timerfd_create),
+        allow_syscall(libc::SYS_timerfd_settime),
         allow_syscall(libc::SYS_tkill),
         allow_syscall_if(
             libc::SYS_umask,
@@ -459,6 +463,8 @@ fn vcpu_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall(libc::SYS_stat),
         allow_syscall(libc::SYS_statx),
         allow_syscall(libc::SYS_tgkill),
+        allow_syscall(libc::SYS_timerfd_create),
+        allow_syscall(libc::SYS_timerfd_settime),
         allow_syscall(libc::SYS_tkill),
         #[cfg(target_arch = "x86_64")]
         allow_syscall(libc::SYS_unlink),

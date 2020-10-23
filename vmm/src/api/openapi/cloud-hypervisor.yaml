@@ -410,6 +410,8 @@ components:
             $ref: '#/components/schemas/NetConfig'
         rng:
           $ref: '#/components/schemas/RngConfig'
+        balloon:
+          $ref: '#/components/schemas/BalloonConfig'
         fs:
           type: array
           items:
@@ -437,6 +439,9 @@ components:
           items:
             $ref: '#/components/schemas/NumaConfig'
         iommu:
+          type: boolean
+          default: false
+        watchdog:
           type: boolean
           default: false
       description: Virtual machine configuration
@@ -532,12 +537,6 @@ components:
         hugepages:
           type: boolean
           default: false
-        balloon:
-          type: boolean
-          default: false
-        balloon_size:
-          type: integer
-          format: int64
         zones:
           type: array
           items:
@@ -643,6 +642,15 @@ components:
         iommu:
           type: boolean
           default: false
+
+    BalloonConfig:
+      required:
+      - size
+      type: object
+      properties:
+        size:
+          type: integer
+          format: int64
 
     FsConfig:
       required:
@@ -796,8 +804,8 @@ components:
           description: desired memory ram in bytes
           type: integer
           format: int64
-        desired_ram_w_balloon:
-          description: desired ballon size in bytes
+        desired_balloon:
+          description: desired balloon size in bytes
           type: integer
           format: int64
 
