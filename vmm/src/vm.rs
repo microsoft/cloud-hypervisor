@@ -512,11 +512,13 @@ impl Vm {
         });
         vm.set_vmmops(vm_ops).map_err(Error::SetVmmOpsInterface)?;
 
+        let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         let cpu_manager = cpu::CpuManager::new(
             &config.lock().unwrap().cpus.clone(),
             &device_manager,
             &memory_manager,
             vm.clone(),
+            exit_evt_clone,
             reset_evt,
             hypervisor,
             seccomp_action.clone(),
@@ -639,7 +641,6 @@ impl Vm {
         let memory_manager = MemoryManager::new(
             vm.clone(),
             &config.lock().unwrap().memory.clone(),
-            None,
             false,
             phys_bits,
         )

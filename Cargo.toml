@@ -1,6 +1,6 @@
 [package]
 name = "cloud-hypervisor"
-version = "0.10.0"
+version = "0.11.0"
 authors = ["The Cloud Hypervisor Authors"]
 edition = "2018"
 default-run = "cloud-hypervisor"
@@ -13,17 +13,22 @@ homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
 lto = true
 
 [dependencies]
+anyhow = "1.0"
+api_client = { path = "api_client" }
 clap = { version = "2.33.3", features = ["wrap_help"] }
+epoll = ">=4.0.1"
 hypervisor = { path = "hypervisor" }
-libc = "0.2.79"
+libc = "0.2.80"
 log = { version = "0.4.11", features = ["std"] }
 option_parser = { path = "option_parser" }
 seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.22.0" }
 serde_json = "1.0.59"
+thiserror = "1.0"
 vhost_user_block = { path = "vhost_user_block"}
 vhost_user_net = { path = "vhost_user_net"}
 vmm = { path = "vmm" }
 vmm-sys-util = "0.6.1"
+wait-timeout = "0.2.0"
 
 [build-dependencies]
 clap = { version = "2.33.3", features = ["wrap_help"] }
@@ -49,7 +54,7 @@ serde_json = "1.0.59"
 net_util = { path = "net_util" }
 
 [features]
-default = ["acpi", "cmos", "kvm"]
+default = ["acpi", "cmos", "io_uring", "kvm"]
 acpi = ["vmm/acpi"]
 cmos = ["vmm/cmos"]
 fwdebug = ["vmm/fwdebug"]
@@ -63,6 +68,7 @@ integration_tests = []
 [workspace]
 members = [
     "acpi_tables",
+    "api_client",
     "arch",
     "arch_gen",
     "block_util",
