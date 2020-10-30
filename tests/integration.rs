@@ -5,8 +5,6 @@
 
 #[cfg(test)]
 #[cfg(feature = "integration_tests")]
-#[cfg(test)]
-#[cfg(feature = "integration_tests")]
 #[macro_use]
 extern crate lazy_static;
 
@@ -23,15 +21,18 @@ mod tests {
     use std::io;
     use std::io::BufRead;
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::io::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
+    use std::str::FromStr;
     use std::string::String;
     use std::sync::Mutex;
     use std::thread;
     use tempdir::TempDir;
     use tempfile::NamedTempFile;
+    #[cfg_attr(target_arch = "aarch64", allow(unused_imports))]
+    use wait_timeout::ChildExt;
 
     lazy_static! {
         static ref NEXT_VM_ID: Mutex<u8> = Mutex::new(1);
@@ -47,7 +48,12 @@ mod tests {
         l2_guest_mac1: String,
         l2_guest_mac2: String,
         l2_guest_mac3: String,
+        tcp_listener_port: u16,
     }
+
+    const DEFAULT_TCP_LISTENER_MESSAGE: &str = "booted";
+    const DEFAULT_TCP_LISTENER_PORT: u16 = 8000;
+    const DEFAULT_TCP_LISTENER_TIMEOUT: i32 = 40;
 
     struct Guest<'a> {
         tmp_dir: TempDir,
@@ -205,10 +211,28 @@ mod tests {
                 .join("cloud-init")
                 .join("ubuntu");
 
-            vec!["meta-data", "user-data"].iter().for_each(|x| {
+            vec!["meta-data"].iter().for_each(|x| {
                 rate_limited_copy(source_file_dir.join(x), cloud_init_directory.join(x))
                     .expect("Expect copying cloud-init meta-data to succeed");
             });
+
+            let mut user_data_string = String::new();
+            fs::File::open(source_file_dir.join("user-data"))
+                .unwrap()
+                .read_to_string(&mut user_data_string)
+                .expect("Expected reading user-data file in to succeed");
+            user_data_string = user_data_string.replace(
+                "@DEFAULT_TCP_LISTENER_MESSAGE",
+                &DEFAULT_TCP_LISTENER_MESSAGE,
+            );
+            user_data_string = user_data_string.replace("@HOST_IP", &network.host_ip);
+            user_data_string = user_data_string
+                .replace("@TCP_LISTENER_PORT", &network.tcp_listener_port.to_string());
+
+            fs::File::create(cloud_init_directory.join("user-data"))
+                .unwrap()
+                .write_all(&user_data_string.as_bytes())
+                .expect("Expected writing out user-data to succeed");
 
             let mut network_config_string = String::new();
 
@@ -615,6 +639,12 @@ mod tests {
         ChannelSession(ssh2::Error),
         Command(ssh2::Error),
         Parsing(std::num::ParseIntError),
+        EpollWait(std::io::Error),
+        EpollWaitTimeout,
+        ReadToString(std::io::Error),
+        SetReadTimeout(std::io::Error),
+        WrongGuestAddr,
+        WrongGuestMsg,
     }
 
     impl std::error::Error for Error {}
@@ -648,6 +678,7 @@ mod tests {
                 l2_guest_mac1: format!("de:ad:be:ef:12:{:02x}", id),
                 l2_guest_mac2: format!("de:ad:be:ef:34:{:02x}", id),
                 l2_guest_mac3: format!("de:ad:be:ef:56:{:02x}", id),
+                tcp_listener_port: DEFAULT_TCP_LISTENER_PORT + id as u16,
             };
 
             disk_config.prepare_files(&tmp_dir, &network);
@@ -796,6 +827,94 @@ mod tests {
                 .trim()
                 .parse()
                 .map_err(Error::Parsing)?)
+        }
+
+        fn wait_vm_boot(&self, custom_timeout: Option<i32>) -> Result<(), Error> {
+            let start = std::time::Instant::now();
+            // The 'port' is unique per 'GUEST' and listening to wild-card ip avoids retrying on 'TcpListener::bind()'
+            let listen_addr = format!("0.0.0.0:{}", self.network.tcp_listener_port);
+            let expected_guest_addr = self.network.guest_ip.as_str();
+            let mut s = String::new();
+            let timeout = match custom_timeout {
+                Some(t) => t,
+                None => DEFAULT_TCP_LISTENER_TIMEOUT,
+            };
+
+            match (|| -> Result<(), Error> {
+                let listener =
+                    TcpListener::bind(&listen_addr.as_str()).map_err(Error::Connection)?;
+                listener
+                    .set_nonblocking(true)
+                    .expect("Cannot set non-blocking for tcp listener");
+
+                // Reply on epoll w/ timeout to wait for guest connections faithfully
+                let epoll_fd = epoll::create(true).expect("Cannot create epoll fd");
+                epoll::ctl(
+                    epoll_fd,
+                    epoll::ControlOptions::EPOLL_CTL_ADD,
+                    listener.as_raw_fd(),
+                    epoll::Event::new(epoll::Events::EPOLLIN, 0),
+                )
+                .expect("Cannot add 'tcp_listener' event to epoll");
+                let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 1];
+                let num_events = epoll::wait(epoll_fd, timeout * 1000 as i32, &mut events[..])
+                    .map_err(Error::EpollWait)?;
+                if num_events == 0 {
+                    return Err(Error::EpollWaitTimeout);
+                }
+
+                match listener.accept() {
+                    Ok((mut stream, addr)) => {
+                        // Make sure the connection is from the expected 'guest_addr'
+                        if addr.ip() != std::net::IpAddr::from_str(expected_guest_addr).unwrap() {
+                            s = format!(
+                                "Expecting the guest ip '{}' while being connected with ip '{}'",
+                                expected_guest_addr,
+                                addr.ip()
+                            );
+                            return Err(Error::WrongGuestAddr);
+                        }
+
+                        // Make sure the right message is to notify the guest VM is booted
+                        let mut data = String::new();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::new(timeout as u64, 0)))
+                            .map_err(Error::SetReadTimeout)?;
+                        stream
+                            .read_to_string(&mut data)
+                            .map_err(Error::ReadToString)?;
+                        if data != DEFAULT_TCP_LISTENER_MESSAGE {
+                            s = format!(
+                                "Expecting the guest message '{}' while receiving the message '{}'",
+                                DEFAULT_TCP_LISTENER_MESSAGE, data
+                            );
+                            return Err(Error::WrongGuestMsg);
+                        };
+
+                        Ok(())
+                    }
+                    Err(e) => {
+                        s = "TcpListener::accept() failed".to_string();
+                        Err(Error::Connection(e))
+                    }
+                }
+            })() {
+                Err(e) => {
+                    let duration = start.elapsed();
+                    eprintln!(
+                        "\n\n==== Start 'wait_vm_boot' (FAILED) ====\n\n\
+                         duration =\"{:?}, timeout = {}s\"\n\
+                         listen_addr=\"{}\"\n\
+                         expected_guest_addr=\"{}\"\n\
+                         message =\"{}\"\n\
+                         \n==== End 'wait_vm_boot' outout ====\n\n",
+                        duration, timeout, listen_addr, expected_guest_addr, s,
+                    );
+
+                    Err(e)
+                }
+                Ok(_) => Ok(()),
+            }
         }
 
         fn check_numa_node_cpus(&self, node_id: usize, cpus: Vec<usize>) -> Result<bool, Error> {
@@ -1121,8 +1240,8 @@ mod tests {
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
             assert_eq!(
                 guest.get_cpu_count().unwrap_or_default(),
                 u32::from(total_vcpus)
@@ -1236,8 +1355,9 @@ mod tests {
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             if let Some(tap_name) = tap {
                 let tap_count = std::process::Command::new("bash")
                     .arg("-c")
@@ -1400,9 +1520,9 @@ mod tests {
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(120, 0));
-
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             // Check both if /dev/vdc exists and if the block size is 16M.
             assert_eq!(
                 guest
@@ -1572,9 +1692,9 @@ mod tests {
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(40, 0));
-
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             // Just check the VM booted correctly.
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), num_queues as u32);
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
@@ -1590,7 +1710,8 @@ mod tests {
                 assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -1665,8 +1786,9 @@ mod tests {
 
         let mut child = guest_command.capture_output().spawn().unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             if hotplug {
                 // Add fs to the VM
                 let (cmd_success, cmd_output) =
@@ -1865,8 +1987,9 @@ mod tests {
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             // Check for the presence of /dev/pmem0
             assert_eq!(
                 guest
@@ -1886,7 +2009,7 @@ mod tests {
             assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
             guest.ssh_command("sudo reboot").unwrap();
-            thread::sleep(std::time::Duration::new(30, 0));
+            guest.wait_vm_boot(None).unwrap();
             let reboot_count = guest
                 .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                 .unwrap_or_default()
@@ -1941,9 +2064,9 @@ mod tests {
 
         let mut child = cmd.capture_output().spawn().unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
-
         let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
             if hotplug {
                 let (cmd_success, cmd_output) = remote_command_w_output(
                     &api_socket,
@@ -1979,7 +2102,7 @@ mod tests {
                 assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -2218,9 +2341,9 @@ mod tests {
                     .spawn()
                     .unwrap();
 
-                thread::sleep(std::time::Duration::new(20, 0));
-
                 let r = std::panic::catch_unwind(|| {
+                    guest.wait_vm_boot(Some(120)).unwrap();
+
                     assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                     assert_eq!(guest.get_initial_apicid().unwrap_or(1), 0);
                     assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
@@ -2252,9 +2375,9 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(Some(120)).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
 
                 #[cfg(target_arch = "x86_64")]
@@ -2319,8 +2442,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert!(
                     guest
                         .ssh_command("lscpu | grep \"Address sizes:\" | cut -f 2 -d \":\" | sed \"s# *##\" | cut -f 1 -d \" \"")
@@ -2355,7 +2479,7 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
+            guest.wait_vm_boot(None).unwrap();
 
             let r = std::panic::catch_unwind(|| {
                 assert!(guest.get_total_memory().unwrap_or_default() > 5_000_000);
@@ -2385,7 +2509,7 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
+            guest.wait_vm_boot(Some(120)).unwrap();
 
             let r = std::panic::catch_unwind(|| {
                 assert!(guest.get_total_memory().unwrap_or_default() > 128_000_000);
@@ -2428,9 +2552,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert!(guest.get_total_memory().unwrap_or_default() > 2_880_000);
 
                 guest
@@ -2453,7 +2577,7 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
 
                 guest.ssh_command("sudo reboot").unwrap();
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -2518,9 +2642,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check each NUMA node has been assigned the right amount of
                 // memory.
                 assert!(guest.get_numa_node_memory(0).unwrap_or_default() > 960_000);
@@ -2579,7 +2703,7 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
+            guest.wait_vm_boot(None).unwrap();
 
             #[cfg(target_arch = "x86_64")]
             let grep_cmd = "grep -c PCI-MSI /proc/interrupts";
@@ -2625,9 +2749,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
@@ -2680,9 +2804,9 @@ mod tests {
                     .spawn()
                     .unwrap();
 
-                thread::sleep(std::time::Duration::new(20, 0));
-
                 let r = std::panic::catch_unwind(|| {
+                    guest.wait_vm_boot(Some(120)).unwrap();
+
                     assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                     assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                     assert!(guest.get_entropy().unwrap_or_default() >= 900);
@@ -2717,9 +2841,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
@@ -2763,9 +2887,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
@@ -2828,9 +2952,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check both if /dev/vdc exists and if the block size is 16M.
                 assert_eq!(
                     guest
@@ -2982,9 +3106,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(
                     guest
                         .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'timer'")
@@ -3140,9 +3264,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Simple checks to validate the VM booted properly
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
@@ -3180,9 +3304,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 let tap_count = std::process::Command::new("bash")
                     .arg("-c")
                     .arg("ip link | grep -c mytap1")
@@ -3236,9 +3360,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Test that there is no ttyS0
                 assert_eq!(
                     guest
@@ -3277,9 +3401,9 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 #[cfg(target_arch = "x86_64")]
                 // Test that there is a ttyS0
                 assert_eq!(
@@ -3328,9 +3452,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Test that there is a ttyS0
                 assert_eq!(
                     guest
@@ -3342,6 +3466,9 @@ mod tests {
                     1
                 );
             });
+
+            // This sleep is needed to wait for the login prompt
+            thread::sleep(std::time::Duration::new(2, 0));
 
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
@@ -3375,9 +3502,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Test that there is a ttyS0
                 assert_eq!(
                     guest
@@ -3390,9 +3517,9 @@ mod tests {
                 );
 
                 guest.ssh_command("sudo shutdown -h now").unwrap();
-                thread::sleep(std::time::Duration::new(20, 0));
             });
 
+            let _ = child.wait_timeout(std::time::Duration::from_secs(20));
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
             handle_child_output(r, &output);
@@ -3435,12 +3562,12 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let text = String::from("On a branch floating down river a cricket, singing.");
             let cmd = format!("echo {} | sudo tee /dev/hvc0", text);
 
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 #[cfg(feature = "acpi")]
                 assert!(guest
                     .does_device_vendor_pair_match("0x1043", "0x1af4")
@@ -3481,11 +3608,11 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
+            guest.wait_vm_boot(None).unwrap();
 
             guest.ssh_command("sudo shutdown -h now").unwrap();
-            thread::sleep(std::time::Duration::new(20, 0));
 
+            let _ = child.wait_timeout(std::time::Duration::from_secs(20));
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
 
@@ -3772,9 +3899,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
@@ -3787,7 +3914,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_reboot() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3800,20 +3926,22 @@ mod tests {
             .for_each(|disk_config| {
                 let guest = Guest::new(*disk_config);
 
-                let mut child = GuestCommand::new(&guest)
-                    .args(&["--cpus", "boot=1"])
+                let mut cmd = GuestCommand::new(&guest);
+                cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
                     .args(&["--kernel", guest.fw_path.as_str()])
                     .default_raw_disks()
                     .default_net()
-                    .args(&["--serial", "tty", "--console", "off"])
-                    .capture_output()
-                    .spawn()
-                    .unwrap();
+                    .capture_output();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                #[cfg(target_arch = "aarch64")]
+                cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+
+                let mut child = cmd.spawn().unwrap();
 
                 let r = std::panic::catch_unwind(|| {
+                    guest.wait_vm_boot(Some(120)).unwrap();
+
                     let reboot_count = guest
                         .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                         .unwrap_or_default()
@@ -3825,7 +3953,8 @@ mod tests {
                     assert_eq!(reboot_count, 0);
                     guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                    thread::sleep(std::time::Duration::new(20, 0));
+                    guest.wait_vm_boot(Some(120)).unwrap();
+
                     let reboot_count = guest
                         .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                         .unwrap_or_default()
@@ -3839,9 +3968,9 @@ mod tests {
                     guest
                         .ssh_command("sudo shutdown -h now")
                         .unwrap_or_default();
-                    thread::sleep(std::time::Duration::new(20, 0));
                 });
 
+                let _ = child.wait_timeout(std::time::Duration::from_secs(40));
                 let _ = child.kill();
                 let output = child.wait_with_output().unwrap();
                 handle_child_output(r, &output);
@@ -3877,9 +4006,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -3891,7 +4020,8 @@ mod tests {
                 assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -3903,9 +4033,9 @@ mod tests {
                 assert_eq!(fd_count_1, fd_count_2);
 
                 guest.ssh_command("sudo shutdown -h now").unwrap();
-                thread::sleep(std::time::Duration::new(20, 0));
             });
 
+            let _ = child.wait_timeout(std::time::Duration::from_secs(20));
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
             handle_child_output(r, &output);
@@ -4098,9 +4228,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Verify the virtio-iommu device is present.
                 assert!(guest
                     .does_device_vendor_pair_match("0x1057", "0x1af4")
@@ -4168,10 +4298,10 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r =
                 std::panic::catch_unwind(|| {
+                    guest.wait_vm_boot(None).unwrap();
+
                     // 2 network interfaces + default localhost ==> 3 interfaces
                     assert_eq!(
                         guest
@@ -4263,9 +4393,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
 
                 // Resize the VM
@@ -4294,7 +4424,7 @@ mod tests {
                 assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4365,9 +4495,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
                 guest
@@ -4401,7 +4531,7 @@ mod tests {
                 assert_eq!(reboot_count, 0);
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4439,7 +4569,7 @@ mod tests {
 
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4484,9 +4614,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
                 guest
@@ -4518,7 +4648,7 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
 
                 guest.ssh_command("sudo reboot").unwrap();
-                thread::sleep(std::time::Duration::new(30, 0));
+                guest.wait_vm_boot(None).unwrap();
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4569,9 +4699,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 2);
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
@@ -4673,9 +4803,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check /dev/vdc is not there
                 assert_eq!(
                     guest
@@ -4761,7 +4891,8 @@ mod tests {
                 // Reboot the VM.
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4798,7 +4929,8 @@ mod tests {
 
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4850,9 +4982,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check /dev/pmem0 is not there
                 assert_eq!(
                     guest
@@ -4891,7 +5023,8 @@ mod tests {
 
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -4928,7 +5061,8 @@ mod tests {
 
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -5035,7 +5169,8 @@ mod tests {
 
                 guest.ssh_command("sudo reboot").unwrap_or_default();
 
-                thread::sleep(std::time::Duration::new(20, 0));
+                guest.wait_vm_boot(None).unwrap();
+
                 let reboot_count = guest
                     .ssh_command("sudo journalctl | grep -c -- \"-- Reboot --\"")
                     .unwrap_or_default()
@@ -5114,6 +5249,7 @@ mod tests {
         // through each ssh command. There's no need to perform a dedicated test to
         // verify the migration went well for virtio-net.
         #[test]
+        #[cfg(target_arch = "x86_64")]
         fn test_snapshot_restore() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5121,10 +5257,7 @@ mod tests {
             workload_path.push("workloads");
 
             let mut kernel_path = workload_path;
-            #[cfg(target_arch = "x86_64")]
             kernel_path.push("bzImage");
-            #[cfg(target_arch = "aarch64")]
-            kernel_path.push("Image");
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5162,14 +5295,14 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let console_text = String::from("On a branch floating down river a cricket, singing.");
             let console_cmd = format!("echo {} | sudo tee /dev/hvc0", console_text);
             // Create the snapshot directory
             let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
 
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check the number of vCPUs
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
                 // Check the guest RAM
@@ -5305,9 +5438,9 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 let orig_counters = get_counters(&api_socket);
                 assert!(guest
                     .ssh_command("dd if=/dev/zero of=test count=8 bs=1M")
@@ -5347,8 +5480,9 @@ mod tests {
 
             let mut child = cmd.spawn().unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check for PCI device
                 assert!(guest
                     .does_device_vendor_pair_match("0x1063", "0x1af4")
@@ -5362,7 +5496,8 @@ mod tests {
                     .unwrap();
 
                 guest.ssh_command("sudo reboot").unwrap();
-                thread::sleep(std::time::Duration::new(20, 0));
+
+                guest.wait_vm_boot(None).unwrap();
 
                 // Check that systemd has activated the watchdog
                 assert_eq!(
@@ -5446,10 +5581,10 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     mod windows {
         use crate::tests::*;
 
-        #[cfg(target_arch = "x86_64")]
         fn windows_auth() -> PasswordAuth {
             PasswordAuth {
                 username: String::from("administrator"),
@@ -5458,7 +5593,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_windows_guest() {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
@@ -5500,9 +5634,9 @@ mod tests {
                     DEFAULT_SSH_TIMEOUT,
                 )
                 .unwrap();
-                thread::sleep(std::time::Duration::new(40, 0));
             });
 
+            let _ = child.wait_timeout(std::time::Duration::from_secs(40));
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
 
@@ -5510,7 +5644,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_windows_guest_snapshot_restore() {
             let tmp_dir = TempDir::new("ch").unwrap();
             let mut workload_path = dirs::home_dir().unwrap();
@@ -5597,7 +5730,7 @@ mod tests {
                 .unwrap();
             });
 
-            thread::sleep(std::time::Duration::new(20, 0));
+            let _ = child.wait_timeout(std::time::Duration::from_secs(20));
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
 
@@ -5605,11 +5738,11 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     mod sgx {
         use crate::tests::*;
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_sgx() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_SGX_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5631,9 +5764,9 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            thread::sleep(std::time::Duration::new(20, 0));
-
             let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
                 // Check if SGX is correctly detected in the guest.
                 assert!(guest.check_sgx_support().unwrap());
 

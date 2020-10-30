@@ -35,8 +35,8 @@ use vm_device::BusDevice;
 use vm_memory::guest_memory::FileOffset;
 use vm_memory::{
     mmap::MmapRegionError, Address, Bytes, Error as MmapError, GuestAddress, GuestAddressSpace,
-    GuestMemory, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, GuestMemoryRegion,
-    GuestRegionMmap, GuestUsize, MemoryRegionAddress, MmapRegion,
+    GuestMemory, GuestMemoryAtomic, GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryMmap,
+    GuestMemoryRegion, GuestRegionMmap, GuestUsize, MmapRegion,
 };
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -235,6 +235,12 @@ pub enum Error {
 
     /// Guest address overflow
     GuestAddressOverFlow,
+
+    /// Error opening snapshot file
+    SnapshotOpen(io::Error),
+
+    // Error copying snapshot into region
+    SnapshotCopy(GuestMemoryError),
 }
 
 const ENABLE_FLAG: usize = 0;
@@ -340,7 +346,6 @@ impl MemoryManager {
         ram_regions: &[(GuestAddress, usize)],
         zones: &[MemoryZoneConfig],
         prefault: bool,
-        ext_regions: Option<Vec<MemoryRegion>>,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut zones = zones.to_owned();
         let mut mem_regions = Vec::new();
@@ -392,7 +397,6 @@ impl MemoryManager {
                     zone.shared,
                     zone.hugepages,
                     zone.host_numa_node,
-                    &ext_regions,
                 )?;
 
                 // Add region to the list of regions associated with the
@@ -439,10 +443,32 @@ impl MemoryManager {
         Ok((mem_regions, memory_zones))
     }
 
+    fn fill_saved_regions(&mut self, saved_regions: Vec<MemoryRegion>) -> Result<(), Error> {
+        for region in saved_regions {
+            if let Some(content) = region.content {
+                // Open (read only) the snapshot file for the given region.
+                let mut memory_region_file = OpenOptions::new()
+                    .read(true)
+                    .open(content)
+                    .map_err(Error::SnapshotOpen)?;
+
+                self.guest_memory
+                    .memory()
+                    .read_exact_from(
+                        region.start_addr,
+                        &mut memory_region_file,
+                        region.size as usize,
+                    )
+                    .map_err(Error::SnapshotCopy)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new(
         vm: Arc<dyn hypervisor::Vm>,
         config: &MemoryConfig,
-        ext_regions: Option<Vec<MemoryRegion>>,
         prefault: bool,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
@@ -575,7 +601,7 @@ impl MemoryManager {
             .collect();
 
         let (mem_regions, mut memory_zones) =
-            Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault, ext_regions)?;
+            Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault)?;
 
         let guest_memory =
             GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
@@ -619,7 +645,6 @@ impl MemoryManager {
                             zone.shared,
                             zone.hugepages,
                             zone.host_numa_node,
-                            &None,
                         )?;
 
                         virtio_mem_regions.push(region.clone());
@@ -758,24 +783,26 @@ impl MemoryManager {
                     }
                 };
 
-            // Here we turn the backing file name into a backing file path as
-            // this will be needed when the memory region will be created with
-            // mmap().
-            // We simply ignore the backing files that are None, as they
-            // represent files that have been directly saved by the user, with
+            // Here we turn the content file name into a content file path as
+            // this will be needed to copy the content of the saved memory
+            // region into the newly created memory region.
+            // We simply ignore the content files that are None, as they
+            // represent regions that have been directly saved by the user, with
             // no need for saving into a dedicated external file. For these
             // files, the VmConfig already contains the information on where to
             // find them.
-            let mut ext_regions = mem_snapshot.memory_regions;
-            for region in ext_regions.iter_mut() {
-                if let Some(backing_file) = &mut region.backing_file {
+            let mut saved_regions = mem_snapshot.memory_regions;
+            for region in saved_regions.iter_mut() {
+                if let Some(content) = &mut region.content {
                     let mut memory_region_path = vm_snapshot_path.clone();
-                    memory_region_path.push(backing_file.clone());
-                    *backing_file = memory_region_path;
+                    memory_region_path.push(content.clone());
+                    *content = memory_region_path;
                 }
             }
 
-            MemoryManager::new(vm, config, Some(ext_regions), prefault, phys_bits)
+            let mm = MemoryManager::new(vm, config, prefault, phys_bits)?;
+            mm.lock().unwrap().fill_saved_regions(saved_regions)?;
+            Ok(mm)
         } else {
             Err(Error::Restore(MigratableError::Restore(anyhow!(
                 "Could not find {}-section from snapshot",
@@ -823,45 +850,15 @@ impl MemoryManager {
 
     #[allow(clippy::too_many_arguments)]
     fn create_ram_region(
-        file: &Option<PathBuf>,
-        mut file_offset: u64,
+        backing_file: &Option<PathBuf>,
+        file_offset: u64,
         start_addr: GuestAddress,
         size: usize,
         prefault: bool,
         shared: bool,
         hugepages: bool,
         host_numa_node: Option<u32>,
-        ext_regions: &Option<Vec<MemoryRegion>>,
     ) -> Result<Arc<GuestRegionMmap>, Error> {
-        let mut backing_file: Option<PathBuf> = file.clone();
-        let mut copy_ext_region_content: Option<PathBuf> = None;
-
-        if let Some(ext_regions) = ext_regions {
-            for ext_region in ext_regions.iter() {
-                if ext_region.start_addr == start_addr && ext_region.size as usize == size {
-                    if ext_region.backing_file.is_some() {
-                        // If the region is memory mapped as "shared", then we
-                        // don't replace the backing file, but expect to copy
-                        // the content from the external backing file after the
-                        // region has been created.
-                        if shared {
-                            copy_ext_region_content = ext_region.backing_file.clone();
-                        } else {
-                            backing_file = ext_region.backing_file.clone();
-                            // We must override the file offset as in this case
-                            // we're restoring an existing region, which means
-                            // it will fit perfectly the calculated region.
-                            file_offset = 0;
-                        }
-                    }
-
-                    // No need to iterate further as we found the external
-                    // region matching the current region.
-                    break;
-                }
-            }
-        }
-
         let (f, f_off) = match backing_file {
             Some(ref file) => {
                 if file.is_dir() {
@@ -929,20 +926,6 @@ impl MemoryManager {
             start_addr,
         )
         .map_err(Error::GuestMemory)?;
-
-        // Copy data to the region if needed
-        if let Some(ext_backing_file) = &copy_ext_region_content {
-            // Open (read only) the snapshot file for the given region.
-            let mut memory_region_file = OpenOptions::new()
-                .read(true)
-                .open(ext_backing_file)
-                .unwrap();
-
-            // Fill the region with the file content.
-            region
-                .read_from(MemoryRegionAddress(0), &mut memory_region_file, size)
-                .unwrap();
-        }
 
         // Apply NUMA policy if needed.
         if let Some(node) = host_numa_node {
@@ -1047,7 +1030,6 @@ impl MemoryManager {
             self.shared,
             self.hugepages,
             None,
-            &None,
         )?;
 
         // Map it into the guest
@@ -1757,7 +1739,7 @@ pub struct GuestAddressDef(pub u64);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MemoryRegion {
-    backing_file: Option<PathBuf>,
+    content: Option<PathBuf>,
     #[serde(with = "GuestAddressDef")]
     start_addr: GuestAddress,
     size: GuestUsize,
@@ -1784,7 +1766,7 @@ impl Snapshottable for MemoryManager {
                 return Err(MigratableError::Snapshot(anyhow!("Zero length region")));
             }
 
-            let mut backing_file = Some(PathBuf::from(format!("memory-region-{}", index)));
+            let mut content = Some(PathBuf::from(format!("memory-region-{}", index)));
             if let Some(file_offset) = region.file_offset() {
                 if (region.flags() & libc::MAP_SHARED == libc::MAP_SHARED)
                     && Self::is_hardlink(file_offset.file())
@@ -1798,12 +1780,12 @@ impl Snapshottable for MemoryManager {
                     // the memory content for this specific region, as we can
                     // assume the user will have it saved through the backing
                     // file already.
-                    backing_file = None;
+                    content = None;
                 }
             }
 
             memory_regions.push(MemoryRegion {
-                backing_file,
+                content,
                 start_addr: region.start_addr(),
                 size: region.len(),
             });
@@ -1867,9 +1849,9 @@ impl Transportable for MemoryManager {
 
                 if let Some(guest_memory) = &*self.snapshot.lock().unwrap() {
                     for region in self.snapshot_memory_regions.iter() {
-                        if let Some(backing_file) = &region.backing_file {
+                        if let Some(content) = &region.content {
                             let mut memory_region_path = vm_memory_snapshot_path.clone();
-                            memory_region_path.push(backing_file);
+                            memory_region_path.push(content);
 
                             // Create the snapshot file for the region
                             let mut memory_region_file = OpenOptions::new()
@@ -1880,7 +1862,7 @@ impl Transportable for MemoryManager {
                                 .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
                             guest_memory
-                                .write_to(
+                                .write_all_to(
                                     region.start_addr,
                                     &mut memory_region_file,
                                     region.size as usize,
