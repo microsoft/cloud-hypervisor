@@ -27,9 +27,6 @@ use std::convert::TryInto;
 #[cfg(target_arch = "x86_64")]
 use x86_64::emulator;
 
-#[cfg(target_arch = "x86_64")]
-use x86_64::hv1;
-
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::VcpuMshvState as CpuState;
@@ -322,30 +319,6 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             }
             break;
         }
-
-        /* Install enlightenment intercepts */
-        let intercept_args = mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_GLOBAL_CPUID,
-            intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
-        };
-        fd.install_intercept(intercept_args).unwrap();
-
-        let intercept_args = mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_READ | HV_INTERCEPT_ACCESS_MASK_WRITE,
-            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_MSR,
-            intercept_parameter: hv_intercept_parameters { as_uint64: 0x0 },
-        };
-        fd.install_intercept(intercept_args).unwrap();
-
-        let intercept_args = mshv_install_intercept {
-            access_type_mask: HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION,
-            intercept_parameter: hv_intercept_parameters {
-                exception_vector: 0x6,
-            }, // INVALID OPCODE: https://wiki.osdev.org/Exceptions
-        };
-        fd.install_intercept(intercept_args).unwrap();
 
         let msr_list = self.get_msr_list()?;
         let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
@@ -700,106 +673,15 @@ impl cpu::Vcpu for MshvVcpu {
                 }
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
                     let info = x.to_cpuid_info();
-                    let (rax, rbx, rcx, rdx) = match info.rax {
-                        1 => (
-                            info.default_result_rax as u32,
-                            info.default_result_rbx as u32,
-                            /* hypervisor present bit */
-                            info.default_result_rcx as u32 | (1 << 31),
-                            info.default_result_rdx as u32,
-                        ),
-                        0x40000000..=0x400000ff => hv1::process_cpuid(info.rax as u32),
-                        _ => (
-                            info.default_result_rax as u32,
-                            info.default_result_rbx as u32,
-                            info.default_result_rcx as u32,
-                            info.default_result_rdx as u32,
-                        ),
-                    };
-                    let arr_reg_name_value = [
-                        (hv_register_name::HV_X64_REGISTER_RIP, info.header.rip + 2),
-                        (hv_register_name::HV_X64_REGISTER_RAX, rax as u64),
-                        (hv_register_name::HV_X64_REGISTER_RBX, rbx as u64),
-                        (hv_register_name::HV_X64_REGISTER_RCX, rcx as u64),
-                        (hv_register_name::HV_X64_REGISTER_RDX, rdx as u64),
-                    ];
-                    set_registers_64!(self.fd, arr_reg_name_value)
-                        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
+                    debug!("cpuid eax: {:x}", info.rax);
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
                     let info = x.to_msr_info();
-                    let insn_len = info.header.instruction_length() as u64;
-                    let mut general_protection_fault: bool = false;
                     if info.header.intercept_access_type == 0 as u8 {
                         debug!("msr read: {:x}", info.msr_number);
-                        let msr_value: u64 = match info.msr_number {
-                            hv1::X86X_IA32_MSR_PLATFORM_ID => Some(0),
-                            0x40000000..=0x4fffffff => hv1::process_msr_read(
-                                self.vp_index as u32,
-                                info.msr_number as u32,
-                                self.hv_state.clone(),
-                            ),
-                            _ => None,
-                        }
-                        .unwrap_or_else(|| {
-                            debug!(
-                                "{:x}: unrecognized msr read {:x}",
-                                info.header.rip, info.msr_number
-                            );
-                            general_protection_fault = true;
-                            0
-                        });
-                        if !general_protection_fault {
-                            let rax = msr_value & 0xffffffff;
-                            let rdx = msr_value >> 32;
-                            set_registers_64!(
-                                self.fd,
-                                &[
-                                    (
-                                        hv_register_name::HV_X64_REGISTER_RIP,
-                                        info.header.rip + insn_len
-                                    ),
-                                    (hv_register_name::HV_X64_REGISTER_RAX, rax as u64),
-                                    (hv_register_name::HV_X64_REGISTER_RDX, rdx as u64),
-                                ]
-                            )
-                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
-                        }
                     } else {
                         debug!("msr write: {:x}", info.msr_number);
-                        let msr_input = info.rax & 0xffffffff | info.rdx << 32;
-                        match info.msr_number {
-                            0x40000000..=0x4fffffff => hv1::process_msr_write(
-                                self.vp_index as u32,
-                                info.msr_number,
-                                msr_input,
-                                self.hv_state.clone(),
-                                self.vmmops.clone(),
-                                &self.fd,
-                            ),
-                            _ => None,
-                        }
-                        .unwrap_or_else(|| {
-                            debug!(
-                                "{:x}: unrecognized msr write {:x} rax {:x} rdx {:x}",
-                                info.header.rip, info.msr_number, info.rax, info.rdx
-                            );
-                            general_protection_fault = true;
-                        });
-                        if !general_protection_fault {
-                            set_registers_64!(
-                                self.fd,
-                                &[(
-                                    hv_register_name::HV_X64_REGISTER_RIP,
-                                    info.header.rip + insn_len
-                                )]
-                            )
-                            .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
-                        }
-                    }
-                    if general_protection_fault {
-                        raise_general_page_fault(&self.fd)?;
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
