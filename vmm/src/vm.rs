@@ -62,7 +62,6 @@ use std::io::{self, Write};
 use std::io::{Seek, SeekFrom};
 use std::num::Wrapping;
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
 use url::Url;
@@ -467,7 +466,6 @@ impl Vm {
         vm: Arc<dyn hypervisor::Vm>,
         exit_evt: EventFd,
         reset_evt: EventFd,
-        vmm_path: PathBuf,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "kvm")] _saved_clock: Option<hypervisor::ClockData>,
@@ -489,7 +487,6 @@ impl Vm {
             memory_manager.clone(),
             &exit_evt,
             &reset_evt,
-            vmm_path,
             seccomp_action.clone(),
             #[cfg(feature = "acpi")]
             numa_nodes.clone(),
@@ -628,7 +625,6 @@ impl Vm {
         config: Arc<Mutex<VmConfig>>,
         exit_evt: EventFd,
         reset_evt: EventFd,
-        vmm_path: PathBuf,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
     ) -> Result<Self> {
@@ -663,7 +659,6 @@ impl Vm {
             vm,
             exit_evt,
             reset_evt,
-            vmm_path,
             seccomp_action,
             hypervisor,
             #[cfg(feature = "kvm")]
@@ -686,7 +681,6 @@ impl Vm {
         snapshot: &Snapshot,
         exit_evt: EventFd,
         reset_evt: EventFd,
-        vmm_path: PathBuf,
         source_url: &str,
         prefault: bool,
         seccomp_action: &SeccompAction,
@@ -729,7 +723,6 @@ impl Vm {
             vm,
             exit_evt,
             reset_evt,
-            vmm_path,
             seccomp_action,
             hypervisor,
             #[cfg(feature = "kvm")]
