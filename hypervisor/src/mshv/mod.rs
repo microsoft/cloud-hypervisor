@@ -770,7 +770,7 @@ impl cpu::Vcpu for MshvVcpu {
         self.set_lapic(&state.lapic)?;
         self.set_xsave(&state.xsave)?;
         self.fd
-            .set_dregs(&state.dbg)
+            .set_debug_regs(&state.dbg)
             .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()))?;
         Ok(())
     }
@@ -786,7 +786,7 @@ impl cpu::Vcpu for MshvVcpu {
         let xsave = self.get_xsave()?;
         let dbg = self
             .fd
-            .get_dregs()
+            .get_debug_regs()
             .map_err(|e| cpu::HypervisorCpuError::GetDebugRegs(e.into()))?;
         Ok(CpuState {
             msrs,
