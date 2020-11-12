@@ -95,7 +95,16 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64-custom";
 
+    #[cfg(not(feature = "mshv"))]
     const DIRECT_KERNEL_BOOT_CMDLINE: &str = "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw";
+    #[cfg(feature = "mshv")]
+    const DIRECT_KERNEL_BOOT_CMDLINE: &str =
+        "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw apic=verbose clocksource=acpi_pm";
+
+    #[cfg(not(feature = "mshv"))]
+    const ENABLE_SECCOMP: &str = "true";
+    #[cfg(feature = "mshv")]
+    const ENABLE_SECCOMP: &str = "false";
 
     const PIPE_SIZE: i32 = 32 << 20;
 
@@ -776,6 +785,7 @@ mod tests {
                      self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
                      self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
             }
+
             #[cfg(target_arch = "aarch64")]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
@@ -1241,6 +1251,7 @@ mod tests {
             ])
             .args(&["--memory", "size=512M"])
             .args(&["--kernel", guest.fw_path.as_str()])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .default_net()
             .capture_output()
@@ -1341,6 +1352,7 @@ mod tests {
             .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .args(&["--net", net_params.as_str()])
             .args(&["--api-socket", &api_socket])
@@ -1480,6 +1492,7 @@ mod tests {
             .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&[
                 "--disk",
                 format!(
@@ -1649,6 +1662,7 @@ mod tests {
             .args(&["--memory", "size=512M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&[
                 "--disk",
                 blk_boot_params.as_str(),
@@ -1722,6 +1736,7 @@ mod tests {
             .default_disks()
             .default_net()
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&["--api-socket", &api_socket]);
 
         let fs_params = format!(
@@ -1916,6 +1931,7 @@ mod tests {
             .args(&["--memory", "size=512M"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .default_net()
             .args(&[
@@ -2004,6 +2020,7 @@ mod tests {
         cmd.args(&["--memory", "size=512M"]);
         cmd.args(&["--kernel", kernel_path.to_str().unwrap()]);
         cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+        cmd.args(&["--seccomp", ENABLE_SECCOMP]);
         cmd.default_disks();
         cmd.default_net();
 
@@ -2286,6 +2303,7 @@ mod tests {
                     .default_raw_disks()
                     .default_net()
                     .args(&["--serial", "tty", "--console", "off"])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -2315,6 +2333,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=2,max=4"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_raw_disks()
                 .default_net();
@@ -2385,6 +2404,7 @@ mod tests {
                 .args(&["--cpus", &format!("max_phys_bits={}", max_phys_bits)])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -2420,6 +2440,7 @@ mod tests {
                 .args(&["--kernel", guest.fw_path.as_str()])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2450,6 +2471,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=128G"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2496,6 +2518,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&["--api-socket", &api_socket])
                 .capture_output()
                 .default_disks()
@@ -2586,6 +2609,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&["--api-socket", &api_socket])
                 .capture_output()
                 .default_disks()
@@ -2645,6 +2669,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2693,6 +2718,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
@@ -2750,7 +2776,7 @@ mod tests {
                     .default_disks()
                     .default_net()
                     .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                    .args(&["--seccomp", "false"])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -2788,6 +2814,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -2834,6 +2861,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -2879,6 +2907,7 @@ mod tests {
                 .args(&["--memory", "size=512M,shared=on"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -3036,6 +3065,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -3196,6 +3226,7 @@ mod tests {
                         .replace("vda1", "pmem0p1")
                         .as_str(),
                 ])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3229,6 +3260,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .args(&[
                     "--net",
@@ -3283,6 +3315,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3329,6 +3362,7 @@ mod tests {
                 .default_net()
                 .args(&["--serial", "null"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             // Now AArch64 can only boot from direct kernel, command-line is needed.
@@ -3384,6 +3418,7 @@ mod tests {
                 .default_net()
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3428,6 +3463,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3494,6 +3530,7 @@ mod tests {
                 .default_net()
                 .args(&["--console", "tty"])
                 .args(&["--serial", "null"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3534,6 +3571,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3626,6 +3664,7 @@ mod tests {
                 .args(&["--cpus", "boot=4"])
                 .args(&["--memory", "size=2G,hugepages=on,shared=on"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -3825,6 +3864,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3866,6 +3906,7 @@ mod tests {
                 cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
                     .args(&["--kernel", guest.fw_path.as_str()])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .default_raw_disks()
                     .default_net()
                     .capture_output();
@@ -3938,6 +3979,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -4145,6 +4187,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -4224,6 +4267,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .args(&[
                     "--net",
@@ -4322,6 +4366,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4423,6 +4468,7 @@ mod tests {
                 .args(&["--memory", "size=512M,hotplug_size=8192M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--balloon", "size=0"])
@@ -4543,6 +4589,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4628,6 +4675,7 @@ mod tests {
                 .args(&["--memory", "size=512M,hotplug_size=8192M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4693,6 +4741,7 @@ mod tests {
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .default_disks()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -4733,6 +4782,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -4912,6 +4962,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -5045,6 +5096,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .capture_output()
                 .spawn()
@@ -5162,6 +5214,7 @@ mod tests {
                     .args(&["--kernel", k_path.to_str().unwrap()])
                     .args(&["--initramfs", initramfs_path.to_str().unwrap()])
                     .args(&["--cmdline", &cmdline])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -5215,6 +5268,7 @@ mod tests {
                 .args(&["--cpus", "boot=4"])
                 .args(&["--memory", "size=4G"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -5367,6 +5421,7 @@ mod tests {
                 .default_disks()
                 .args(&["--net", guest.default_net_string().as_str()])
                 .args(&["--api-socket", &api_socket])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             #[cfg(target_arch = "aarch64")]
@@ -5411,6 +5466,7 @@ mod tests {
                 .args(&["--net", guest.default_net_string().as_str()])
                 .args(&["--watchdog"])
                 .args(&["--api-socket", &api_socket])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             let mut child = cmd.spawn().unwrap();
@@ -5698,6 +5754,7 @@ mod tests {
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--sgx-epc", "size=64M"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
