@@ -495,6 +495,14 @@ impl cpu::Vcpu for MshvVcpu {
             .set_vcpu_events(events)
             .map_err(|e| cpu::HypervisorCpuError::SetVcpuEvents(e.into()))
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call to enable HyperV SynIC
+    ///
+    fn enable_hyperv_synic(&self) -> cpu::Result<()> {
+        /* We always have SynIC enabled on MSHV */
+        Ok(())
+    }
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         // Safe because this is just only done during initialization.
         // TODO don't zero it everytime we enter this function.

@@ -422,7 +422,6 @@ pub fn configure_vcpu(
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
 
     if kvm_hyperv {
-        #[cfg(feature = "kvm")]
         fd.enable_hyperv_synic().unwrap();
     }
 

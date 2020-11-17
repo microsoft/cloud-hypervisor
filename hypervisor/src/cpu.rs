@@ -271,7 +271,7 @@ pub trait Vcpu: Send + Sync {
     /// X86 specific call to setup the CPUID registers.
     ///
     fn set_cpuid2(&self, cpuid: &CpuId) -> Result<()>;
-    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call to enable HyperV SynIC
     ///
