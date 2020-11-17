@@ -2284,6 +2284,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_simple_launch() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -2326,6 +2327,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_multi_cpu() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut bionic);
@@ -2378,24 +2380,28 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_421() {
             test_cpu_topology(4, 2, 1);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_142() {
             test_cpu_topology(1, 4, 2);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_262() {
             test_cpu_topology(2, 6, 2);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_physical_bits() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2431,6 +2437,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_large_vm() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2464,6 +2471,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_huge_memory() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2496,6 +2504,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_user_defined_memory_regions() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2581,6 +2590,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_guest_numa_nodes() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2662,6 +2672,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_pci_msi() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2991,6 +3002,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_named_tap() {
             test_vhost_user_net(
                 Some("mytap0"),
@@ -3057,6 +3069,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_split_irqchip() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3102,11 +3115,13 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, false)
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_cache_size_1_gib() {
             test_virtio_fs(true, Some(0x4000_0000), "none", &prepare_virtiofsd, false)
         }
@@ -3117,11 +3132,13 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size_w_virtiofsd_rs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, false)
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_cache_size_1_gib_w_virtiofsd_rs_daemon() {
             test_virtio_fs(
                 true,
@@ -3139,6 +3156,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, true)
         }
@@ -3151,6 +3169,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on_w_virtiofsd_rs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, true)
         }
@@ -3169,6 +3188,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_pmem_discard_writes() {
             test_virtio_pmem(true, false)
         }
@@ -3351,6 +3371,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_serial_null() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3454,6 +3475,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_serial_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3562,6 +3584,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_console_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3607,6 +3630,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // The VFIO integration test starts cloud-hypervisor guest with 3 TAP
         // backed networking interfaces, bound through a simple bridge on the host.
         // So if the nested cloud-hypervisor succeeds in getting a directly
@@ -3890,6 +3914,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_reboot() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3963,6 +3988,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_bzimage_reboot() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4038,6 +4064,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         fn test_api_create_boot() {
@@ -4088,6 +4115,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         // Then we pause the VM, check that it's no longer available.
@@ -4251,6 +4279,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // We cannot force the software running in the guest to reprogram the BAR
         // with some different addresses, but we have a reliable way of testing it
         // with a standard Linux kernel.
@@ -4346,12 +4375,14 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_memory_mergeable_off() {
             test_memory_mergeable(false)
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4454,6 +4485,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_memory_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4572,6 +4604,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_mem() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4660,6 +4693,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // Test both vCPU and memory resizing together
         fn test_resize() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -5078,6 +5112,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_net_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5187,6 +5222,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_initramfs() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5239,6 +5275,7 @@ mod tests {
         // verify the migration went well for virtio-net.
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_snapshot_restore() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5409,6 +5446,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_counters() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5450,6 +5488,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_watchdog() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5565,7 +5604,7 @@ mod tests {
             handle_child_output(r, &output);
         }
     }
-
+    #[cfg(not(feature = "mshv"))]
     mod sequential {
         use crate::tests::*;
 
