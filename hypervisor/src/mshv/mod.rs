@@ -904,30 +904,6 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     }
 }
 
-fn emu_reg64_to_hv_reg64(name: emulator::Register64) -> hv_register_name {
-    match name {
-        emulator::Register64::Rax => hv_register_name::HV_X64_REGISTER_RAX,
-        emulator::Register64::Rcx => hv_register_name::HV_X64_REGISTER_RCX,
-        emulator::Register64::Rdx => hv_register_name::HV_X64_REGISTER_RDX,
-        emulator::Register64::Rbx => hv_register_name::HV_X64_REGISTER_RBX,
-        emulator::Register64::Rsp => hv_register_name::HV_X64_REGISTER_RSP,
-        emulator::Register64::Rbp => hv_register_name::HV_X64_REGISTER_RBP,
-        emulator::Register64::Rsi => hv_register_name::HV_X64_REGISTER_RSI,
-        emulator::Register64::Rdi => hv_register_name::HV_X64_REGISTER_RDI,
-        emulator::Register64::R8 => hv_register_name::HV_X64_REGISTER_R8,
-        emulator::Register64::R9 => hv_register_name::HV_X64_REGISTER_R9,
-        emulator::Register64::R10 => hv_register_name::HV_X64_REGISTER_R10,
-        emulator::Register64::R11 => hv_register_name::HV_X64_REGISTER_R11,
-        emulator::Register64::R12 => hv_register_name::HV_X64_REGISTER_R12,
-        emulator::Register64::R13 => hv_register_name::HV_X64_REGISTER_R13,
-        emulator::Register64::R14 => hv_register_name::HV_X64_REGISTER_R14,
-        emulator::Register64::R15 => hv_register_name::HV_X64_REGISTER_R15,
-        emulator::Register64::Rip => hv_register_name::HV_X64_REGISTER_RIP,
-        emulator::Register64::Cr0 => hv_register_name::HV_X64_REGISTER_CR0,
-        emulator::Register64::Efer => hv_register_name::HV_X64_REGISTER_EFER,
-    }
-}
-
 /// Wrapper over Mshv VM ioctls.
 pub struct MshvVm {
     fd: Arc<VmFd>,
