@@ -237,8 +237,8 @@ cmd_build() {
 	shift
     done
     process_volumes_args
-    if [[ "$hypervisor" != "kvm" ]]; then
-        die "Hypervisor value must be kvm"
+    if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
+        die "Hypervisor value must be kvm or mshv"
     fi
 
     target="$(uname -m)-unknown-linux-${libc}"
@@ -320,8 +320,8 @@ cmd_tests() {
 	esac
 	shift
     done
-    if [[ "$hypervisor" != "kvm" ]]; then
-        die "Hypervisor value must be kvm"
+    if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
+        die "Hypervisor value must be kvm or mshv"
     fi
     set -- "$@" '--hypervisor' $hypervisor
 

@@ -27,8 +27,8 @@ process_common_args() {
 	esac
 	shift
     done
-    if [[ "$hypervisor" != "kvm" ]]; then
-        echo "Hypervisor value must be kvm"
+    if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
+        echo "Hypervisor value must be kvm or mshv"
         exit 1
     fi
 }
