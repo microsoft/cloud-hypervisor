@@ -11,7 +11,7 @@
 
 use crate::arch::emulator::{EmulationError, PlatformEmulator, PlatformError};
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::emulator::EmulatorCpuState;
+use crate::arch::x86::emulator::{Emulator, EmulatorCpuState};
 use crate::cpu;
 use crate::cpu::Vcpu;
 use crate::hypervisor;
@@ -27,9 +27,6 @@ use vm::DataMatch;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 use std::convert::TryInto;
-
-#[cfg(target_arch = "x86_64")]
-use x86_64::emulator;
 
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
@@ -406,7 +403,6 @@ impl SoftTLB {
 }
 
 /// Vcpu struct for Hyper-V
-#[derive(Clone)]
 pub struct MshvVcpu {
     fd: VcpuFd,
     vp_index: u8,
@@ -416,7 +412,6 @@ pub struct MshvVcpu {
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
     vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
-    tlb: Arc<RwLock<SoftTLB>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -639,90 +634,31 @@ impl cpu::Vcpu for MshvVcpu {
                     //     insn_len,
                     // );
 
-                    let mut emul = emulator::Emulator::new();
-                    let mut emulator_input = emulator::Input::Start;
+                    let mut context = MshvEmulatorContext {
+                        vcpu: self,
+                        tlb: Arc::new(RwLock::new(SoftTLB::new())),
+                    };
 
-                    loop {
-                        match emul.run(&emulator_input).unwrap() {
-                            emulator::Output::GetInstructionStream => {
-                                emulator_input = emulator::Input::Instructions(
-                                    &info.instruction_bytes[0..insn_len],
-                                );
-                            }
-                            emulator::Output::ReadRegister64(name) => {
-                                let reg_name = emu_reg64_to_hv_reg64(name);
-                                let reg_name: [hv_register_name; 1] = [reg_name];
-                                let reg_val = self
-                                    .fd
-                                    .get_reg(&reg_name)
-                                    .map_err(|e| cpu::HypervisorCpuError::GetReg(e.into()))?;
-                                let value = unsafe { reg_val[0].reg64 };
-                                // debug!("emulator read {:?} {:x?}", name, value);
-                                emulator_input = emulator::Input::Register64(name, value);
-                            }
-                            emulator::Output::WriteRegister64(name, value) => {
-                                let reg_name = emu_reg64_to_hv_reg64(name);
-                                let arr_reg_name_value = [(reg_name, value)];
-                                // debug!("emulator write {:?} {:x?}", name, value);
-                                set_registers_64!(self.fd, arr_reg_name_value)
-                                    .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
-                                emulator_input = emulator::Input::Continue;
-                            }
-                            emulator::Output::ReadMemory(size) => {
-                                assert!(size <= 4);
-                                let mut data: [u8; 4] = [0; 4];
-                                if let Some(vmmops) = &self.vmmops {
-                                    vmmops
-                                        .mmio_read(
-                                            info.guest_physical_address,
-                                            &mut data[0..size as usize],
-                                        )
-                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
-                                }
-                                let reg_value = u32::from_ne_bytes(data.try_into().unwrap());
-                                // debug!(
-                                //     "emulator read mem {:x?} {:x?}",
-                                //     info.guest_physical_address, reg_value
-                                // );
-                                emulator_input = emulator::Input::Memory(emulator::Value {
-                                    length: 4,
-                                    value: reg_value as u128,
-                                });
-                            }
-                            emulator::Output::WriteMemory(value) => {
-                                let reg_value = value.value.to_le_bytes();
-                                // debug!(
-                                //     "emulator write mem {:x?} {:x?}",
-                                //     info.guest_physical_address, reg_value
-                                // );
+                    // Add the GVA <-> GPA mapping.
+                    context
+                        .tlb
+                        .write()
+                        .unwrap()
+                        .add_mapping(info.guest_virtual_address, info.guest_physical_address)
+                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
 
-                                let addr = IoEventAddress::Mmio(info.guest_physical_address);
+                    // Create a new emulator.
+                    let mut emul = Emulator::new(&mut context);
 
-                                if let Some((datamatch, efd)) =
-                                    self.ioeventfds.read().unwrap().get(&addr)
-                                {
-                                    // debug!(
-                                    //     "Found {:x?} {:x?} {}",
-                                    //     addr,
-                                    //     datamatch,
-                                    //     efd.as_raw_fd()
-                                    // );
-                                    /* TODO: use datamatch to provide the correct semantics */
-                                    efd.write(1).unwrap();
-                                }
-                                if let Some(vmmops) = &self.vmmops {
-                                    vmmops
-                                        .mmio_write(
-                                            info.guest_physical_address,
-                                            &reg_value[0..value.length as usize],
-                                        )
-                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
-                                }
-                                emulator_input = emulator::Input::Continue;
-                            }
-                            emulator::Output::Done => break,
-                        }
-                    }
+                    // Emulate the trapped instruction, and only the first one.
+                    let new_state = emul
+                        .emulate_first_insn(self.vp_index as usize, &info.instruction_bytes)
+                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
+
+                    // Set CPU state back.
+                    context
+                        .set_cpu_state(self.vp_index as usize, new_state)
+                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
 
                     Ok(cpu::VmExit::Ignore)
                 }
@@ -857,8 +793,13 @@ impl cpu::Vcpu for MshvVcpu {
     }
 }
 
+struct MshvEmulatorContext<'a> {
+    vcpu: &'a MshvVcpu,
+    tlb: Arc<RwLock<SoftTLB>>,
+}
+
 /// Platform emulation for Hyper-V
-impl PlatformEmulator for MshvVcpu {
+impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     type CpuState = EmulatorCpuState;
 
     fn read_memory(&self, gva: u64, data: &mut [u8]) -> Result<(), PlatformError> {
@@ -870,7 +811,7 @@ impl PlatformEmulator for MshvVcpu {
             gpa
         );
 
-        if let Some(vmmops) = &self.vmmops {
+        if let Some(vmmops) = &self.vcpu.vmmops {
             vmmops
                 .mmio_read(gpa, data)
                 .map_err(|e| PlatformError::MemoryReadFailure(e.into()))?;
@@ -889,6 +830,7 @@ impl PlatformEmulator for MshvVcpu {
         );
 
         if let Some((datamatch, efd)) = self
+            .vcpu
             .ioeventfds
             .read()
             .unwrap()
@@ -900,7 +842,7 @@ impl PlatformEmulator for MshvVcpu {
             efd.write(1).unwrap();
         }
 
-        if let Some(vmmops) = &self.vmmops {
+        if let Some(vmmops) = &self.vcpu.vmmops {
             vmmops
                 .mmio_write(gpa, data)
                 .map_err(|e| PlatformError::MemoryWriteFailure(e.into()))?;
@@ -910,18 +852,20 @@ impl PlatformEmulator for MshvVcpu {
     }
 
     fn cpu_state(&self, cpu_id: usize) -> Result<Self::CpuState, PlatformError> {
-        if cpu_id != self.vp_index as usize {
+        if cpu_id != self.vcpu.vp_index as usize {
             return Err(PlatformError::GetCpuStateFailure(anyhow!(
                 "CPU id mismatch {:?} {:?}",
                 cpu_id,
-                self.vp_index
+                self.vcpu.vp_index
             )));
         }
 
         let regs = self
+            .vcpu
             .get_regs()
             .map_err(|e| PlatformError::GetCpuStateFailure(e.into()))?;
         let sregs = self
+            .vcpu
             .get_sregs()
             .map_err(|e| PlatformError::GetCpuStateFailure(e.into()))?;
 
@@ -932,20 +876,22 @@ impl PlatformEmulator for MshvVcpu {
     }
 
     fn set_cpu_state(&self, cpu_id: usize, state: Self::CpuState) -> Result<(), PlatformError> {
-        if cpu_id != self.vp_index as usize {
+        if cpu_id != self.vcpu.vp_index as usize {
             return Err(PlatformError::SetCpuStateFailure(anyhow!(
                 "CPU id mismatch {:?} {:?}",
                 cpu_id,
-                self.vp_index
+                self.vcpu.vp_index
             )));
         }
 
         debug!("mshv emulator: Setting new CPU state");
         debug!("mshv emulator: {:#x?}", state.regs);
 
-        self.set_regs(&state.regs)
+        self.vcpu
+            .set_regs(&state.regs)
             .map_err(|e| PlatformError::SetCpuStateFailure(e.into()))?;
-        self.set_sregs(&state.sregs)
+        self.vcpu
+            .set_sregs(&state.sregs)
             .map_err(|e| PlatformError::SetCpuStateFailure(e.into()))
     }
 
@@ -954,7 +900,7 @@ impl PlatformEmulator for MshvVcpu {
     }
 
     fn fetch(&self, ip: u64, instruction_bytes: &mut [u8]) -> Result<(), PlatformError> {
-        todo!()
+        Err(PlatformError::MemoryReadFailure(anyhow!("unimplemented")))
     }
 }
 
@@ -1083,7 +1029,6 @@ impl vm::Vm for MshvVm {
             gsi_routes: self.gsi_routes.clone(),
             hv_state: self.hv_state.clone(),
             vmmops,
-            tlb: Arc::new(RwLock::new(SoftTLB::new())),
         };
         Ok(Arc::new(vcpu))
     }
