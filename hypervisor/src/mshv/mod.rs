@@ -9,6 +9,7 @@
 #![allow(unused_macros)]
 #![allow(non_upper_case_globals)]
 
+use crate::arch::emulator::PlatformError;
 use crate::cpu;
 use crate::hypervisor;
 use crate::vm::{self, VmmOps};
@@ -360,6 +361,47 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             .map_err(|e| hypervisor::HypervisorError::GetMsrList(e.into()))
     }
 }
+
+#[derive(Clone)]
+// A software emulated TLB.
+// This is mostly used by the instruction emulator to cache gva to gpa translations
+// passed from the hypervisor.
+struct SoftTLB {
+    addr_map: HashMap<u64, u64>,
+}
+
+impl SoftTLB {
+    fn new() -> SoftTLB {
+        SoftTLB {
+            addr_map: HashMap::new(),
+        }
+    }
+
+    // Adds a gva -> gpa mapping into the TLB.
+    fn add_mapping(&mut self, gva: u64, gpa: u64) -> Result<(), PlatformError> {
+        *self.addr_map.entry(gva).or_insert(gpa) = gpa;
+        Ok(())
+    }
+
+    // Do the actual gva -> gpa translation
+    fn translate(&self, gva: u64) -> Result<u64, PlatformError> {
+        self.addr_map
+            .get(&gva)
+            .ok_or_else(|| PlatformError::UnmappedGVA(anyhow!("{:#?}", gva)))
+            .map(|v| *v)
+
+        // TODO Check if we could fallback to e.g. an hypercall for doing
+        // the translation for us.
+    }
+
+    // FLush the TLB, all mappings are removed.
+    fn flush(&mut self) -> Result<(), PlatformError> {
+        self.addr_map.clear();
+
+        Ok(())
+    }
+}
+
 /// Vcpu struct for Hyper-V
 pub struct MshvVcpu {
     fd: VcpuFd,
@@ -370,6 +412,7 @@ pub struct MshvVcpu {
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
     vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
+    tlb: Arc<RwLock<SoftTLB>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -935,6 +978,7 @@ impl vm::Vm for MshvVm {
             gsi_routes: self.gsi_routes.clone(),
             hv_state: self.hv_state.clone(),
             vmmops,
+            tlb: Arc::new(RwLock::new(SoftTLB::new())),
         };
         Ok(Arc::new(vcpu))
     }
