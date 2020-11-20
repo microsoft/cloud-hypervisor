@@ -9,8 +9,11 @@
 #![allow(unused_macros)]
 #![allow(non_upper_case_globals)]
 
-use crate::arch::emulator::PlatformError;
+use crate::arch::emulator::{EmulationError, PlatformEmulator, PlatformError};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86::emulator::EmulatorCpuState;
 use crate::cpu;
+use crate::cpu::Vcpu;
 use crate::hypervisor;
 use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
@@ -403,6 +406,7 @@ impl SoftTLB {
 }
 
 /// Vcpu struct for Hyper-V
+#[derive(Clone)]
 pub struct MshvVcpu {
     fd: VcpuFd,
     vp_index: u8,
@@ -850,6 +854,107 @@ impl cpu::Vcpu for MshvVcpu {
             dbg,
             xsave,
         })
+    }
+}
+
+/// Platform emulation for Hyper-V
+impl PlatformEmulator for MshvVcpu {
+    type CpuState = EmulatorCpuState;
+
+    fn read_memory(&self, gva: u64, data: &mut [u8]) -> Result<(), PlatformError> {
+        let gpa = self.tlb.read().unwrap().translate(gva)?;
+        debug!(
+            "mshv emulator: memory read {} bytes from [{:#x} -> {:#x}]",
+            data.len(),
+            gva,
+            gpa
+        );
+
+        if let Some(vmmops) = &self.vmmops {
+            vmmops
+                .mmio_read(gpa, data)
+                .map_err(|e| PlatformError::MemoryReadFailure(e.into()))?;
+        }
+
+        Ok(())
+    }
+
+    fn write_memory(&mut self, gva: u64, data: &[u8]) -> Result<(), PlatformError> {
+        let gpa = self.tlb.read().unwrap().translate(gva)?;
+        debug!(
+            "mshv emulator: memory write {} bytes at [{:#x} -> {:#x}]",
+            data.len(),
+            gva,
+            gpa
+        );
+
+        if let Some((datamatch, efd)) = self
+            .ioeventfds
+            .read()
+            .unwrap()
+            .get(&IoEventAddress::Mmio(gpa))
+        {
+            debug!("ioevent {:x} {:x?} {}", gpa, datamatch, efd.as_raw_fd());
+
+            /* TODO: use datamatch to provide the correct semantics */
+            efd.write(1).unwrap();
+        }
+
+        if let Some(vmmops) = &self.vmmops {
+            vmmops
+                .mmio_write(gpa, data)
+                .map_err(|e| PlatformError::MemoryWriteFailure(e.into()))?;
+        }
+
+        Ok(())
+    }
+
+    fn cpu_state(&self, cpu_id: usize) -> Result<Self::CpuState, PlatformError> {
+        if cpu_id != self.vp_index as usize {
+            return Err(PlatformError::GetCpuStateFailure(anyhow!(
+                "CPU id mismatch {:?} {:?}",
+                cpu_id,
+                self.vp_index
+            )));
+        }
+
+        let regs = self
+            .get_regs()
+            .map_err(|e| PlatformError::GetCpuStateFailure(e.into()))?;
+        let sregs = self
+            .get_sregs()
+            .map_err(|e| PlatformError::GetCpuStateFailure(e.into()))?;
+
+        debug!("mshv emulator: Getting new CPU state");
+        debug!("mshv emulator: {:#x?}", regs);
+
+        Ok(EmulatorCpuState { regs, sregs })
+    }
+
+    fn set_cpu_state(&self, cpu_id: usize, state: Self::CpuState) -> Result<(), PlatformError> {
+        if cpu_id != self.vp_index as usize {
+            return Err(PlatformError::SetCpuStateFailure(anyhow!(
+                "CPU id mismatch {:?} {:?}",
+                cpu_id,
+                self.vp_index
+            )));
+        }
+
+        debug!("mshv emulator: Setting new CPU state");
+        debug!("mshv emulator: {:#x?}", state.regs);
+
+        self.set_regs(&state.regs)
+            .map_err(|e| PlatformError::SetCpuStateFailure(e.into()))?;
+        self.set_sregs(&state.sregs)
+            .map_err(|e| PlatformError::SetCpuStateFailure(e.into()))
+    }
+
+    fn gva_to_gpa(&self, gva: u64) -> Result<u64, PlatformError> {
+        self.tlb.read().unwrap().translate(gva)
+    }
+
+    fn fetch(&self, ip: u64, instruction_bytes: &mut [u8]) -> Result<(), PlatformError> {
+        todo!()
     }
 }
 
