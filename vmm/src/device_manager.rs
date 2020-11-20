@@ -616,6 +616,7 @@ impl DeviceRelocation for AddressManager {
                             0,
                             shm_regions.host_addr,
                             false,
+                            false,
                         );
 
                         self.vm.set_user_memory_region(mem_region).map_err(|e| {
@@ -631,6 +632,7 @@ impl DeviceRelocation for AddressManager {
                             new_base,
                             shm_regions.len,
                             shm_regions.host_addr,
+                            false,
                             false,
                         );
 
@@ -1643,7 +1645,7 @@ impl DeviceManager {
                 ImageType::Raw => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
-                    if block_io_uring_is_supported() {
+                    if block_io_uring_is_supported() && !disk_cfg.disable_io_uring {
                         let dev = Arc::new(Mutex::new(
                             virtio_devices::BlockIoUring::new(
                                 id.clone(),
@@ -1991,7 +1993,9 @@ impl DeviceManager {
                     .memory_manager
                     .lock()
                     .unwrap()
-                    .create_userspace_mapping(cache_base, cache_size, host_addr, false, false)
+                    .create_userspace_mapping(
+                        cache_base, cache_size, host_addr, false, false, false,
+                    )
                     .map_err(DeviceManagerError::MemoryManager)?;
 
                 let mut region_list = Vec::new();
@@ -2181,6 +2185,7 @@ impl DeviceManager {
                 region_size,
                 host_addr,
                 pmem_cfg.mergeable,
+                false,
                 false,
             )
             .map_err(DeviceManagerError::MemoryManager)?;

@@ -369,7 +369,7 @@ pub struct MshvVcpu {
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
-    vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
+    vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
 }
 /// Implementation of Vcpu trait for Microsoft Hyper-V
 /// Example:
@@ -542,13 +542,13 @@ impl cpu::Vcpu for MshvVcpu {
                         data[1] = (info.rax >> 8) as u8;
                         data[2] = (info.rax >> 16) as u8;
                         data[3] = (info.rax >> 24) as u8;
-                        if let Some(vmmops) = self.vmmops.load_full() {
+                        if let Some(vmmops) = &self.vmmops {
                             vmmops
                                 .pio_write(port.into(), &data[0..len])
                                 .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
                     } else {
-                        if let Some(vmmops) = self.vmmops.load_full() {
+                        if let Some(vmmops) = &self.vmmops {
                             vmmops
                                 .pio_read(port.into(), &mut data[0..len])
                                 .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
@@ -624,7 +624,7 @@ impl cpu::Vcpu for MshvVcpu {
                             emulator::Output::ReadMemory(size) => {
                                 assert!(size <= 4);
                                 let mut data: [u8; 4] = [0; 4];
-                                if let Some(vmmops) = self.vmmops.load_full() {
+                                if let Some(vmmops) = &self.vmmops {
                                     vmmops
                                         .mmio_read(
                                             info.guest_physical_address,
@@ -663,7 +663,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     /* TODO: use datamatch to provide the correct semantics */
                                     efd.write(1).unwrap();
                                 }
-                                if let Some(vmmops) = self.vmmops.load_full() {
+                                if let Some(vmmops) = &self.vmmops {
                                     vmmops
                                         .mmio_write(
                                             info.guest_physical_address,
@@ -917,7 +917,11 @@ impl vm::Vm for MshvVm {
     ///
     /// Creates a VcpuFd object from a vcpu RawFd.
     ///
-    fn create_vcpu(&self, id: u8) -> vm::Result<Arc<dyn cpu::Vcpu>> {
+    fn create_vcpu(
+        &self,
+        id: u8,
+        vmmops: Option<Arc<Box<dyn VmmOps>>>,
+    ) -> vm::Result<Arc<dyn cpu::Vcpu>> {
         let vc = self
             .fd
             .create_vcpu(id)
@@ -930,7 +934,7 @@ impl vm::Vm for MshvVm {
             ioeventfds: self.ioeventfds.clone(),
             gsi_routes: self.gsi_routes.clone(),
             hv_state: self.hv_state.clone(),
-            vmmops: self.vmmops.clone(),
+            vmmops,
         };
         Ok(Arc::new(vcpu))
     }
@@ -981,6 +985,7 @@ impl vm::Vm for MshvVm {
         memory_size: u64,
         userspace_addr: u64,
         readonly: bool,
+        log_dirty_pages: bool,
     ) -> MemoryRegion {
         let mut flags = HV_MAP_GPA_READABLE | HV_MAP_GPA_EXECUTABLE;
         if !readonly {
@@ -1048,13 +1053,11 @@ impl vm::Vm for MshvVm {
         self.hv_state.write().unwrap().hypercall_page = state.hypercall_page;
         Ok(())
     }
-
     ///
-    /// Set the VmmOps interface
+    /// Get dirty pages bitmap (one bit per page)
     ///
-    fn set_vmmops(&self, vmmops: Box<dyn VmmOps>) -> vm::Result<()> {
-        self.vmmops.store(Some(Arc::new(vmmops)));
-        Ok(())
+    fn get_dirty_log(&self, slot: u32, memory_size: u64) -> vm::Result<Vec<u64>> {
+        unimplemented!();
     }
 }
 

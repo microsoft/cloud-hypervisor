@@ -58,7 +58,7 @@ use std::ffi::CString;
 #[cfg(target_arch = "x86_64")]
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::io::{Seek, SeekFrom};
 use std::num::Wrapping;
 use std::ops::Deref;
@@ -67,10 +67,11 @@ use std::{result, str, thread};
 use url::Url;
 use vm_device::Bus;
 use vm_memory::{
-    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap,
-    GuestRegionMmap,
+    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
+    GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
 };
 use vm_migration::{
+    protocol::{MemoryRange, MemoryRangeTable},
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
     Transportable,
 };
@@ -499,15 +500,14 @@ impl Vm {
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
         // Create the VmOps structure, which implements the VmmOps trait.
         // And send it to the hypervisor.
-        let vm_ops = Box::new(VmOps {
+        let vm_ops: Arc<Box<dyn VmmOps>> = Arc::new(Box::new(VmOps {
             memory,
             #[cfg(target_arch = "x86_64")]
             io_bus,
             mmio_bus,
             #[cfg(target_arch = "x86_64")]
             timestamp: std::time::Instant::now(),
-        });
-        vm.set_vmmops(vm_ops).map_err(Error::SetVmmOpsInterface)?;
+        }));
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         let cpu_manager = cpu::CpuManager::new(
@@ -519,6 +519,7 @@ impl Vm {
             reset_evt,
             hypervisor,
             seccomp_action.clone(),
+            vm_ops,
         )
         .map_err(Error::CpuManager)?;
 
@@ -681,7 +682,7 @@ impl Vm {
         snapshot: &Snapshot,
         exit_evt: EventFd,
         reset_evt: EventFd,
-        source_url: &str,
+        source_url: Option<&str>,
         prefault: bool,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
@@ -716,6 +717,41 @@ impl Vm {
                 "Missing memory manager snapshot"
             ))));
         };
+
+        Vm::new_from_memory_manager(
+            config,
+            memory_manager,
+            vm,
+            exit_evt,
+            reset_evt,
+            seccomp_action,
+            hypervisor,
+            #[cfg(feature = "kvm")]
+            None,
+        )
+    }
+
+    pub fn new_from_migration(
+        config: Arc<Mutex<VmConfig>>,
+        exit_evt: EventFd,
+        reset_evt: EventFd,
+        seccomp_action: &SeccompAction,
+        hypervisor: Arc<dyn hypervisor::Hypervisor>,
+    ) -> Result<Self> {
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        hypervisor.check_required_extensions().unwrap();
+        let vm = hypervisor.create_vm().unwrap();
+        #[cfg(target_arch = "x86_64")]
+        vm.enable_split_irq().unwrap();
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
+
+        let memory_manager = MemoryManager::new(
+            vm.clone(),
+            &config.lock().unwrap().memory.clone(),
+            false,
+            phys_bits,
+        )
+        .map_err(Error::MemoryManager)?;
 
         Vm::new_from_memory_manager(
             config,
@@ -1606,6 +1642,81 @@ impl Vm {
     pub fn balloon_size(&self) -> u64 {
         self.device_manager.lock().unwrap().balloon_size()
     }
+
+    pub fn receive_memory_regions<F>(
+        &mut self,
+        ranges: &MemoryRangeTable,
+        fd: &mut F,
+    ) -> std::result::Result<(), MigratableError>
+    where
+        F: Read,
+    {
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+        let mem = guest_memory.memory();
+
+        for range in ranges.regions() {
+            mem.read_exact_from(GuestAddress(range.gpa), fd, range.length as usize)
+                .map_err(|e| {
+                    MigratableError::MigrateReceive(anyhow!(
+                        "Error transferring memory to socket: {}",
+                        e
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
+    pub fn send_memory_regions<F>(
+        &mut self,
+        ranges: &MemoryRangeTable,
+        fd: &mut F,
+    ) -> std::result::Result<(), MigratableError>
+    where
+        F: Write,
+    {
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+        let mem = guest_memory.memory();
+
+        for range in ranges.regions() {
+            mem.write_all_to(GuestAddress(range.gpa), fd, range.length as usize)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!(
+                        "Error transferring memory to socket: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
+
+    pub fn memory_range_table(&self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        let mut table = MemoryRangeTable::default();
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+
+        guest_memory.memory().with_regions_mut(|_, region| {
+            table.push(MemoryRange {
+                gpa: region.start_addr().raw_value(),
+                length: region.len() as u64,
+            });
+            Ok(())
+        })?;
+
+        Ok(table)
+    }
+
+    pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().start_memory_dirty_log()
+    }
+
+    pub fn dirty_memory_range_table(
+        &self,
+    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .dirty_memory_range_table()
+    }
 }
 
 impl Pausable for Vm {
@@ -2067,6 +2178,7 @@ pub fn test_vm() {
             region.len() as u64,
             region.as_ptr() as u64,
             false,
+            false,
         );
 
         vm.set_user_memory_region(mem_region)
@@ -2075,7 +2187,7 @@ pub fn test_vm() {
     mem.write_slice(&code, load_addr)
         .expect("Writing code to memory failed");
 
-    let vcpu = vm.create_vcpu(0).expect("new Vcpu failed");
+    let vcpu = vm.create_vcpu(0, None).expect("new Vcpu failed");
 
     let mut vcpu_sregs = vcpu.get_sregs().expect("get sregs failed");
     vcpu_sregs.cs.base = 0;

@@ -22,24 +22,32 @@ extern crate vmm_sys_util;
 #[macro_use]
 extern crate credibility;
 
-use crate::api::{ApiError, ApiRequest, ApiResponse, ApiResponsePayload, VmInfo, VmmPingResponse};
+use crate::api::{
+    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, VmInfo, VmReceiveMigrationData,
+    VmSendMigrationData, VmmPingResponse,
+};
 use crate::config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, VmConfig, VsockConfig,
 };
 use crate::migration::{get_vm_snapshot, recv_vm_snapshot};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
+use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fs::File;
 use std::io;
+use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixListener;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::{result, thread};
 use thiserror::Error;
-use vm_migration::{Pausable, Snapshottable, Transportable};
+use vm_migration::protocol::*;
+use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 pub mod api;
@@ -394,7 +402,7 @@ impl Vmm {
             &snapshot,
             exit_evt,
             reset_evt,
-            source_url,
+            Some(source_url),
             restore_cfg.prefault,
             &self.seccomp_action,
             self.hypervisor.clone(),
@@ -639,6 +647,370 @@ impl Vmm {
         }
     }
 
+    fn vm_receive_config<T>(
+        &mut self,
+        req: &Request,
+        socket: &mut T,
+    ) -> std::result::Result<Vm, MigratableError>
+    where
+        T: Read + Write,
+    {
+        // Read in config data
+        let mut data = Vec::with_capacity(req.length() as usize);
+        unsafe {
+            data.set_len(req.length() as usize);
+        }
+        socket
+            .read_exact(&mut data)
+            .map_err(MigratableError::MigrateSocket)?;
+        let config: VmConfig = serde_json::from_slice(&data).map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error deserialising config: {}", e))
+        })?;
+
+        let exit_evt = self.exit_evt.try_clone().map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error cloning exit EventFd: {}", e))
+        })?;
+        let reset_evt = self.reset_evt.try_clone().map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error cloning reset EventFd: {}", e))
+        })?;
+        let vm = Vm::new_from_migration(
+            Arc::new(Mutex::new(config)),
+            exit_evt,
+            reset_evt,
+            &self.seccomp_action,
+            self.hypervisor.clone(),
+        )
+        .map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {:?}", e))
+        })?;
+
+        Response::ok().write_to(socket)?;
+
+        Ok(vm)
+    }
+
+    fn vm_receive_state<T>(
+        &mut self,
+        req: &Request,
+        socket: &mut T,
+        mut vm: Vm,
+    ) -> std::result::Result<(), MigratableError>
+    where
+        T: Read + Write,
+    {
+        // Read in state data
+        let mut data = Vec::with_capacity(req.length() as usize);
+        unsafe {
+            data.set_len(req.length() as usize);
+        }
+        socket
+            .read_exact(&mut data)
+            .map_err(MigratableError::MigrateSocket)?;
+        let snapshot: Snapshot = serde_json::from_slice(&data).map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error deserialising snapshot: {}", e))
+        })?;
+
+        // Create VM
+        vm.restore(snapshot).map_err(|e| {
+            Response::error().write_to(socket).ok();
+            e
+        })?;
+        self.vm = Some(vm);
+
+        Response::ok().write_to(socket)?;
+
+        Ok(())
+    }
+
+    fn vm_receive_memory<T>(
+        &mut self,
+        req: &Request,
+        socket: &mut T,
+        vm: &mut Vm,
+    ) -> std::result::Result<(), MigratableError>
+    where
+        T: Read + Write,
+    {
+        // Read table
+        let table = MemoryRangeTable::read_from(socket, req.length())?;
+
+        // And then read the memory itself
+        vm.receive_memory_regions(&table, socket).map_err(|e| {
+            Response::error().write_to(socket).ok();
+            e
+        })?;
+        Response::ok().write_to(socket)?;
+        Ok(())
+    }
+
+    fn vm_receive_migration(
+        &mut self,
+        receive_data_migration: VmReceiveMigrationData,
+    ) -> result::Result<(), MigratableError> {
+        info!(
+            "Receiving migration: receiver_url = {}",
+            receive_data_migration.receiver_url
+        );
+
+        let url = url::Url::parse(&receive_data_migration.receiver_url)
+            .map_err(|e| MigratableError::MigrateReceive(anyhow!("Error parsing URL: {}", e)))?;
+
+        let mut socket = match url.scheme() {
+            "unix" => {
+                let listener = UnixListener::bind(url.to_file_path().map_err(|_| {
+                    MigratableError::MigrateReceive(anyhow!("Error extracting path from URL"))
+                })?)
+                .map_err(|e| {
+                    MigratableError::MigrateReceive(anyhow!("Error binding to UNIX socket: {}", e))
+                })?;
+                let (socket, _addr) = listener.accept().map_err(|e| {
+                    MigratableError::MigrateReceive(anyhow!(
+                        "Error accepting on UNIX socket: {}",
+                        e
+                    ))
+                })?;
+                socket
+            }
+            _ => {
+                return Err(MigratableError::MigrateReceive(anyhow!(
+                    "Unsupported URL scheme"
+                )))
+            }
+        };
+
+        let mut started = false;
+        let mut vm: Option<Vm> = None;
+
+        loop {
+            let req = Request::read_from(&mut socket)?;
+            match req.command() {
+                Command::Invalid => info!("Invalid Command Received"),
+                Command::Start => {
+                    info!("Start Command Received");
+                    started = true;
+
+                    Response::ok().write_to(&mut socket)?;
+                }
+                Command::Config => {
+                    info!("Config Command Received");
+
+                    if !started {
+                        warn!("Migration not started yet");
+                        Response::error().write_to(&mut socket)?;
+                        continue;
+                    }
+                    vm = Some(self.vm_receive_config(&req, &mut socket)?);
+                }
+                Command::State => {
+                    info!("State Command Received");
+
+                    if !started {
+                        warn!("Migration not started yet");
+                        Response::error().write_to(&mut socket)?;
+                        continue;
+                    }
+                    if let Some(vm) = vm.take() {
+                        self.vm_receive_state(&req, &mut socket, vm)?;
+                    } else {
+                        warn!("Configuration not sent yet");
+                        Response::error().write_to(&mut socket)?;
+                    }
+                }
+                Command::Memory => {
+                    info!("Memory Command Received");
+
+                    if !started {
+                        warn!("Migration not started yet");
+                        Response::error().write_to(&mut socket)?;
+                        continue;
+                    }
+                    if let Some(ref mut vm) = vm.as_mut() {
+                        self.vm_receive_memory(&req, &mut socket, vm)?;
+                    } else {
+                        warn!("Configuration not sent yet");
+                        Response::error().write_to(&mut socket)?;
+                    }
+                }
+                Command::Complete => {
+                    info!("Complete Command Received");
+                    if let Some(ref mut vm) = self.vm.as_mut() {
+                        vm.resume()?;
+                        Response::ok().write_to(&mut socket)?;
+                    } else {
+                        warn!("VM not created yet");
+                        Response::error().write_to(&mut socket)?;
+                    }
+                    break;
+                }
+                Command::Abandon => {
+                    info!("Abandon Command Received");
+                    self.vm = None;
+                    Response::ok().write_to(&mut socket).ok();
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Returns true if there were dirty pages to send
+    fn vm_maybe_send_dirty_pages<T>(
+        vm: &mut Vm,
+        socket: &mut T,
+    ) -> result::Result<bool, MigratableError>
+    where
+        T: Read + Write,
+    {
+        // Send (dirty) memory table
+        let table = vm.dirty_memory_range_table()?;
+
+        // But if there are no regions go straight to pause
+        if table.regions().is_empty() {
+            return Ok(false);
+        }
+
+        Request::memory(table.length()).write_to(socket).unwrap();
+        table.write_to(socket)?;
+        // And then the memory itself
+        vm.send_memory_regions(&table, socket)?;
+        let res = Response::read_from(socket)?;
+        if res.status() != Status::Ok {
+            warn!("Error during dirty memory migration");
+            Request::abandon().write_to(socket)?;
+            Response::read_from(socket).ok();
+            return Err(MigratableError::MigrateSend(anyhow!(
+                "Error during dirty memory migration"
+            )));
+        }
+
+        Ok(true)
+    }
+
+    fn vm_send_migration(
+        &mut self,
+        send_data_migration: VmSendMigrationData,
+    ) -> result::Result<(), MigratableError> {
+        info!(
+            "Sending migration: destination_url = {}",
+            send_data_migration.destination_url
+        );
+        if let Some(ref mut vm) = self.vm {
+            let url = url::Url::parse(&send_data_migration.destination_url)
+                .map_err(|e| MigratableError::MigrateSend(anyhow!("Error parsing URL: {}", e)))?;
+            let mut socket = match url.scheme() {
+                "unix" => UnixStream::connect(url.to_file_path().map_err(|_| {
+                    MigratableError::MigrateSend(anyhow!("Error extracting path from URL"))
+                })?)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!("Error connecting to UNIX socket: {}", e))
+                })?,
+                _ => {
+                    return Err(MigratableError::MigrateReceive(anyhow!(
+                        "Unsupported URL scheme"
+                    )))
+                }
+            };
+
+            // Start the migration
+            Request::start().write_to(&mut socket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error starting migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error starting migration"
+                )));
+            }
+
+            // Send config
+            let config_data = serde_json::to_vec(&vm.get_config()).unwrap();
+            Request::config(config_data.len() as u64).write_to(&mut socket)?;
+            socket
+                .write_all(&config_data)
+                .map_err(MigratableError::MigrateSocket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error during config migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error during config migration"
+                )));
+            }
+
+            // Start logging dirty pages
+            vm.start_memory_dirty_log()?;
+
+            // Send memory table
+            let table = vm.memory_range_table()?;
+            Request::memory(table.length())
+                .write_to(&mut socket)
+                .unwrap();
+            table.write_to(&mut socket)?;
+            // And then the memory itself
+            vm.send_memory_regions(&table, &mut socket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error during memory migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error during memory migration"
+                )));
+            }
+
+            // Try at most 5 passes of dirty memory sending
+            const MAX_DIRTY_MIGRATIONS: usize = 5;
+            for i in 0..MAX_DIRTY_MIGRATIONS {
+                info!("Dirty memory migration {} of {}", i, MAX_DIRTY_MIGRATIONS);
+                if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
+                    break;
+                }
+            }
+
+            // Now pause VM
+            vm.pause()?;
+
+            // Send last batch of dirty pages
+            Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
+
+            // Capture snapshot and send it
+            let vm_snapshot = vm.snapshot()?;
+            let snapshot_data = serde_json::to_vec(&vm_snapshot).unwrap();
+            Request::state(snapshot_data.len() as u64).write_to(&mut socket)?;
+            socket
+                .write_all(&snapshot_data)
+                .map_err(MigratableError::MigrateSocket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error during state migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error during state migration"
+                )));
+            }
+
+            // Complete the migration
+            Request::complete().write_to(&mut socket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error completing migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error completing migration"
+                )));
+            }
+            info!("Migration complete");
+            Ok(())
+        } else {
+            Err(MigratableError::MigrateSend(anyhow!("VM is not running")))
+        }
+    }
+
     fn control_loop(&mut self, api_receiver: Arc<Receiver<ApiRequest>>) -> Result<()> {
         const EPOLL_EVENTS_LEN: usize = 100;
 
@@ -876,6 +1248,22 @@ impl Vmm {
                                         .map_err(ApiError::VmInfo)
                                         .map(ApiResponsePayload::VmAction);
 
+                                    sender.send(response).map_err(Error::ApiResponseSend)?;
+                                }
+                                ApiRequest::VmReceiveMigration(receive_migration_data, sender) => {
+                                    let response = self
+                                        .vm_receive_migration(
+                                            receive_migration_data.as_ref().clone(),
+                                        )
+                                        .map_err(ApiError::VmReceiveMigration)
+                                        .map(|_| ApiResponsePayload::Empty);
+                                    sender.send(response).map_err(Error::ApiResponseSend)?;
+                                }
+                                ApiRequest::VmSendMigration(send_migration_data, sender) => {
+                                    let response = self
+                                        .vm_send_migration(send_migration_data.as_ref().clone())
+                                        .map_err(ApiError::VmSendMigration)
+                                        .map(|_| ApiResponsePayload::Empty);
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }
                             }
