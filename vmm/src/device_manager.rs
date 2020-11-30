@@ -660,17 +660,6 @@ impl DeviceRelocation for AddressManager {
     }
 }
 
-struct ActivatedBackend {
-    _socket_file: tempfile::NamedTempFile,
-    child: std::process::Child,
-}
-
-impl Drop for ActivatedBackend {
-    fn drop(&mut self) {
-        self.child.wait().ok();
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct DeviceManagerState {
     device_tree: DeviceTree,
