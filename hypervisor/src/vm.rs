@@ -158,6 +158,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to write to IO Bus: {0}")]
     IoBusWrite(#[source] anyhow::Error),
+    ///
+    /// Get dirty log error
+    ///
+    #[error("Failed to get dirty log: {0}")]
+    GetDirtyLog(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -180,7 +185,7 @@ pub trait Vm: Send + Sync {
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding
-    fn create_vcpu(&self, id: u8) -> Result<Arc<dyn Vcpu>>;
+    fn create_vcpu(&self, id: u8, vmmops: Option<Arc<Box<dyn VmmOps>>>) -> Result<Arc<dyn Vcpu>>;
     /// Registers an event to be signaled whenever a certain address is written to.
     fn register_ioevent(
         &self,
@@ -200,6 +205,7 @@ pub trait Vm: Send + Sync {
         memory_size: u64,
         userspace_addr: u64,
         readonly: bool,
+        log_dirty_pages: bool,
     ) -> MemoryRegion;
     /// Creates/modifies a guest physical memory slot.
     fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> Result<()>;
@@ -239,8 +245,8 @@ pub trait Vm: Send + Sync {
     fn state(&self) -> Result<VmState>;
     /// Set the VM state
     fn set_state(&self, state: VmState) -> Result<()>;
-    /// Set VmmOps interface
-    fn set_vmmops(&self, vmmops: Box<dyn VmmOps>) -> Result<()>;
+    /// Get dirty pages bitmap
+    fn get_dirty_log(&self, slot: u32, memory_size: u64) -> Result<Vec<u64>>;
 }
 
 pub trait VmmOps: Send + Sync {

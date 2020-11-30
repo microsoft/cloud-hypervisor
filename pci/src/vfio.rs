@@ -561,6 +561,7 @@ impl VfioPciDevice {
                     mmap_size as u64,
                     host_addr as u64,
                     false,
+                    false,
                 );
 
                 vm.set_user_memory_region(mem_region)
@@ -589,6 +590,7 @@ impl VfioPciDevice {
                     region.start.raw_value() + mmap_offset,
                     0,
                     host_addr as u64,
+                    false,
                     false,
                 );
 
@@ -748,7 +750,7 @@ impl PciDevice for VfioPciDevice {
                     // The address needs to be 4 bytes aligned.
                     bar_addr = allocator
                         .allocate_io_addresses(None, region_size, Some(0x4))
-                        .ok_or_else(|| PciDeviceError::IoAllocationFailed(region_size))?;
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
                 }
                 #[cfg(target_arch = "aarch64")]
                 unimplemented!()
@@ -795,11 +797,11 @@ impl PciDevice for VfioPciDevice {
                 if is_64bit_bar {
                     bar_addr = allocator
                         .allocate_mmio_addresses(None, region_size, Some(bar_alignment))
-                        .ok_or_else(|| PciDeviceError::IoAllocationFailed(region_size))?;
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
                 } else {
                     bar_addr = allocator
                         .allocate_mmio_hole_addresses(None, region_size, Some(bar_alignment))
-                        .ok_or_else(|| PciDeviceError::IoAllocationFailed(region_size))?;
+                        .ok_or(PciDeviceError::IoAllocationFailed(region_size))?;
                 }
             }
 
@@ -1012,6 +1014,7 @@ impl PciDevice for VfioPciDevice {
                             0,
                             host_addr as u64,
                             false,
+                            false,
                         );
 
                         self.vm
@@ -1024,6 +1027,7 @@ impl PciDevice for VfioPciDevice {
                             new_base + mmap_offset,
                             mmap_size as u64,
                             host_addr as u64,
+                            false,
                             false,
                         );
 

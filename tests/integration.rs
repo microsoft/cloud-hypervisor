@@ -386,7 +386,7 @@ mod tests {
         let vubd_socket_path = String::from(tmp_dir.path().join("vub.sock").to_str().unwrap());
 
         // Start the daemon
-        let child = Command::new(clh_command("cloud-hypervisor"))
+        let child = Command::new(clh_command("vhost_user_block"))
             .args(&[
                 "--block-backend",
                 format!(
@@ -461,7 +461,7 @@ mod tests {
             )
         };
 
-        let child = Command::new(clh_command("cloud-hypervisor"))
+        let child = Command::new(clh_command("vhost_user_net"))
             .args(&["--net-backend", net_params.as_str()])
             .spawn()
             .unwrap();
@@ -1798,7 +1798,7 @@ mod tests {
                 let desired_ram = 1024 << 20;
                 resize_command(&api_socket, None, Some(desired_ram), None);
 
-                thread::sleep(std::time::Duration::new(10, 0));
+                thread::sleep(std::time::Duration::new(30, 0));
                 assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
 
                 // After the resize, check again that file1 exists and its
@@ -2411,6 +2411,8 @@ mod tests {
             cmd.args(&["--cpus", "boot=48"])
                 .args(&["--memory", "size=5120M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2853,8 +2855,7 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[test]
-        fn test_virtio_blk() {
+        fn _test_virtio_block(disable_io_uring: bool) {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
 
@@ -2884,8 +2885,9 @@ mod tests {
                     )
                     .as_str(),
                     format!(
-                        "path={},readonly=on,direct=on,num_queues=4",
-                        blk_file_path.to_str().unwrap()
+                        "path={},readonly=on,direct=on,num_queues=4,_disable_io_uring={}",
+                        blk_file_path.to_str().unwrap(),
+                        disable_io_uring
                     )
                     .as_str(),
                 ])
@@ -2935,6 +2937,16 @@ mod tests {
             let output = cloud_child.wait_with_output().unwrap();
 
             handle_child_output(r, &output);
+        }
+
+        #[test]
+        fn test_virtio_block() {
+            _test_virtio_block(false)
+        }
+
+        #[test]
+        fn test_virtio_block_disable_io_uring() {
+            _test_virtio_block(false)
         }
 
         #[test]
@@ -5455,7 +5467,7 @@ mod tests {
                 guest.ssh_command("screen -dmS reboot sh -c \"sleep 5; echo s | tee /proc/sysrq-trigger; echo c | sudo tee /proc/sysrq-trigger\"").unwrap();
 
                 // Allow some time for the watchdog to trigger (max 30s) and reboot to happen
-                thread::sleep(std::time::Duration::new(50, 0));
+                guest.wait_vm_boot(Some(50)).unwrap();
 
                 // Check that watchdog triggered reboot
                 let boot_count = guest
@@ -5523,7 +5535,7 @@ mod tests {
             osdisk_path.push("windows-server-2019.raw");
 
             let mut child = Command::new(clh_command("cloud-hypervisor"))
-                .args(&["--cpus", "boot=2,kvm_hyperv=on,max_phys_bits=39"])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
                 .args(&["--memory", "size=4G"])
                 .args(&["--kernel", ovmf_path.to_str().unwrap()])
                 .args(&["--disk", &format!("path={}", osdisk_path.to_str().unwrap())])
@@ -5578,7 +5590,7 @@ mod tests {
 
             let mut child = Command::new(clh_command("cloud-hypervisor"))
                 .args(&["--api-socket", &api_socket])
-                .args(&["--cpus", "boot=2,kvm_hyperv=on,max_phys_bits=39"])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
                 .args(&["--memory", "size=4G"])
                 .args(&["--kernel", ovmf_path.to_str().unwrap()])
                 .args(&["--disk", &format!("path={}", osdisk_path.to_str().unwrap())])
