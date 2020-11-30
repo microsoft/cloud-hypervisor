@@ -636,14 +636,12 @@ impl cpu::Vcpu for MshvVcpu {
 
                     let mut context = MshvEmulatorContext {
                         vcpu: self,
-                        tlb: Arc::new(RwLock::new(SoftTLB::new())),
+                        tlb: SoftTLB::new(),
                     };
 
                     // Add the GVA <-> GPA mapping.
                     context
                         .tlb
-                        .write()
-                        .unwrap()
                         .add_mapping(info.guest_virtual_address, info.guest_physical_address)
                         .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
 
@@ -795,7 +793,7 @@ impl cpu::Vcpu for MshvVcpu {
 
 struct MshvEmulatorContext<'a> {
     vcpu: &'a MshvVcpu,
-    tlb: Arc<RwLock<SoftTLB>>,
+    tlb: SoftTLB,
 }
 
 /// Platform emulation for Hyper-V
@@ -803,7 +801,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     type CpuState = EmulatorCpuState;
 
     fn read_memory(&self, gva: u64, data: &mut [u8]) -> Result<(), PlatformError> {
-        let gpa = self.tlb.read().unwrap().translate(gva)?;
+        let gpa = self.tlb.translate(gva)?;
         debug!(
             "mshv emulator: memory read {} bytes from [{:#x} -> {:#x}]",
             data.len(),
@@ -821,7 +819,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     }
 
     fn write_memory(&mut self, gva: u64, data: &[u8]) -> Result<(), PlatformError> {
-        let gpa = self.tlb.read().unwrap().translate(gva)?;
+        let gpa = self.tlb.translate(gva)?;
         debug!(
             "mshv emulator: memory write {} bytes at [{:#x} -> {:#x}]",
             data.len(),
@@ -896,7 +894,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     }
 
     fn gva_to_gpa(&self, gva: u64) -> Result<u64, PlatformError> {
-        self.tlb.read().unwrap().translate(gva)
+        self.tlb.translate(gva)
     }
 
     fn fetch(&self, ip: u64, instruction_bytes: &mut [u8]) -> Result<(), PlatformError> {
