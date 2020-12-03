@@ -19,7 +19,6 @@ use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, VcpuFd, VmFd};
 
-use arc_swap::ArcSwapOption;
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
@@ -342,7 +341,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             ioeventfds,
             gsi_routes,
             hv_state: hv_state_init(),
-            vmmops: ArcSwapOption::from(None),
+            vmmops: None,
         }))
     }
     ///
@@ -914,7 +913,7 @@ pub struct MshvVm {
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
-    vmmops: ArcSwapOption<Box<dyn vm::VmmOps>>,
+    vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
 }
 
 fn hv_state_init() -> Arc<RwLock<HvState>> {

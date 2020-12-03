@@ -11,7 +11,6 @@ mshv = []
 
 [dependencies]
 anyhow = "1.0"
-arc-swap = ">=1.0.0"
 thiserror = "1.0"
 libc = "0.2.80"
 log = "0.4.11"
@@ -36,7 +35,7 @@ features = ["elf", "bzimage"]
 [dependencies.iced-x86]
 version = "1.9.1"
 default-features = false
-features = ["std", "decoder", "op_code_info", "instr_info"]
+features = ["std", "decoder", "op_code_info", "instr_info", "fast_fmt"]
 
 [dev-dependencies]
 env_logger = "0.8.2"

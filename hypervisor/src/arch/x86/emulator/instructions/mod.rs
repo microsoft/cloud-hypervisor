@@ -10,7 +10,40 @@ use crate::arch::emulator::{EmulationError, PlatformEmulator, PlatformError};
 use crate::arch::x86::emulator::CpuStateManager;
 use crate::arch::x86::Exception;
 use iced_x86::*;
-use std::collections::HashMap;
+
+macro_rules! imm_op {
+    (u8, $insn:ident) => {
+        $insn.immediate8()
+    };
+
+    (u16, $insn:ident) => {
+        $insn.immediate16()
+    };
+
+    (u32, $insn:ident) => {
+        $insn.immediate32()
+    };
+
+    (u64, $insn:ident) => {
+        $insn.immediate64()
+    };
+
+    (u32tou64, $insn:ident) => {
+        $insn.immediate32to64()
+    };
+
+    (u8tou16, $insn:ident) => {
+        $insn.immediate8to16()
+    };
+
+    (u8tou32, $insn:ident) => {
+        $insn.immediate8to32()
+    };
+
+    (u8tou64, $insn:ident) => {
+        $insn.immediate8to64()
+    };
+}
 
 pub mod mov;
 
@@ -49,34 +82,15 @@ pub trait InstructionHandler<T: CpuStateManager> {
     ) -> Result<(), EmulationError<Exception>>;
 }
 
-pub struct InstructionMap<T: CpuStateManager> {
-    pub instructions: HashMap<Code, Box<dyn InstructionHandler<T> + Sync + Send>>,
-}
+macro_rules! insn_format {
+    ($insn:ident) => {{
+        let mut output = String::new();
+        let mut formatter = FastFormatter::new();
+        formatter
+            .options_mut()
+            .set_space_after_operand_separator(true);
+        formatter.format(&$insn, &mut output);
 
-impl<T: CpuStateManager> InstructionMap<T> {
-    pub fn new() -> InstructionMap<T> {
-        InstructionMap {
-            instructions: HashMap::new(),
-        }
-    }
-
-    pub fn add_insn(
-        &mut self,
-        insn: Code,
-        insn_handler: Box<dyn InstructionHandler<T> + Sync + Send>,
-    ) {
-        self.instructions.insert(insn, insn_handler);
-    }
-}
-
-impl<T: CpuStateManager> Default for InstructionMap<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-macro_rules! insn_add {
-    ($insn_map:ident, $mnemonic:ident, $code:ident) => {
-        $insn_map.add_insn(Code::$code, Box::new($mnemonic::$code {}));
-    };
+        output
+    }};
 }

@@ -12,6 +12,7 @@ use crate::arch::x86::regs::*;
 use crate::arch::x86::*;
 use crate::arch::x86::{Exception, SegmentRegisterOps};
 use crate::x86_64::{SegmentRegister, SpecialRegisters, StandardRegisters};
+use anyhow::Context;
 use iced_x86::*;
 
 #[macro_use]
@@ -474,32 +475,47 @@ impl CpuStateManager for EmulatorCpuState {
 
 pub struct Emulator<'a, T: CpuStateManager> {
     platform: &'a mut dyn PlatformEmulator<CpuState = T>,
-    insn_map: InstructionMap<T>,
+}
+
+// Reduce repetition, see its invocation in get_handler().
+macro_rules! gen_handler_match {
+    ($value: ident, $( ($module:ident, $code:ident) ),* ) => {
+        match $value {
+            $(
+                Code::$code => Some(Box::new($module::$code {})),
+            )*
+            _ => None,
+        }
+    };
 }
 
 impl<'a, T: CpuStateManager> Emulator<'a, T> {
     pub fn new(platform: &mut dyn PlatformEmulator<CpuState = T>) -> Emulator<T> {
-        let mut insn_map = InstructionMap::<T>::new();
+        Emulator { platform }
+    }
 
-        // MOV
-        insn_add!(insn_map, mov, Mov_r8_imm8);
-        insn_add!(insn_map, mov, Mov_r8_rm8);
-        insn_add!(insn_map, mov, Mov_r16_imm16);
-        insn_add!(insn_map, mov, Mov_r16_rm16);
-        insn_add!(insn_map, mov, Mov_r32_imm32);
-        insn_add!(insn_map, mov, Mov_r32_rm32);
-        insn_add!(insn_map, mov, Mov_r64_imm64);
-        insn_add!(insn_map, mov, Mov_r64_rm64);
-        insn_add!(insn_map, mov, Mov_rm8_imm8);
-        insn_add!(insn_map, mov, Mov_rm8_r8);
-        insn_add!(insn_map, mov, Mov_rm16_imm16);
-        insn_add!(insn_map, mov, Mov_rm16_r16);
-        insn_add!(insn_map, mov, Mov_rm32_imm32);
-        insn_add!(insn_map, mov, Mov_rm32_r32);
-        insn_add!(insn_map, mov, Mov_rm64_imm32);
-        insn_add!(insn_map, mov, Mov_rm64_r64);
+    fn get_handler(code: Code) -> Option<Box<dyn InstructionHandler<T>>> {
+        let handler: Option<Box<dyn InstructionHandler<T>>> = gen_handler_match!(
+            code,
+            (mov, Mov_r8_rm8),
+            (mov, Mov_r8_imm8),
+            (mov, Mov_r16_imm16),
+            (mov, Mov_r16_rm16),
+            (mov, Mov_r32_imm32),
+            (mov, Mov_r32_rm32),
+            (mov, Mov_r64_imm64),
+            (mov, Mov_r64_rm64),
+            (mov, Mov_rm8_imm8),
+            (mov, Mov_rm8_r8),
+            (mov, Mov_rm16_imm16),
+            (mov, Mov_rm16_r16),
+            (mov, Mov_rm32_imm32),
+            (mov, Mov_rm32_r32),
+            (mov, Mov_rm64_imm32),
+            (mov, Mov_rm64_r64)
+        );
 
-        Emulator { platform, insn_map }
+        handler
     }
 
     fn emulate_insn_stream(
@@ -551,7 +567,8 @@ impl<'a, T: CpuStateManager> Emulator<'a, T> {
                 decoder.decode_out(&mut insn);
                 if decoder.last_error() != DecoderError::None {
                     return Err(EmulationError::InstructionFetchingError(anyhow!(
-                        "{:#x?}", insn
+                        "{:#x?}",
+                        insn_format!(insn)
                     )));
                 }
 
@@ -559,13 +576,17 @@ impl<'a, T: CpuStateManager> Emulator<'a, T> {
             }
 
             // Emulate the decoded instruction
-            self.insn_map
-                .instructions
-                .get(&insn.code())
+            Emulator::get_handler(insn.code())
                 .ok_or_else(|| {
-                    EmulationError::UnsupportedInstruction(anyhow!("{:?}", insn.mnemonic()))
+                    EmulationError::UnsupportedInstruction(anyhow!(
+                        "{:#x?} {:?} {:?}",
+                        insn_format!(insn),
+                        insn.mnemonic(),
+                        insn.code()
+                    ))
                 })?
-                .emulate(&insn, &mut state, self.platform)?;
+                .emulate(&insn, &mut state, self.platform)
+                .context(anyhow!("Failed to emulate {:#x?}", insn_format!(insn)))?;
 
             last_decoded_ip = decoder.ip();
             num_insn_emulated += 1;
