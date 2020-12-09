@@ -17,24 +17,20 @@ use crate::cpu::Vcpu;
 use crate::hypervisor;
 use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, Mshv, VcpuFd, VmFd};
-
+use mshv_ioctls::{set_registers_64, InterruptRequest, Mshv, VcpuFd, VmFd};
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
+use crate::device;
 use std::convert::TryInto;
-
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::VcpuMshvState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
-
-use crate::device;
-
 // Wei: for emulating irqfd and ioeventfd
 use std::collections::HashMap;
 use std::fs::File;
@@ -51,11 +47,12 @@ pub struct HvState {
 }
 
 pub use HvState as VmState;
+
 struct IrqfdCtrlEpollHandler {
-    vm: Arc<dyn vm::Vm>, /* For issuing hypercall */
-    irqfd: EventFd,      /* Registered by caller */
-    kill: EventFd,       /* Created by us, signal thread exit */
-    epoll_fd: RawFd,     /* epoll fd */
+    vm_fd: Arc<VmFd>, /* For issuing hypercall */
+    irqfd: EventFd,   /* Registered by caller */
+    kill: EventFd,    /* Created by us, signal thread exit */
+    epoll_fd: RawFd,  /* epoll fd */
     gsi: u32,
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
 }
@@ -78,6 +75,47 @@ const KILL_EVENT: u16 = 1;
 const IRQFD_EVENT: u16 = 2;
 
 impl IrqfdCtrlEpollHandler {
+    fn assert_virtual_interrupt(&self, e: &MshvIrqRoutingEntry) -> vm::Result<()> {
+        // GSI routing contains MSI information.
+        // We still need to translate that to APIC ID etc
+
+        debug!("Inject {:x?}", e);
+
+        let MshvIrqRouting::Msi(msi) = e.route;
+
+        /* Make an assumption here ... */
+        if msi.address_hi != 0 {
+            panic!("MSI high address part is not zero");
+        }
+
+        let typ = self
+            .get_interrupt_type(self.get_delivery_mode(msi.data))
+            .unwrap();
+        let apic_id = self.get_destination(msi.address_lo);
+        let vector = self.get_vector(msi.data);
+        let level_triggered = self.get_trigger_mode(msi.data);
+        let logical_destination_mode = self.get_destination_mode(msi.address_lo);
+
+        debug!(
+            "{:x} {:x} {:x} {} {}",
+            typ, apic_id, vector, level_triggered, logical_destination_mode
+        );
+
+        let request: InterruptRequest = InterruptRequest {
+            interrupt_type: typ,
+            apic_id,
+            vector: vector.into(),
+            level_triggered,
+            logical_destination_mode,
+            long_mode: false,
+        };
+
+        self.vm_fd
+            .request_virtual_interrupt(&request)
+            .map_err(|e| vm::HypervisorVmError::AsserttVirtualInterrupt(e.into()))?;
+
+        Ok(())
+    }
     fn run_ctrl(&mut self) {
         self.epoll_fd = epoll::create(true).unwrap();
         let epoll_file = unsafe { File::from_raw_fd(self.epoll_fd) };
@@ -134,7 +172,7 @@ impl IrqfdCtrlEpollHandler {
                         let gsi_routes = self.gsi_routes.read().unwrap();
 
                         if let Some(e) = gsi_routes.get(&self.gsi) {
-                            assert_virtual_interrupt(&self.vm, &e);
+                            self.assert_virtual_interrupt(&e).unwrap();
                         } else {
                             debug!("No routing info found for GSI {}", self.gsi);
                         }
@@ -146,129 +184,57 @@ impl IrqfdCtrlEpollHandler {
             }
         }
     }
-}
 
-// Translate from architectural defined delivery mode to Hyper-V type
-// See Intel SDM vol3 10.11.2
-fn get_interrupt_type(delivery_mode: u8) -> Option<hv_interrupt_type> {
-    match delivery_mode {
-        0 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_FIXED),
-        1 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_LOWESTPRIORITY),
-        2 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_SMI),
-        4 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_NMI),
-        5 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_INIT),
-        7 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT),
-        _ => None,
-    }
-}
+    ///
+    /// See Intel SDM vol3 10.11.1
+    /// We assume APIC ID and Hyper-V Vcpu ID are the same value
+    ///
 
-// See Intel SDM vol3 10.11.1
-// We assume APIC ID and Hyper-V Vcpu ID are the same value
-// This holds true for HvLite
-fn get_destination(message_address: u32) -> u64 {
-    ((message_address >> 12) & 0xff).into()
-}
-
-fn get_destination_mode(message_address: u32) -> bool {
-    if (message_address >> 2) & 0x1 == 0x1 {
-        return true;
+    fn get_destination(&self, message_address: u32) -> u64 {
+        ((message_address >> 12) & 0xff).into()
     }
 
-    false
-}
+    fn get_destination_mode(&self, message_address: u32) -> bool {
+        if (message_address >> 2) & 0x1 == 0x1 {
+            return true;
+        }
 
-fn get_redirection_hint(message_address: u32) -> bool {
-    if (message_address >> 3) & 0x1 == 0x1 {
-        return true;
+        false
     }
 
-    false
-}
-
-fn get_vector(message_data: u32) -> u8 {
-    (message_data & 0xff) as u8
-}
-
-// True means level triggered
-fn get_trigger_mode(message_data: u32) -> bool {
-    if (message_data >> 15) & 0x1 == 0x1 {
-        return true;
+    fn get_vector(&self, message_data: u32) -> u8 {
+        (message_data & 0xff) as u8
     }
 
-    false
-}
+    ///
+    ///  True means level triggered
+    ///
+    fn get_trigger_mode(&self, message_data: u32) -> bool {
+        if (message_data >> 15) & 0x1 == 0x1 {
+            return true;
+        }
 
-fn get_delivery_mode(message_data: u32) -> u8 {
-    ((message_data & 0x700) >> 8) as u8
-}
-
-// Only meaningful with level triggered interrupts
-// True => High active
-// False => Low active
-fn get_level(message_data: u32) -> bool {
-    if (message_data >> 14) & 0x1 == 0x1 {
-        return true;
+        false
     }
 
-    false
-}
-
-fn assert_virtual_interrupt(vm: &Arc<dyn vm::Vm>, e: &MshvIrqRoutingEntry) {
-    // GSI routing contains MSI information.
-    // We still need to translate that to APIC ID etc
-
-    debug!("Inject {:x?}", e);
-
-    let MshvIrqRouting::Msi(msi) = e.route;
-
-    /* Make an assumption here ... */
-    if msi.address_hi != 0 {
-        panic!("MSI high address part is not zero");
+    fn get_delivery_mode(&self, message_data: u32) -> u8 {
+        ((message_data & 0x700) >> 8) as u8
     }
-
-    let typ = get_interrupt_type(get_delivery_mode(msi.data)).unwrap();
-    let apic_id = get_destination(msi.address_lo);
-    let vector = get_vector(msi.data);
-    let level_triggered = get_trigger_mode(msi.data);
-    let logical_destination_mode = get_destination_mode(msi.address_lo);
-
-    debug!(
-        "{:x} {:x} {:x} {} {}",
-        typ, apic_id, vector, level_triggered, logical_destination_mode
-    );
-
-    vm.request_virtual_interrupt(
-        typ as u8,
-        apic_id,
-        vector.into(),
-        level_triggered,
-        logical_destination_mode,
-        false,
-    )
-    .unwrap_or_else(|err| {
-        info!("Failed to request virtual interrupt: {:?}", err);
-    });
-}
-
-pub fn raise_general_page_fault(
-    fd_ref: &VcpuFd,
-) -> std::result::Result<(), cpu::HypervisorCpuError> {
-    // inject a general protection fault by setting event pending register
-    let mut reg = hv_x64_pending_exception_event { as_uint64: [0; 2] };
-    unsafe {
-        reg.__bindgen_anon_1.set_event_pending(1);
-        // reg.__bindgen_anon_1.set_event_type(0);
-        reg.__bindgen_anon_1.set_deliver_error_code(1);
-        reg.__bindgen_anon_1.set_vector(0xd); // gpf
+    ///
+    ///  Translate from architectural defined delivery mode to Hyper-V type
+    /// See Intel SDM vol3 10.11.2
+    ///
+    fn get_interrupt_type(&self, delivery_mode: u8) -> Option<hv_interrupt_type> {
+        match delivery_mode {
+            0 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_FIXED),
+            1 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_LOWESTPRIORITY),
+            2 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_SMI),
+            4 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_NMI),
+            5 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_INIT),
+            7 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT),
+            _ => None,
+        }
     }
-    fd_ref
-        .set_reg(
-            &[hv_register_name::HV_REGISTER_PENDING_EVENT0],
-            &[hv_register_value {
-                pending_exception_event: reg,
-            }],
-        )
-        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))
 }
 
 /// Wrapper over mshv system ioctls.
@@ -401,7 +367,8 @@ impl SoftTLB {
     }
 }
 
-/// Vcpu struct for Hyper-V
+#[allow(clippy::type_complexity)]
+/// Vcpu struct for Microsoft Hypervisor
 pub struct MshvVcpu {
     fd: VcpuFd,
     vp_index: u8,
@@ -412,7 +379,8 @@ pub struct MshvVcpu {
     hv_state: Arc<RwLock<HvState>>, // Mshv State
     vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
 }
-/// Implementation of Vcpu trait for Microsoft Hyper-V
+
+/// Implementation of Vcpu trait for Microsoft Hypervisor
 /// Example:
 /// #[cfg(feature = "mshv")]
 /// extern crate hypervisor
@@ -555,11 +523,11 @@ impl cpu::Vcpu for MshvVcpu {
                     Ok(cpu::VmExit::Reset)
                 }
                 hv_message_type_HVMSG_UNRECOVERABLE_EXCEPTION => {
-                    debug!("TRIPLE FAULT");
+                    warn!("TRIPLE FAULT");
                     Ok(cpu::VmExit::Shutdown)
                 }
                 hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT => {
-                    let info = x.to_ioport_info();
+                    let info = x.to_ioport_info().unwrap();
                     let access_info = info.access_info;
                     if unsafe { access_info.__bindgen_anon_1.string_op() } == 1 {
                         panic!("String IN/OUT not supported");
@@ -572,17 +540,9 @@ impl cpu::Vcpu for MshvVcpu {
                     let port = info.port_number;
                     let mut data: [u8; 4] = [0; 4];
                     let mut ret_rax = info.rax;
-                    // debug!(
-                    //     "port {:x?} insn byte count {:?} len {:?} write {:?}",
-                    //     port, info.instruction_byte_count, len, is_write
-                    // );
 
                     if is_write {
-                        // debug!("data {:x?}", info.rax);
-                        data[0] = info.rax as u8;
-                        data[1] = (info.rax >> 8) as u8;
-                        data[2] = (info.rax >> 16) as u8;
-                        data[3] = (info.rax >> 24) as u8;
+                        let data = (info.rax as u32).to_le_bytes();
                         if let Some(vmmops) = &self.vmmops {
                             vmmops
                                 .pio_write(port.into(), &data[0..len])
@@ -594,11 +554,8 @@ impl cpu::Vcpu for MshvVcpu {
                                 .pio_read(port.into(), &mut data[0..len])
                                 .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
-                        // debug!("data {:x?}", &data[0..len]);
-                        let v = data[0] as u32
-                            | (data[1] as u32) << 8
-                            | (data[2] as u32) << 16
-                            | (data[3] as u32) << 24;
+
+                        let v = u32::from_le_bytes(data);
                         /* Preserve high bits in EAX but clear out high bits in RAX */
                         let mask = 0xffffffff >> (32 - len * 8);
                         let eax = (info.rax as u32 & !mask) | (v & mask);
@@ -607,7 +564,6 @@ impl cpu::Vcpu for MshvVcpu {
 
                     let insn_len = info.header.instruction_length() as u64;
 
-                    // debug!("RIP {:x?} len {}", info.header.rip, insn_len);
                     /* Advance RIP and update RAX */
                     let arr_reg_name_value = [
                         (
@@ -617,21 +573,13 @@ impl cpu::Vcpu for MshvVcpu {
                         (hv_register_name::HV_X64_REGISTER_RAX, ret_rax),
                     ];
                     set_registers_64!(self.fd, arr_reg_name_value)
-                        .map_err(|e| cpu::HypervisorCpuError::SetReg(e.into()))?;
+                        .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
-                    let info = x.to_memory_info();
+                    let info = x.to_memory_info().unwrap();
                     let insn_len = info.instruction_byte_count as usize;
                     assert!(insn_len > 0 && insn_len <= 16);
-                    // debug!(
-                    //     "RIP {:x?} gva {:x?} gpa {:x?} insn bytes {:x?} cnt {}",
-                    //     info.header.rip,
-                    //     info.guest_virtual_address,
-                    //     info.guest_physical_address,
-                    //     info.instruction_bytes,
-                    //     insn_len,
-                    // );
 
                     let mut context = MshvEmulatorContext {
                         vcpu: self,
@@ -660,12 +608,12 @@ impl cpu::Vcpu for MshvVcpu {
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
-                    let info = x.to_cpuid_info();
+                    let info = x.to_cpuid_info().unwrap();
                     debug!("cpuid eax: {:x}", info.rax);
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
-                    let info = x.to_msr_info();
+                    let info = x.to_msr_info().unwrap();
                     if info.header.intercept_access_type == 0 as u8 {
                         debug!("msr read: {:x}", info.msr_number);
                     } else {
@@ -675,26 +623,22 @@ impl cpu::Vcpu for MshvVcpu {
                 }
                 hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT => {
                     //TODO: Handler for VMCALL here.
-                    let info = x.to_exception_info();
+                    let info = x.to_exception_info().unwrap();
                     debug!("Exception Info {:?}", info.exception_vector);
                     Ok(cpu::VmExit::Ignore)
                 }
-                exit => {
-                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                        "Unhandled VCPU exit {:?}",
-                        exit
-                    )))
-                }
+                exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                    "Unhandled VCPU exit {:?}",
+                    exit
+                ))),
             },
 
             Err(e) => match e.errno() {
                 libc::EAGAIN | libc::EINTR => Ok(cpu::VmExit::Ignore),
-                _ => {
-                    return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                        "VCPU error {:?}",
-                        e
-                    )))
-                }
+                _ => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                    "VCPU error {:?}",
+                    e
+                ))),
             },
         }
     }
@@ -748,6 +692,9 @@ impl cpu::Vcpu for MshvVcpu {
             .set_xsave(*xsave)
             .map_err(|e| cpu::HypervisorCpuError::SetXsaveState(e.into()))
     }
+    ///
+    /// Set CPU state
+    ///
     fn set_state(&self, state: &CpuState) -> cpu::Result<()> {
         self.set_msrs(&state.msrs)?;
         self.set_vcpu_events(&state.vcpu_events)?;
@@ -762,6 +709,9 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()))?;
         Ok(())
     }
+    ///
+    /// Get CPU State
+    ///
     fn state(&self) -> cpu::Result<CpuState> {
         let regs = self.get_regs()?;
         let sregs = self.get_sregs()?;
@@ -901,6 +851,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 /// Wrapper over Mshv VM ioctls.
 pub struct MshvVm {
     fd: Arc<VmFd>,
@@ -948,12 +899,12 @@ impl vm::Vm for MshvVm {
     ///
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn register_irqfd(&self, fd: &EventFd, gsi: u32, vm: Arc<dyn vm::Vm>) -> vm::Result<()> {
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
         let dup_fd = fd.try_clone().unwrap();
         let kill_fd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
 
         let mut ctrl_handler = IrqfdCtrlEpollHandler {
-            vm,
+            vm_fd: self.fd.clone(),
             kill: kill_fd.try_clone().unwrap(),
             irqfd: fd.try_clone().unwrap(),
             epoll_fd: 0,
@@ -989,12 +940,12 @@ impl vm::Vm for MshvVm {
         id: u8,
         vmmops: Option<Arc<Box<dyn VmmOps>>>,
     ) -> vm::Result<Arc<dyn cpu::Vcpu>> {
-        let vc = self
+        let vcpu_fd = self
             .fd
             .create_vcpu(id)
             .map_err(|e| vm::HypervisorVmError::CreateVcpu(e.into()))?;
         let vcpu = MshvVcpu {
-            fd: vc,
+            fd: vcpu_fd,
             vp_index: id,
             cpuid: CpuId::new(1 as usize),
             msrs: self.msrs.clone(),
@@ -1085,33 +1036,11 @@ impl vm::Vm for MshvVm {
 
         Ok(())
     }
-
-    fn request_virtual_interrupt(
-        &self,
-        interrupt_type: u8,
-        apic_id: u64,
-        vector: u32,
-        level_triggered: bool,
-        logical_destination_mode: bool,
-        long_mode: bool,
-    ) -> vm::Result<()> {
-        self.fd
-            .request_virtual_interrupt(
-                interrupt_type.into(),
-                apic_id,
-                vector,
-                level_triggered,
-                logical_destination_mode,
-                long_mode,
-            )
-            .map_err(|e| vm::HypervisorVmError::RequestVirtualInterrupt(e.into()))?;
-        Ok(())
-    }
     ///
     /// Get the Vm state. Return VM specific data
     ///
     fn state(&self) -> vm::Result<VmState> {
-        Ok(self.hv_state.read().unwrap().clone())
+        Ok(*self.hv_state.read().unwrap())
     }
     ///
     /// Set the VM state
@@ -1124,10 +1053,11 @@ impl vm::Vm for MshvVm {
     /// Get dirty pages bitmap (one bit per page)
     ///
     fn get_dirty_log(&self, slot: u32, memory_size: u64) -> vm::Result<Vec<u64>> {
-        unimplemented!();
+        Err(vm::HypervisorVmError::GetDirtyLog(anyhow!(
+            "get_dirty_log not implemented"
+        )))
     }
 }
-
 pub use hv_cpuid_entry as CpuIdEntry;
 
 #[derive(Copy, Clone, Debug)]

@@ -159,7 +159,7 @@ impl vm::Vm for KvmVm {
     ///
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn register_irqfd(&self, fd: &EventFd, gsi: u32, _vm: Arc<dyn vm::Vm>) -> vm::Result<()> {
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
         self.fd
             .register_irqfd(fd, gsi)
             .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))

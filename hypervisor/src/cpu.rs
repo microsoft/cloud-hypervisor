@@ -14,16 +14,15 @@ use crate::aarch64::VcpuInit;
 use crate::aarch64::{RegList, Register, StandardRegisters};
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{CpuId, LapicState};
-use crate::CpuState;
-#[cfg(target_arch = "x86_64")]
-use crate::Xsave;
-
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
+use crate::CpuState;
 #[cfg(feature = "kvm")]
 use crate::MpState;
+#[cfg(target_arch = "x86_64")]
+use crate::Xsave;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -165,16 +164,6 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to get debug registers: {0}")]
     GetDebugRegs(#[source] anyhow::Error),
-    ///
-    /// Get register error
-    ///
-    #[error("Failed to get registers: {0}")]
-    GetReg(#[source] anyhow::Error),
-    ///
-    /// Set register error
-    ///
-    #[error("Failed to set registers: {0}")]
-    SetReg(#[source] anyhow::Error),
     ///
     /// Write to Guest Mem
     ///
