@@ -124,11 +124,6 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to create passthrough device: {0}")]
     CreatePassthroughDevice(#[source] anyhow::Error),
-    ///
-    /// Failed to request virtual interrupt
-    ///
-    #[error("Failed to request virtual interupt: {0}")]
-    RequestVirtualInterrupt(#[source] anyhow::Error),
     /// Write to Guest memory
     ///
     #[error("Failed to write to guest memory: {0}")]
@@ -163,6 +158,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to get dirty log: {0}")]
     GetDirtyLog(#[source] anyhow::Error),
+    ///
+    /// Assert virtual interrupt error
+    ///
+    #[error("Failed to assert virtual Interrupt: {0}")]
+    AsserttVirtualInterrupt(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -181,7 +181,7 @@ pub trait Vm: Send + Sync {
     /// Creates an in-kernel interrupt controller.
     fn create_irq_chip(&self) -> Result<()>;
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
-    fn register_irqfd(&self, fd: &EventFd, gsi: u32, vm: Arc<dyn Vm>) -> Result<()>;
+    fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding

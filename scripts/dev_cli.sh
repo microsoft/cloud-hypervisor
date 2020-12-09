@@ -175,6 +175,7 @@ cmd_help() {
     echo "        --release             Build the release binaries."
     echo "        --libc                Select the C library Cloud Hypervisor will be built against. Default is gnu"
     echo "        --volumes             Hash separated volumes to be exported. Example --volumes /mnt:/mnt#/myvol:/myvol"
+    echo "        --hypervisor          Underlying hypervisor. Options kvm, mshv"
     echo ""
     echo "    tests [--unit|--cargo|--all] [--libc musl|gnu] [-- [<cargo test args>]]"
     echo "        Run the Cloud Hypervisor tests."
@@ -185,6 +186,7 @@ cmd_help() {
     echo "        --integration-windows Run the Windows guest integration tests."
     echo "        --libc                Select the C library Cloud Hypervisor will be built against. Default is gnu"
     echo "        --volumes             Hash separated volumes to be exported. Example --volumes /mnt:/mnt#/myvol:/myvol"
+    echo "        --hypervisor          Underlying hypervisor. Options kvm, mshv"
     echo "        --all                 Run all tests."
     echo ""
     echo "    build-container [--type]"
@@ -205,12 +207,14 @@ cmd_help() {
 cmd_build() {
     build="debug"
     libc="gnu"
+    hypervisor="kvm"
+    features_build=""
 
     while [ $# -gt 0 ]; do
 	case "$1" in
-            "-h"|"--help")  { cmd_help; exit 1;     } ;;
-            "--debug")      { build="debug";      } ;;
-            "--release")    { build="release";    } ;;
+            "-h"|"--help")  { cmd_help; exit 1; } ;;
+            "--debug")      { build="debug"; } ;;
+            "--release")    { build="release"; } ;;
             "--libc")
                 shift
                 [[ "$1" =~ ^(musl|gnu)$ ]] || \
@@ -221,7 +225,11 @@ cmd_build() {
                 shift
                 arg_vols="$1"
                 ;;
-            "--")           { shift; break;         } ;;
+            "--hypervisor")
+                shift
+                hypervisor="$1"
+                ;;
+            "--")           { shift; break; } ;;
             *)
 		die "Unknown build argument: $1. Please use --help for help."
 		;;
@@ -229,6 +237,9 @@ cmd_build() {
 	shift
     done
     process_volumes_args
+    if [[ "$hypervisor" != "kvm" ]]; then
+        die "Hypervisor value must be kvm"
+    fi
 
     target="$(uname -m)-unknown-linux-${libc}"
 
@@ -251,7 +262,7 @@ cmd_build() {
 	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
 	   --env RUSTFLAGS="$rustflags" \
 	   "$CTR_IMAGE" \
-	   cargo build --all \
+	   cargo build --all $features_build \
 	         --target-dir "$CTR_CLH_CARGO_TARGET" \
 	         "${cargo_args[@]}" && say "Binaries placed under $CLH_CARGO_TARGET/$target/$build"
 }
@@ -278,15 +289,15 @@ cmd_tests() {
     integration_windows=false
     libc="gnu"
     arg_vols=""
-
+    hypervisor="kvm"
     while [ $# -gt 0 ]; do
 	case "$1" in
-            "-h"|"--help")           { cmd_help; exit 1;     } ;;
-            "--unit")                { unit=true;      } ;;
-            "--cargo")               { cargo=true;    } ;;
-            "--integration")         { integration=true;    } ;;
-            "--integration-sgx")     { integration_sgx=true;    } ;;
-            "--integration-windows") { integration_windows=true;    } ;;
+            "-h"|"--help")           { cmd_help; exit 1; } ;;
+            "--unit")                { unit=true; } ;;
+            "--cargo")               { cargo=true; } ;;
+            "--integration")         { integration=true; } ;;
+            "--integration-sgx")     { integration_sgx=true; } ;;
+            "--integration-windows") { integration_windows=true; } ;;
             "--libc")
                 shift
                 [[ "$1" =~ ^(musl|gnu)$ ]] || \
@@ -297,14 +308,22 @@ cmd_tests() {
                 shift
                 arg_vols="$1"
                 ;;
-	    "--all")                 { cargo=true; unit=true; integration=true;  } ;;
-            "--")                    { shift; break;         } ;;
+            "--hypervisor")
+                shift
+                hypervisor="$1"
+                ;;
+	    "--all")                 { cargo=true; unit=true; integration=true; } ;;
+            "--")                    { shift; break; } ;;
             *)
 		die "Unknown tests argument: $1. Please use --help for help."
 		;;
 	esac
 	shift
     done
+    if [[ "$hypervisor" != "kvm" ]]; then
+        die "Hypervisor value must be kvm"
+    fi
+    set -- "$@" '--hypervisor' $hypervisor
 
     process_volumes_args
     target="$(uname -m)-unknown-linux-${libc}"
@@ -315,7 +334,7 @@ cmd_tests() {
 	cflags="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
     fi
 
-    if [ "$unit" = true ] ;  then
+    if [[ "$unit" = true && $hypervisor = "kvm" ]] ;  then
 	say "Running unit tests for $target..."
 	$DOCKER_RUNTIME run \
 	       --workdir "$CTR_CLH_ROOT_DIR" \
@@ -338,7 +357,7 @@ cmd_tests() {
 	       --rm \
 	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
 	       "$CTR_IMAGE" \
-	       ./scripts/run_cargo_tests.sh || fix_dir_perms $? || exit $?
+	       ./scripts/run_cargo_tests.sh "$@"  || fix_dir_perms $? || exit $?
     fi
 
     if [ "$integration" = true ] ;  then
@@ -405,9 +424,9 @@ cmd_build-container() {
 
     while [ $# -gt 0 ]; do
 	case "$1" in
-            "-h"|"--help")  { cmd_help; exit 1;     } ;;
+            "-h"|"--help")  { cmd_help; exit 1; } ;;
             "--dev")        { container_type="dev"; } ;;
-            "--")           { shift; break;         } ;;
+            "--")           { shift; break; } ;;
             *)
 		die "Unknown build-container argument: $1. Please use --help for help."
 		;;
@@ -457,8 +476,8 @@ cmd_shell() {
 #
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help)              { cmd_help; exit 1;     } ;;
-        -y|--unattended)        { OPT_UNATTENDED=true;  } ;;
+        -h|--help)              { cmd_help; exit 1; } ;;
+        -y|--unattended)        { OPT_UNATTENDED=true; } ;;
         -*)
             die "Unknown arg: $1. Please use \`$0 help\` for help."
             ;;

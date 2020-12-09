@@ -422,6 +422,7 @@ impl VmmOps for VmOps {
     fn pio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
         if addr == DEBUG_IOPORT as u64 && data.len() == 1 {
             self.log_debug_ioport(data[0]);
+            return Ok(());
         }
 
         if let Err(e) = self.io_bus.write(addr, data) {
@@ -2015,7 +2016,7 @@ impl Transportable for Vm {
 }
 impl Migratable for Vm {}
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod tests {
     use super::*;

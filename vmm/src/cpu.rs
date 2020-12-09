@@ -1424,7 +1424,7 @@ impl Snapshottable for CpuManager {
 impl Transportable for CpuManager {}
 impl Migratable for CpuManager {}
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod tests {
 

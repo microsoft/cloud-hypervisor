@@ -32,10 +32,12 @@ extern crate thiserror;
 /// KVM implementation module
 pub mod kvm;
 
-/// Hypevisor related module
-pub mod hypervisor;
+/// Microsoft Hypervisor implementation module
 #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
 pub mod mshv;
+
+/// Hypevisor related module
+pub mod hypervisor;
 
 /// Vm related module
 pub mod vm;
