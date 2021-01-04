@@ -95,7 +95,16 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64-custom";
 
+    #[cfg(not(feature = "mshv"))]
     const DIRECT_KERNEL_BOOT_CMDLINE: &str = "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw";
+    #[cfg(feature = "mshv")]
+    const DIRECT_KERNEL_BOOT_CMDLINE: &str =
+        "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw apic=verbose clocksource=acpi_pm";
+
+    #[cfg(not(feature = "mshv"))]
+    const ENABLE_SECCOMP: &str = "true";
+    #[cfg(feature = "mshv")]
+    const ENABLE_SECCOMP: &str = "false";
 
     const PIPE_SIZE: i32 = 32 << 20;
 
@@ -776,6 +785,7 @@ mod tests {
                      self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
                      self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
             }
+
             #[cfg(target_arch = "aarch64")]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
@@ -1241,6 +1251,7 @@ mod tests {
             ])
             .args(&["--memory", "size=512M"])
             .args(&["--kernel", guest.fw_path.as_str()])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .default_net()
             .capture_output()
@@ -1341,6 +1352,7 @@ mod tests {
             .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .args(&["--net", net_params.as_str()])
             .args(&["--api-socket", &api_socket])
@@ -1480,6 +1492,7 @@ mod tests {
             .args(&["--memory", "size=512M,hotplug_size=2048M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&[
                 "--disk",
                 format!(
@@ -1649,6 +1662,7 @@ mod tests {
             .args(&["--memory", "size=512M,shared=on"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&[
                 "--disk",
                 blk_boot_params.as_str(),
@@ -1722,6 +1736,7 @@ mod tests {
             .default_disks()
             .default_net()
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .args(&["--api-socket", &api_socket]);
 
         let fs_params = format!(
@@ -1916,6 +1931,7 @@ mod tests {
             .args(&["--memory", "size=512M"])
             .args(&["--kernel", kernel_path.to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
             .default_net()
             .args(&[
@@ -2004,6 +2020,7 @@ mod tests {
         cmd.args(&["--memory", "size=512M"]);
         cmd.args(&["--kernel", kernel_path.to_str().unwrap()]);
         cmd.args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+        cmd.args(&["--seccomp", ENABLE_SECCOMP]);
         cmd.default_disks();
         cmd.default_net();
 
@@ -2267,6 +2284,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_simple_launch() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -2286,6 +2304,7 @@ mod tests {
                     .default_raw_disks()
                     .default_net()
                     .args(&["--serial", "tty", "--console", "off"])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -2308,6 +2327,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_multi_cpu() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut bionic);
@@ -2315,6 +2335,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=2,max=4"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_raw_disks()
                 .default_net();
@@ -2359,24 +2380,28 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_421() {
             test_cpu_topology(4, 2, 1);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_142() {
             test_cpu_topology(1, 4, 2);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_topology_262() {
             test_cpu_topology(2, 6, 2);
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_physical_bits() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2385,6 +2410,7 @@ mod tests {
                 .args(&["--cpus", &format!("max_phys_bits={}", max_phys_bits)])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -2411,6 +2437,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_large_vm() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2420,6 +2447,7 @@ mod tests {
                 .args(&["--kernel", guest.fw_path.as_str()])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2443,6 +2471,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_huge_memory() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2450,6 +2479,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=128G"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2474,6 +2504,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_user_defined_memory_regions() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2496,6 +2527,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&["--api-socket", &api_socket])
                 .capture_output()
                 .default_disks()
@@ -2558,6 +2590,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_guest_numa_nodes() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2586,6 +2619,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&["--api-socket", &api_socket])
                 .capture_output()
                 .default_disks()
@@ -2638,6 +2672,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_pci_msi() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -2645,6 +2680,7 @@ mod tests {
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .default_disks()
                 .default_net();
@@ -2693,6 +2729,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
@@ -2750,7 +2787,7 @@ mod tests {
                     .default_disks()
                     .default_net()
                     .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                    .args(&["--seccomp", "false"])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -2788,6 +2825,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -2834,6 +2872,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -2879,6 +2918,7 @@ mod tests {
                 .args(&["--memory", "size=512M,shared=on"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -2962,6 +3002,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_named_tap() {
             test_vhost_user_net(
                 Some("mytap0"),
@@ -3028,6 +3069,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_split_irqchip() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3036,6 +3078,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -3072,11 +3115,13 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, false)
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_cache_size_1_gib() {
             test_virtio_fs(true, Some(0x4000_0000), "none", &prepare_virtiofsd, false)
         }
@@ -3087,11 +3132,13 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size_w_virtiofsd_rs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, false)
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_cache_size_1_gib_w_virtiofsd_rs_daemon() {
             test_virtio_fs(
                 true,
@@ -3109,6 +3156,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, true)
         }
@@ -3121,6 +3169,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on_w_virtiofsd_rs_daemon() {
             test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, true)
         }
@@ -3139,6 +3188,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_pmem_discard_writes() {
             test_virtio_pmem(true, false)
         }
@@ -3196,6 +3246,7 @@ mod tests {
                         .replace("vda1", "pmem0p1")
                         .as_str(),
                 ])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3229,6 +3280,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .args(&[
                     "--net",
@@ -3283,6 +3335,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3318,6 +3371,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_serial_null() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3329,6 +3383,7 @@ mod tests {
                 .default_net()
                 .args(&["--serial", "null"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             // Now AArch64 can only boot from direct kernel, command-line is needed.
@@ -3384,6 +3439,7 @@ mod tests {
                 .default_net()
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3419,6 +3475,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_serial_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3428,6 +3485,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3494,6 +3552,7 @@ mod tests {
                 .default_net()
                 .args(&["--console", "tty"])
                 .args(&["--serial", "null"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3525,6 +3584,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_console_file() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3534,6 +3594,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3569,6 +3630,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // The VFIO integration test starts cloud-hypervisor guest with 3 TAP
         // backed networking interfaces, bound through a simple bridge on the host.
         // So if the nested cloud-hypervisor succeeds in getting a directly
@@ -3626,6 +3688,7 @@ mod tests {
                 .args(&["--cpus", "boot=4"])
                 .args(&["--memory", "size=2G,hugepages=on,shared=on"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -3825,6 +3888,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&[
@@ -3850,6 +3914,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_reboot() {
             let mut bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3866,6 +3931,7 @@ mod tests {
                 cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
                     .args(&["--kernel", guest.fw_path.as_str()])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .default_raw_disks()
                     .default_net()
                     .capture_output();
@@ -3922,6 +3988,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_bzimage_reboot() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3938,6 +4005,7 @@ mod tests {
                 .default_disks()
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -3996,6 +4064,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         fn test_api_create_boot() {
@@ -4046,6 +4115,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         // Then we pause the VM, check that it's no longer available.
@@ -4145,6 +4215,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -4208,6 +4279,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // We cannot force the software running in the guest to reprogram the BAR
         // with some different addresses, but we have a reliable way of testing it
         // with a standard Linux kernel.
@@ -4224,6 +4296,7 @@ mod tests {
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", guest.fw_path.as_str()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .args(&[
                     "--net",
@@ -4302,12 +4375,14 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_memory_mergeable_off() {
             test_memory_mergeable(false)
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_cpu_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4322,6 +4397,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4409,6 +4485,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_memory_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4423,6 +4500,7 @@ mod tests {
                 .args(&["--memory", "size=512M,hotplug_size=8192M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--balloon", "size=0"])
@@ -4526,6 +4604,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_virtio_mem() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4543,6 +4622,7 @@ mod tests {
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4613,6 +4693,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // Test both vCPU and memory resizing together
         fn test_resize() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -4628,6 +4709,7 @@ mod tests {
                 .args(&["--memory", "size=512M,hotplug_size=8192M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .args(&["--api-socket", &api_socket])
@@ -4693,6 +4775,7 @@ mod tests {
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .default_disks()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -4733,6 +4816,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -4912,6 +4996,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -5027,6 +5112,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_net_hotplug() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5045,6 +5131,7 @@ mod tests {
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .capture_output()
                 .spawn()
@@ -5135,6 +5222,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_initramfs() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5162,6 +5250,7 @@ mod tests {
                     .args(&["--kernel", k_path.to_str().unwrap()])
                     .args(&["--initramfs", initramfs_path.to_str().unwrap()])
                     .args(&["--cmdline", &cmdline])
+                    .args(&["--seccomp", ENABLE_SECCOMP])
                     .capture_output()
                     .spawn()
                     .unwrap();
@@ -5186,6 +5275,7 @@ mod tests {
         // verify the migration went well for virtio-net.
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_snapshot_restore() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5215,6 +5305,7 @@ mod tests {
                 .args(&["--cpus", "boot=4"])
                 .args(&["--memory", "size=4G"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -5355,6 +5446,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_counters() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5367,6 +5459,7 @@ mod tests {
                 .default_disks()
                 .args(&["--net", guest.default_net_string().as_str()])
                 .args(&["--api-socket", &api_socket])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             #[cfg(target_arch = "aarch64")]
@@ -5395,6 +5488,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_watchdog() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -5411,6 +5505,7 @@ mod tests {
                 .args(&["--net", guest.default_net_string().as_str()])
                 .args(&["--watchdog"])
                 .args(&["--api-socket", &api_socket])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output();
 
             let mut child = cmd.spawn().unwrap();
@@ -5509,7 +5604,7 @@ mod tests {
             handle_child_output(r, &output);
         }
     }
-
+    #[cfg(not(feature = "mshv"))]
     mod sequential {
         use crate::tests::*;
 
@@ -5698,6 +5793,7 @@ mod tests {
                 .default_net()
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--sgx-epc", "size=64M"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
