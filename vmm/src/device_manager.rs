@@ -43,7 +43,7 @@ use devices::gic;
 use devices::ioapic;
 use devices::{
     interrupt_controller, interrupt_controller::InterruptController, legacy::Serial,
-    HotPlugNotificationFlags,
+    AcpiNotificationFlags,
 };
 #[cfg(feature = "kvm")]
 use hypervisor::kvm_ioctls::*;
@@ -68,7 +68,7 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(feature = "kvm")]
 use std::os::unix::io::FromRawFd;
 use std::result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 #[cfg(feature = "kvm")]
 use vfio_ioctls::{VfioContainer, VfioDevice, VfioDmaMapping};
 use virtio_devices::transport::VirtioPciDevice;
@@ -366,6 +366,9 @@ pub enum DeviceManagerError {
 
     /// Missing virtio-balloon, can't proceed as expected.
     MissingVirtioBalloon,
+
+    /// Failed to do power button notification
+    PowerButtonNotification(io::Error),
 }
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
 
@@ -776,6 +779,10 @@ pub struct DeviceManager {
 
     // Possible handle to the virtio-balloon device
     balloon: Option<Arc<Mutex<virtio_devices::Balloon>>>,
+
+    // Virtio Device activation EventFd to allow the VMM thread to trigger device
+    // activation and thus start the threads from the VMM thread
+    activate_evt: EventFd,
 }
 
 impl DeviceManager {
@@ -788,6 +795,7 @@ impl DeviceManager {
         reset_evt: &EventFd,
         seccomp_action: SeccompAction,
         #[cfg(feature = "acpi")] numa_nodes: NumaNodes,
+        activate_evt: &EventFd,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         let device_tree = Arc::new(Mutex::new(DeviceTree::new()));
 
@@ -843,6 +851,9 @@ impl DeviceManager {
             #[cfg(feature = "acpi")]
             numa_nodes,
             balloon: None,
+            activate_evt: activate_evt
+                .try_clone()
+                .map_err(DeviceManagerError::EventFd)?,
         };
 
         #[cfg(feature = "acpi")]
@@ -1800,6 +1811,18 @@ impl DeviceManager {
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
+            } else if let Some(fd) = net_cfg.fd {
+                Arc::new(Mutex::new(
+                    virtio_devices::Net::from_tap_fd(
+                        id.clone(),
+                        fd,
+                        Some(net_cfg.mac),
+                        net_cfg.iommu,
+                        net_cfg.queue_size,
+                        self.seccomp_action.clone(),
+                    )
+                    .map_err(DeviceManagerError::CreateVirtioNet)?,
+                ))
             } else {
                 Arc::new(Mutex::new(
                     virtio_devices::Net::new(
@@ -2738,6 +2761,9 @@ impl DeviceManager {
             iommu_mapping_cb,
             interrupt_manager,
             pci_device_bdf,
+            self.activate_evt
+                .try_clone()
+                .map_err(DeviceManagerError::EventFd)?,
         )
         .map_err(DeviceManagerError::VirtioDevice)?;
 
@@ -2833,9 +2859,21 @@ impl DeviceManager {
         Ok(())
     }
 
+    pub fn activate_virtio_devices(&self) -> DeviceManagerResult<()> {
+        // Find virtio pci devices and activate any pending ones
+        for (_, any_device) in self.pci_devices.iter() {
+            if let Ok(virtio_pci_device) =
+                Arc::clone(any_device).downcast::<Mutex<VirtioPciDevice>>()
+            {
+                virtio_pci_device.lock().unwrap().maybe_activate();
+            }
+        }
+        Ok(())
+    }
+
     pub fn notify_hotplug(
         &self,
-        _notification_type: HotPlugNotificationFlags,
+        _notification_type: AcpiNotificationFlags,
     ) -> DeviceManagerResult<()> {
         #[cfg(feature = "acpi")]
         return self
@@ -3141,6 +3179,18 @@ impl DeviceManager {
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
         self.device_tree.clone()
     }
+
+    #[cfg(feature = "acpi")]
+    pub fn notify_power_button(&self) -> DeviceManagerResult<()> {
+        return self
+            .ged_notification_device
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .notify(AcpiNotificationFlags::POWER_BUTTON_CHANGED)
+            .map_err(DeviceManagerError::PowerButtonNotification);
+    }
 }
 
 #[cfg(feature = "acpi")]
@@ -3390,6 +3440,15 @@ impl Aml for DeviceManager {
         let s5_sleep_data =
             aml::Name::new("_S5_".into(), &aml::Package::new(vec![&5u8])).to_aml_bytes();
 
+        let power_button_dsdt_data = aml::Device::new(
+            "_SB_.PWRB".into(),
+            vec![
+                &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0C0C")),
+                &aml::Name::new("_UID".into(), &aml::ZERO),
+            ],
+        )
+        .to_aml_bytes();
+
         let ged_data = self
             .ged_notification_device
             .as_ref()
@@ -3404,6 +3463,7 @@ impl Aml for DeviceManager {
             bytes.extend_from_slice(com1_dsdt_data.as_slice());
         }
         bytes.extend_from_slice(s5_sleep_data.as_slice());
+        bytes.extend_from_slice(power_button_dsdt_data.as_slice());
         bytes.extend_from_slice(ged_data.as_slice());
         bytes
     }
@@ -3550,7 +3610,7 @@ impl BusDevice for DeviceManager {
         )
     }
 
-    fn write(&mut self, base: u64, offset: u64, data: &[u8]) {
+    fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         match offset {
             B0EJ_FIELD_OFFSET => {
                 assert!(data.len() == B0EJ_FIELD_SIZE);
@@ -3576,7 +3636,9 @@ impl BusDevice for DeviceManager {
         debug!(
             "PCI_HP_REG_W: base 0x{:x}, offset 0x{:x}, data {:?}",
             base, offset, data
-        )
+        );
+
+        None
     }
 }
 

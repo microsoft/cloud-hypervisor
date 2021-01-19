@@ -5,7 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use super::{create_sockaddr, create_socket, Error as NetUtilError, MacAddr};
+use super::{create_sockaddr, create_socket, vnet_hdr_len, Error as NetUtilError, MacAddr};
 use mac::MAC_ADDR_LEN;
 use net_gen;
 use std::fs::File;
@@ -31,7 +31,7 @@ pub enum Error {
     NetUtil(NetUtilError),
     InvalidIfname,
     /// Error parsing MAC data
-    MacParsing(()),
+    MacParsing(IoError),
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;
@@ -83,7 +83,7 @@ fn build_terminated_if_name(if_name: &str) -> Result<Vec<u8>> {
 }
 
 impl Tap {
-    pub fn open_named(if_name: &str, num_queue_pairs: usize) -> Result<Tap> {
+    pub fn open_named(if_name: &str, num_queue_pairs: usize, flags: Option<i32>) -> Result<Tap> {
         let terminated_if_name = build_terminated_if_name(if_name)?;
 
         let fd = unsafe {
@@ -91,7 +91,7 @@ impl Tap {
             // string and verify the result.
             libc::open(
                 b"/dev/net/tun\0".as_ptr() as *const c_char,
-                libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                flags.unwrap_or(libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC),
             )
         };
         if fd < 0 {
@@ -150,7 +150,51 @@ impl Tap {
 
     /// Create a new tap interface.
     pub fn new(num_queue_pairs: usize) -> Result<Tap> {
-        Self::open_named("vmtap%d", num_queue_pairs)
+        Self::open_named("vmtap%d", num_queue_pairs, None)
+    }
+
+    pub fn from_tap_fd(fd: RawFd) -> Result<Tap> {
+        // Ensure that the file is opened non-blocking, this is particularly
+        // needed when opened via the shell for macvtap.
+        let ret = unsafe {
+            let mut flags = libc::fcntl(fd, libc::F_GETFL);
+            flags |= libc::O_NONBLOCK;
+            libc::fcntl(fd, libc::F_SETFL, flags)
+        };
+        if ret < 0 {
+            return Err(Error::ConfigureTap(IoError::last_os_error()));
+        }
+
+        let tap_file = unsafe { File::from_raw_fd(fd) };
+        let mut ifreq: net_gen::ifreq = Default::default();
+
+        // Get current config including name
+        let ret = unsafe { ioctl_with_mut_ref(&tap_file, net_gen::TUNGETIFF(), &mut ifreq) };
+        if ret < 0 {
+            return Err(Error::IoctlError(IoError::last_os_error()));
+        }
+        let if_name = unsafe { *ifreq.ifr_ifrn.ifrn_name.as_ref() }.to_vec();
+
+        // Try and update flags. Depending on how the tap was created (macvtap
+        // or via open_named()) this might return -EEXIST so we just ignore that.
+        unsafe {
+            let ifru_flags = ifreq.ifr_ifru.ifru_flags.as_mut();
+            *ifru_flags =
+                (net_gen::IFF_TAP | net_gen::IFF_NO_PI | net_gen::IFF_VNET_HDR) as c_short;
+        }
+        let ret = unsafe { ioctl_with_mut_ref(&tap_file, net_gen::TUNSETIFF(), &mut ifreq) };
+        if ret < 0 && IoError::last_os_error().raw_os_error().unwrap() != libc::EEXIST {
+            return Err(Error::ConfigureTap(IoError::last_os_error()));
+        }
+
+        let tap = Tap { if_name, tap_file };
+        let offload_flags =
+            net_gen::TUN_F_CSUM | net_gen::TUN_F_UFO | net_gen::TUN_F_TSO4 | net_gen::TUN_F_TSO6;
+        let vnet_hdr_size = vnet_hdr_len() as i32;
+        tap.set_offload(offload_flags)?;
+        tap.set_vnet_hdr_size(vnet_hdr_size)?;
+
+        Ok(tap)
     }
 
     /// Set the host-side IP address for the tap interface.
@@ -537,6 +581,13 @@ mod tests {
     fn test_tap_create() {
         let t = Tap::new(1).unwrap();
         println!("created tap: {:?}", t);
+    }
+
+    #[test]
+    fn test_tap_from_fd() {
+        let orig_tap = Tap::new(1).unwrap();
+        let fd = orig_tap.as_raw_fd();
+        let _new_tap = Tap::from_tap_fd(fd).unwrap();
     }
 
     #[test]

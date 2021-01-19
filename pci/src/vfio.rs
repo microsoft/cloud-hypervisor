@@ -15,7 +15,7 @@ use std::any::Any;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::ptr::null_mut;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::{fmt, io, result};
 use vfio_bindings::bindings::vfio::*;
 use vfio_ioctls::{VfioDevice, VfioError};
@@ -652,7 +652,7 @@ impl BusDevice for VfioPciDevice {
         self.read_bar(base, offset, data)
     }
 
-    fn write(&mut self, base: u64, offset: u64, data: &[u8]) {
+    fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         self.write_bar(base, offset, data)
     }
 }
@@ -883,19 +883,24 @@ impl PciDevice for VfioPciDevice {
         Ok(())
     }
 
-    fn write_config_register(&mut self, reg_idx: usize, offset: u64, data: &[u8]) {
+    fn write_config_register(
+        &mut self,
+        reg_idx: usize,
+        offset: u64,
+        data: &[u8],
+    ) -> Option<Arc<Barrier>> {
         // When the guest wants to write to a BAR, we trap it into
         // our local configuration space. We're not reprogramming
         // VFIO device.
-        if (reg_idx >= PCI_CONFIG_BAR0_INDEX && reg_idx < PCI_CONFIG_BAR0_INDEX + BAR_NUMS)
+        if (PCI_CONFIG_BAR0_INDEX..PCI_CONFIG_BAR0_INDEX + BAR_NUMS).contains(&reg_idx)
             || reg_idx == PCI_ROM_EXP_BAR_INDEX
         {
             // We keep our local cache updated with the BARs.
             // We'll read it back from there when the guest is asking
             // for BARs (see read_config_register()).
-            return self
-                .configuration
+            self.configuration
                 .write_config_register(reg_idx, offset, data);
+            return None;
         }
 
         let reg = (reg_idx * PCI_CONFIG_REGISTER_SIZE) as u64;
@@ -931,6 +936,8 @@ impl PciDevice for VfioPciDevice {
         // to the device region to update the MSI Enable bit.
         self.device
             .region_write(VFIO_PCI_CONFIG_REGION_INDEX, data, reg + offset);
+
+        None
     }
 
     fn read_config_register(&mut self, reg_idx: usize) -> u32 {
@@ -938,7 +945,7 @@ impl PciDevice for VfioPciDevice {
         // from our local configuration space. We want the guest to
         // use that and not the VFIO device BARs as it does not map
         // with the guest address space.
-        if (reg_idx >= PCI_CONFIG_BAR0_INDEX && reg_idx < PCI_CONFIG_BAR0_INDEX + BAR_NUMS)
+        if (PCI_CONFIG_BAR0_INDEX..PCI_CONFIG_BAR0_INDEX + BAR_NUMS).contains(&reg_idx)
             || reg_idx == PCI_ROM_EXP_BAR_INDEX
         {
             return self.configuration.read_reg(reg_idx);
@@ -988,7 +995,7 @@ impl PciDevice for VfioPciDevice {
         }
     }
 
-    fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) {
+    fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         let addr = base + offset;
         if let Some(region) = self.find_region(addr) {
             let offset = addr - region.start.raw_value();
@@ -1000,6 +1007,8 @@ impl PciDevice for VfioPciDevice {
                 self.device.region_write(region.index, data, offset);
             }
         }
+
+        None
     }
 
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> result::Result<(), io::Error> {

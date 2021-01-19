@@ -26,7 +26,7 @@ use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use url::Url;
 #[cfg(target_arch = "x86_64")]
 use vm_allocator::GsiApic;
@@ -314,7 +314,7 @@ impl BusDevice for MemoryManager {
         }
     }
 
-    fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
+    fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         match offset {
             SELECTION_OFFSET => {
                 self.selected_slot = usize::from(data[0]);
@@ -340,7 +340,8 @@ impl BusDevice for MemoryManager {
                     offset
                 );
             }
-        }
+        };
+        None
     }
 }
 
@@ -693,9 +694,13 @@ impl MemoryManager {
         let allocator = Arc::new(Mutex::new(
             SystemAllocator::new(
                 #[cfg(target_arch = "x86_64")]
-                GuestAddress(0),
+                {
+                    GuestAddress(0)
+                },
                 #[cfg(target_arch = "x86_64")]
-                (1 << 16 as GuestUsize),
+                {
+                    1 << 16
+                },
                 GuestAddress(0),
                 mmio_address_space_size,
                 layout::MEM_32BIT_DEVICES_START,
@@ -1343,7 +1348,7 @@ impl MemoryManager {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open("/dev/sgx/virt_epc")
+                .open("/dev/sgx_virt_epc")
                 .map_err(Error::SgxVirtEpcOpen)?;
 
             let prot = PROT_READ | PROT_WRITE;
@@ -1354,7 +1359,7 @@ impl MemoryManager {
 
             // We can't use the vm-memory crate to perform the memory mapping
             // here as it would try to ensure the size of the backing file is
-            // matching the size of the expected mapping. The /dev/sgx/virt_epc
+            // matching the size of the expected mapping. The /dev/sgx_virt_epc
             // device does not work that way, it provides a file descriptor
             // which is not matching the mapping size, as it's a just a way to
             // let KVM know that an EPC section is being created for the guest.
@@ -1365,7 +1370,7 @@ impl MemoryManager {
                     prot,
                     flags,
                     file.as_raw_fd(),
-                    0 as libc::off_t,
+                    0,
                 )
             } as u64;
 

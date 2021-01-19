@@ -128,7 +128,7 @@ impl VhostUserMasterReqHandler for SlaveReqHandler {
                     libc::PROT_NONE,
                     libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_FIXED,
                     -1,
-                    0 as libc::off_t,
+                    0,
                 )
             };
             if ret == libc::MAP_FAILED {
@@ -475,7 +475,7 @@ impl VirtioDevice for Fs {
             get_seccomp_filter(&self.seccomp_action, Thread::VirtioVhostFs)
                 .map_err(ActivateError::CreateSeccompFilter)?;
         thread::Builder::new()
-            .name("vhost_fs".to_string())
+            .name(self.id.clone())
             .spawn(move || {
                 if let Err(e) = SeccompFilter::apply(virtio_vhost_fs_seccomp_filter) {
                     error!("Error applying seccomp filter: {:?}", e);
@@ -494,7 +494,7 @@ impl VirtioDevice for Fs {
         Ok(())
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         // We first must resume the virtio thread if it was paused.
         if self.common.pause_evt.take().is_some() {
             self.common.resume().ok()?;
@@ -510,11 +510,8 @@ impl VirtioDevice for Fs {
             let _ = kill_evt.write(1);
         }
 
-        // Return the interrupt and queue EventFDs
-        Some((
-            self.common.interrupt_cb.take().unwrap(),
-            self.common.queue_evts.take().unwrap(),
-        ))
+        // Return the interrupt
+        Some(self.common.interrupt_cb.take().unwrap())
     }
 
     fn shutdown(&mut self) {

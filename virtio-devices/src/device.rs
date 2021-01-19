@@ -116,7 +116,7 @@ pub trait VirtioDevice: Send {
 
     /// Optionally deactivates this device and returns ownership of the guest memory map, interrupt
     /// event, and queue events.
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         None
     }
 
@@ -288,7 +288,7 @@ impl VirtioCommon {
         Ok(())
     }
 
-    pub fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    pub fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         // We first must resume the virtio thread if it was paused.
         if self.pause_evt.take().is_some() {
             self.resume().ok()?;
@@ -299,11 +299,16 @@ impl VirtioCommon {
             let _ = kill_evt.write(1);
         }
 
-        // Return the interrupt and queue EventFDs
-        Some((
-            self.interrupt_cb.take().unwrap(),
-            self.queue_evts.take().unwrap(),
-        ))
+        if let Some(mut threads) = self.epoll_threads.take() {
+            for t in threads.drain(..) {
+                if let Err(e) = t.join() {
+                    error!("Error joining thread: {:?}", e);
+                }
+            }
+        }
+
+        // Return the interrupt
+        Some(self.interrupt_cb.take().unwrap())
     }
 }
 

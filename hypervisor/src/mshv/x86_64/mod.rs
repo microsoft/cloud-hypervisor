@@ -8,7 +8,7 @@
 //
 //
 
-use crate::arch::x86::{msr_index, SegmentRegisterOps, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
+use crate::arch::x86::{msr_index, SegmentRegisterOps};
 use serde_derive::{Deserialize, Serialize};
 ///
 /// Export generically-named wrappers of mshv_bindings for Unix-based platforms
@@ -47,24 +47,6 @@ pub enum IoEventAddress {
     Pio(u64),
     /// Representation of an memory mapped I/O address.
     Mmio(u64),
-}
-macro_rules! msr {
-    ($msr:expr) => {
-        MsrEntry {
-            index: $msr,
-            data: 0x0,
-            ..Default::default()
-        }
-    };
-}
-macro_rules! msr_data {
-    ($msr:expr, $data:expr) => {
-        MsrEntry {
-            index: $msr,
-            data: $data,
-            ..Default::default()
-        }
-    };
 }
 
 impl SegmentRegisterOps for SegmentRegister {

@@ -321,8 +321,10 @@ impl Balloon {
     pub fn new(id: String, size: u64, seccomp_action: SeccompAction) -> io::Result<Self> {
         let avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
-        let mut config = VirtioBalloonConfig::default();
-        config.num_pages = (size >> VIRTIO_BALLOON_PFN_SHIFT) as u32;
+        let config = VirtioBalloonConfig {
+            num_pages: (size >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
+            ..Default::default()
+        };
 
         Ok(Balloon {
             common: VirtioCommon {
@@ -444,7 +446,7 @@ impl VirtioDevice for Balloon {
             get_seccomp_filter(&self.seccomp_action, Thread::VirtioBalloon)
                 .map_err(ActivateError::CreateSeccompFilter)?;
         thread::Builder::new()
-            .name("virtio_balloon".to_string())
+            .name(self.id.clone())
             .spawn(move || {
                 if let Err(e) = SeccompFilter::apply(virtio_balloon_seccomp_filter) {
                     error!("Error applying seccomp filter: {:?}", e);
@@ -462,7 +464,7 @@ impl VirtioDevice for Balloon {
         Ok(())
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.common.reset()
     }
 }

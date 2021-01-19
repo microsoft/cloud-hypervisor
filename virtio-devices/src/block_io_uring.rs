@@ -42,7 +42,7 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
-pub const SECTOR_SIZE: u64 = (0x01 as u64) << SECTOR_SHIFT;
+pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
@@ -561,7 +561,7 @@ impl VirtioDevice for BlockIoUring {
                     .map_err(ActivateError::CreateSeccompFilter)?;
 
             thread::Builder::new()
-                .name("virtio_blk_io_uring".to_string())
+                .name(format!("{}_q{}", self.id.clone(), i))
                 .spawn(move || {
                     if let Err(e) = SeccompFilter::apply(virtio_blk_io_uring_seccomp_filter) {
                         error!("Error applying seccomp filter: {:?}", e);
@@ -581,7 +581,7 @@ impl VirtioDevice for BlockIoUring {
         Ok(())
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.common.reset()
     }
 

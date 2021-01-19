@@ -38,10 +38,11 @@ pub mod legacy;
 pub use self::acpi::{AcpiGEDDevice, AcpiPMTimerDevice, AcpiShutdownDevice};
 
 bitflags! {
-    pub struct HotPlugNotificationFlags: u8 {
+    pub struct AcpiNotificationFlags: u8 {
         const NO_DEVICES_CHANGED = 0;
         const CPU_DEVICES_CHANGED = 0b1;
         const MEMORY_DEVICES_CHANGED = 0b10;
         const PCI_DEVICES_CHANGED = 0b100;
+        const POWER_BUTTON_CHANGED = 0b1000;
     }
 }
