@@ -489,12 +489,14 @@ impl MemEpollHandler {
     fn virtio_mem_send_response(
         mem: &GuestMemoryMmap,
         resp_type: u16,
-        resp_state: u16,
+        state: u16,
         status_addr: GuestAddress,
     ) -> u32 {
-        let mut resp = VirtioMemResp::default();
-        resp.resp_type = resp_type;
-        resp.state.state = resp_state;
+        let resp = VirtioMemResp {
+            resp_type,
+            state: VirtioMemRespState { state },
+            ..Default::default()
+        };
         match mem.write_obj(resp, status_addr) {
             Ok(_) => size_of::<VirtioMemResp>() as u32,
             Err(e) => {
@@ -858,7 +860,7 @@ impl VirtioDevice for Mem {
         let virtio_mem_seccomp_filter = get_seccomp_filter(&self.seccomp_action, Thread::VirtioMem)
             .map_err(ActivateError::CreateSeccompFilter)?;
         thread::Builder::new()
-            .name("virtio_mem".to_string())
+            .name(self.id.clone())
             .spawn(move || {
                 if let Err(e) = SeccompFilter::apply(virtio_mem_seccomp_filter) {
                     error!("Error applying seccomp filter: {:?}", e);
@@ -876,7 +878,7 @@ impl VirtioDevice for Mem {
         Ok(())
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.common.reset()
     }
 }

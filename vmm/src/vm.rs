@@ -42,7 +42,7 @@ use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
 use arch::BootProtocol;
 use arch::EntryPoint;
-use devices::HotPlugNotificationFlags;
+use devices::AcpiNotificationFlags;
 use hypervisor::vm::{HypervisorVmError, VmmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(target_arch = "x86_64")]
@@ -51,7 +51,11 @@ use linux_loader::loader::elf::Error::InvalidElfMagicNumber;
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 use linux_loader::loader::KernelLoader;
 use seccomp::{SeccompAction, SeccompFilter};
-use signal_hook::{iterator::backend::Handle, iterator::Signals, SIGINT, SIGTERM, SIGWINCH};
+use signal_hook::{
+    consts::{SIGINT, SIGTERM, SIGWINCH},
+    iterator::backend::Handle,
+    iterator::Signals,
+};
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryInto;
@@ -227,6 +231,15 @@ pub enum Error {
 
     /// Failed setting the VmmOps interface.
     SetVmmOpsInterface(hypervisor::HypervisorVmError),
+
+    /// Cannot activate virtio devices
+    ActivateVirtioDevices(device_manager::DeviceManagerError),
+
+    /// Power button not supported
+    PowerButtonNotSupported,
+
+    /// Error triggering power button
+    PowerButton(device_manager::DeviceManagerError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -400,11 +413,19 @@ impl VmmOps for VmOps {
     }
 
     fn mmio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
-        if let Err(e) = self.mmio_bus.write(addr, data) {
-            if let vm_device::BusError::MissingAddressRange = e {
-                warn!("Guest MMIO write to unregistered address 0x{:x}", addr);
+        match self.mmio_bus.write(addr, data) {
+            Err(e) => {
+                if let vm_device::BusError::MissingAddressRange = e {
+                    warn!("Guest MMIO write to unregistered address 0x{:x}", addr);
+                }
             }
-        }
+            Ok(Some(barrier)) => {
+                info!("Waiting for barrier");
+                barrier.wait();
+                info!("Barrier released");
+            }
+            _ => {}
+        };
         Ok(())
     }
 
@@ -425,11 +446,19 @@ impl VmmOps for VmOps {
             return Ok(());
         }
 
-        if let Err(e) = self.io_bus.write(addr, data) {
-            if let vm_device::BusError::MissingAddressRange = e {
-                warn!("Guest PIO write to unregistered address 0x{:x}", addr);
+        match self.io_bus.write(addr, data) {
+            Err(e) => {
+                if let vm_device::BusError::MissingAddressRange = e {
+                    warn!("Guest PIO write to unregistered address 0x{:x}", addr);
+                }
             }
-        }
+            Ok(Some(barrier)) => {
+                info!("Waiting for barrier");
+                barrier.wait();
+                info!("Barrier released");
+            }
+            _ => {}
+        };
         Ok(())
     }
 }
@@ -472,6 +501,7 @@ impl Vm {
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "kvm")] _saved_clock: Option<hypervisor::ClockData>,
+        activate_evt: EventFd,
     ) -> Result<Self> {
         config
             .lock()
@@ -493,6 +523,7 @@ impl Vm {
             seccomp_action.clone(),
             #[cfg(feature = "acpi")]
             numa_nodes.clone(),
+            &activate_evt,
         )
         .map_err(Error::DeviceManager)?;
 
@@ -630,6 +661,7 @@ impl Vm {
         reset_evt: EventFd,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        activate_evt: EventFd,
     ) -> Result<Self> {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
@@ -666,6 +698,7 @@ impl Vm {
             hypervisor,
             #[cfg(feature = "kvm")]
             None,
+            activate_evt,
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -688,6 +721,7 @@ impl Vm {
         prefault: bool,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        activate_evt: EventFd,
     ) -> Result<Self> {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
@@ -730,6 +764,7 @@ impl Vm {
             hypervisor,
             #[cfg(feature = "kvm")]
             None,
+            activate_evt,
         )
     }
 
@@ -739,6 +774,7 @@ impl Vm {
         reset_evt: EventFd,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        activate_evt: EventFd,
     ) -> Result<Self> {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
@@ -765,6 +801,7 @@ impl Vm {
             hypervisor,
             #[cfg(feature = "kvm")]
             None,
+            activate_evt,
         )
     }
 
@@ -1084,7 +1121,7 @@ impl Vm {
                 self.device_manager
                     .lock()
                     .unwrap()
-                    .notify_hotplug(HotPlugNotificationFlags::CPU_DEVICES_CHANGED)
+                    .notify_hotplug(AcpiNotificationFlags::CPU_DEVICES_CHANGED)
                     .map_err(Error::DeviceManager)?;
             }
             self.config.lock().unwrap().cpus.boot_vcpus = desired_vcpus;
@@ -1112,7 +1149,7 @@ impl Vm {
                         self.device_manager
                             .lock()
                             .unwrap()
-                            .notify_hotplug(HotPlugNotificationFlags::MEMORY_DEVICES_CHANGED)
+                            .notify_hotplug(AcpiNotificationFlags::MEMORY_DEVICES_CHANGED)
                             .map_err(Error::DeviceManager)?;
                     }
                     HotplugMethod::VirtioMem => {}
@@ -1209,7 +1246,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1256,7 +1293,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
         Ok(())
     }
@@ -1283,7 +1320,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1311,7 +1348,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1339,7 +1376,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1367,7 +1404,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1395,7 +1432,7 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .notify_hotplug(HotPlugNotificationFlags::PCI_DEVICES_CHANGED)
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
             .map_err(Error::DeviceManager)?;
 
         Ok(pci_device_info)
@@ -1406,7 +1443,7 @@ impl Vm {
     }
 
     fn os_signal_handler(
-        signals: Signals,
+        mut signals: Signals,
         console_input_clone: Arc<Console>,
         on_tty: bool,
         exit_evt: EventFd,
@@ -1722,6 +1759,26 @@ impl Vm {
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
         self.device_manager.lock().unwrap().device_tree()
+    }
+
+    pub fn activate_virtio_devices(&self) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .activate_virtio_devices()
+            .map_err(Error::ActivateVirtioDevices)
+    }
+
+    pub fn power_button(&self) -> Result<()> {
+        #[cfg(feature = "acpi")]
+        return self
+            .device_manager
+            .lock()
+            .unwrap()
+            .notify_power_button()
+            .map_err(Error::PowerButton);
+        #[cfg(not(feature = "acpi"))]
+        Err(Error::PowerButtonNotSupported)
     }
 }
 

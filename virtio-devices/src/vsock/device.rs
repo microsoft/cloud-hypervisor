@@ -456,7 +456,7 @@ where
             get_seccomp_filter(&self.seccomp_action, Thread::VirtioVsock)
                 .map_err(ActivateError::CreateSeccompFilter)?;
         thread::Builder::new()
-            .name("virtio_vsock".to_string())
+            .name(self.id.clone())
             .spawn(move || {
                 if let Err(e) = SeccompFilter::apply(virtio_vsock_seccomp_filter) {
                     error!("Error applying seccomp filter: {:?}", e);
@@ -475,7 +475,7 @@ where
         Ok(())
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.common.reset()
     }
 

@@ -49,7 +49,7 @@ if [ ! -f "$BIONIC_OS_RAW_IMAGE" ]; then
 fi
 
 
-FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom.qcow2"
+FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210106-1.qcow2"
 FOCAL_OS_IMAGE_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_IMAGE_NAME"
 FOCAL_OS_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_IMAGE" ]; then
@@ -58,7 +58,7 @@ if [ ! -f "$FOCAL_OS_IMAGE" ]; then
     popd
 fi
 
-FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-amd64-custom.raw"
+FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210106-1.raw"
 FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
     pushd $WORKLOADS_DIR
@@ -110,7 +110,7 @@ LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
 if [ ! -f "$VMLINUX_IMAGE" ] || [ ! -f "$VMLINUX_PVH_IMAGE" ]; then
     SRCDIR=$PWD
     pushd $WORKLOADS_DIR
-    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "virtio-fs-virtio-iommu-5.8-rc4" $LINUX_CUSTOM_DIR
+    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.10.6" $LINUX_CUSTOM_DIR
     cp $SRCDIR/resources/linux-config-x86_64 $LINUX_CUSTOM_DIR/.config
     popd
 fi
@@ -194,10 +194,10 @@ cp $FW $VFIO_DIR
 cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
 
 # VFIO test network setup.
-# We reserve a different IP class for it: 172.17.0.0/24.
+# We reserve a different IP class for it: 172.18.0.0/24.
 sudo ip link add name vfio-br0 type bridge
 sudo ip link set vfio-br0 up
-sudo ip addr add 172.17.0.1/24 dev vfio-br0
+sudo ip addr add 172.18.0.1/24 dev vfio-br0
 
 sudo ip tuntap add vfio-tap0 mode tap
 sudo ip link set vfio-tap0 master vfio-br0

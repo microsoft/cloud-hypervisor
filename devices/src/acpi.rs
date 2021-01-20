@@ -4,12 +4,12 @@
 //
 
 use acpi_tables::{aml, aml::Aml};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::Instant;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
 use vmm_sys_util::eventfd::EventFd;
-use HotPlugNotificationFlags;
+use AcpiNotificationFlags;
 
 /// A device for handling ACPI shutdown and reboot
 pub struct AcpiShutdownDevice {
@@ -36,7 +36,7 @@ impl BusDevice for AcpiShutdownDevice {
         }
     }
 
-    fn write(&mut self, _base: u64, _offset: u64, data: &[u8]) {
+    fn write(&mut self, _base: u64, _offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         if data[0] == 1 {
             debug!("ACPI Reboot signalled");
             if let Err(e) = self.reset_evt.write(1) {
@@ -54,13 +54,14 @@ impl BusDevice for AcpiShutdownDevice {
                 error!("Error triggering ACPI shutdown event: {}", e);
             }
         }
+        None
     }
 }
 
 /// A device for handling ACPI GED event generation
 pub struct AcpiGEDDevice {
     interrupt: Arc<Box<dyn InterruptSourceGroup>>,
-    notification_type: HotPlugNotificationFlags,
+    notification_type: AcpiNotificationFlags,
     ged_irq: u32,
 }
 
@@ -68,14 +69,14 @@ impl AcpiGEDDevice {
     pub fn new(interrupt: Arc<Box<dyn InterruptSourceGroup>>, ged_irq: u32) -> AcpiGEDDevice {
         AcpiGEDDevice {
             interrupt,
-            notification_type: HotPlugNotificationFlags::NO_DEVICES_CHANGED,
+            notification_type: AcpiNotificationFlags::NO_DEVICES_CHANGED,
             ged_irq,
         }
     }
 
     pub fn notify(
         &mut self,
-        notification_type: HotPlugNotificationFlags,
+        notification_type: AcpiNotificationFlags,
     ) -> Result<(), std::io::Error> {
         self.notification_type |= notification_type;
         self.interrupt.trigger(0)
@@ -91,10 +92,8 @@ impl BusDevice for AcpiGEDDevice {
     // Spec has all fields as zero
     fn read(&mut self, _base: u64, _offset: u64, data: &mut [u8]) {
         data[0] = self.notification_type.bits();
-        self.notification_type = HotPlugNotificationFlags::NO_DEVICES_CHANGED;
+        self.notification_type = AcpiNotificationFlags::NO_DEVICES_CHANGED;
     }
-
-    fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) {}
 }
 
 #[cfg(feature = "acpi")]
@@ -143,6 +142,14 @@ impl Aml for AcpiGEDDevice {
                             &aml::Equal::new(&aml::Local(1), &4usize),
                             vec![&aml::MethodCall::new("\\_SB_.PCI0.PCNT".into(), vec![])],
                         ),
+                        &aml::And::new(&aml::Local(1), &aml::Local(0), &8usize),
+                        &aml::If::new(
+                            &aml::Equal::new(&aml::Local(1), &8usize),
+                            vec![&aml::Notify::new(
+                                &aml::Path::new("\\_SB_.PWRB"),
+                                &0x80usize,
+                            )],
+                        ),
                     ],
                 ),
             ],
@@ -183,6 +190,4 @@ impl BusDevice for AcpiPMTimerDevice {
 
         data.copy_from_slice(&counter.to_le_bytes());
     }
-
-    fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) {}
 }

@@ -18,13 +18,13 @@ use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
 use net_util::{
-    open_tap, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TxVirtio,
+    open_tap, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TapError, TxVirtio,
 };
 use seccomp::{SeccompAction, SeccompFilter};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::num::Wrapping;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -50,6 +50,9 @@ pub const RX_TAP_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 pub enum Error {
     /// Failed to open taps.
     OpenTap(OpenTapError),
+
+    // Using existing tap
+    TapError(TapError),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -91,9 +94,9 @@ impl NetEpollHandler {
             || !self.driver_awake
         {
             self.signal_used_queue(&self.queue_pair[0])?;
-            info!("Signalling RX queue");
+            debug!("Signalling RX queue");
         } else {
-            info!("Not signalling RX queue");
+            debug!("Not signalling RX queue");
         }
 
         Ok(())
@@ -111,9 +114,9 @@ impl NetEpollHandler {
             || !self.driver_awake
         {
             self.signal_used_queue(&self.queue_pair[1])?;
-            info!("Signalling TX queue");
+            debug!("Signalling TX queue");
         } else {
-            info!("Not signalling TX queue");
+            debug!("Not signalling TX queue");
         }
         Ok(())
     }
@@ -126,9 +129,9 @@ impl NetEpollHandler {
             || !self.driver_awake
         {
             self.signal_used_queue(&self.queue_pair[0])?;
-            info!("Signalling RX queue");
+            debug!("Signalling RX queue");
         } else {
-            info!("Not signalling RX queue");
+            debug!("Not signalling RX queue");
         }
         Ok(())
     }
@@ -293,6 +296,26 @@ impl Net {
         )
     }
 
+    pub fn from_tap_fd(
+        id: String,
+        fd: RawFd,
+        guest_mac: Option<MacAddr>,
+        iommu: bool,
+        queue_size: u16,
+        seccomp_action: SeccompAction,
+    ) -> Result<Self> {
+        let tap = Tap::from_tap_fd(fd).map_err(Error::TapError)?;
+        Self::new_with_tap(
+            id,
+            vec![tap],
+            guest_mac,
+            iommu,
+            2,
+            queue_size,
+            seccomp_action,
+        )
+    }
+
     fn state(&self) -> NetState {
         NetState {
             avail_features: self.common.avail_features,
@@ -398,7 +421,7 @@ impl VirtioDevice for Net {
                     get_seccomp_filter(&self.seccomp_action, Thread::VirtioNetCtl)
                         .map_err(ActivateError::CreateSeccompFilter)?;
                 thread::Builder::new()
-                    .name("virtio_net_ctl".to_string())
+                    .name(format!("{}_ctrl", self.id))
                     .spawn(move || {
                         if let Err(e) = SeccompFilter::apply(virtio_net_ctl_seccomp_filter) {
                             error!("Error applying seccomp filter: {:?}", e);
@@ -416,7 +439,7 @@ impl VirtioDevice for Net {
             let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
 
             let mut epoll_threads = Vec::new();
-            for _ in 0..taps.len() {
+            for i in 0..taps.len() {
                 let rx = RxVirtio::new();
                 let tx = TxVirtio::new();
                 let rx_tap_listening = false;
@@ -478,7 +501,7 @@ impl VirtioDevice for Net {
                     get_seccomp_filter(&self.seccomp_action, Thread::VirtioNet)
                         .map_err(ActivateError::CreateSeccompFilter)?;
                 thread::Builder::new()
-                    .name("virtio_net".to_string())
+                    .name(format!("{}_qp{}", self.id.clone(), i))
                     .spawn(move || {
                         if let Err(e) = SeccompFilter::apply(virtio_net_seccomp_filter) {
                             error!("Error applying seccomp filter: {:?}", e);
@@ -500,7 +523,7 @@ impl VirtioDevice for Net {
         Err(ActivateError::BadActivate)
     }
 
-    fn reset(&mut self) -> Option<(Arc<dyn VirtioInterrupt>, Vec<EventFd>)> {
+    fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
         self.common.reset()
     }
 

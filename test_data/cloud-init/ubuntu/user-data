@@ -43,7 +43,7 @@ write_files:
         # 1G ram requires 512 pages
         echo 512 | sudo tee /proc/sys/vm/nr_hugepages
         sudo chmod a+rwX /dev/hugepages
-        /mnt/cloud-hypervisor --kernel /mnt/vmlinux --cmdline "console=hvc0 reboot=k panic=1 nomodules i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd root=/dev/vda1 VFIOTAG" --disk path=/mnt/focal-server-cloudimg-amd64-custom.qcow2 path=/mnt/cloudinit.img --cpus boot=1 --memory size=512M,hotplug_size=1G,hugepages=on --device path=/sys/bus/pci/devices/0000:00:06.0/ path=/sys/bus/pci/devices/0000:00:07.0/ --api-socket /tmp/ch_api.sock
+        /mnt/cloud-hypervisor --kernel /mnt/vmlinux --cmdline "console=hvc0 reboot=k panic=1 nomodules i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd root=/dev/vda1 VFIOTAG" --disk path=/mnt/focal-server-cloudimg-amd64-custom-20210106-1.qcow2 path=/mnt/cloudinit.img --cpus boot=1 --memory size=512M,hotplug_size=1G,hugepages=on --device path=/sys/bus/pci/devices/0000:00:06.0/ path=/sys/bus/pci/devices/0000:00:07.0/ --api-socket /tmp/ch_api.sock
 
   -
     path: /etc/systemd/system/notify-booted.service
@@ -56,6 +56,8 @@ write_files:
         [Service]
         Type=simple
         ExecStart=/usr/bin/cloud-hypervisor-notify-booted.sh
+        Restart=on-failure
+        RestartSec=2
 
         [Install]
         WantedBy=multi-user.target
@@ -65,5 +67,6 @@ write_files:
     permissions: 0755
     content: |
         #!/bin/bash
+        set -e
 
         echo -n "@DEFAULT_TCP_LISTENER_MESSAGE" | nc -w0 @HOST_IP @TCP_LISTENER_PORT

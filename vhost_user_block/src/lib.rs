@@ -43,7 +43,7 @@ use vm_memory::{Bytes, GuestMemoryMmap};
 use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
-const SECTOR_SIZE: u64 = (0x01 as u64) << SECTOR_SHIFT;
+const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 const BLK_SIZE: u32 = 512;
 // Current (2020) enterprise SSDs have a latency lower than 30us.
 // Polling for 50us should be enough to cover for the device latency
@@ -218,16 +218,17 @@ impl VhostUserBlkBackend {
         };
 
         let nsectors = (image.lock().unwrap().seek(SeekFrom::End(0)).unwrap() as u64) / SECTOR_SIZE;
-        let mut config = VirtioBlockConfig::default();
-
-        config.capacity = nsectors;
-        config.blk_size = BLK_SIZE;
-        config.size_max = 65535;
-        config.seg_max = 128 - 2;
-        config.min_io_size = 1;
-        config.opt_io_size = 1;
-        config.num_queues = num_queues as u16;
-        config.writeback = 1;
+        let config = VirtioBlockConfig {
+            capacity: nsectors,
+            blk_size: BLK_SIZE,
+            size_max: 65535,
+            seg_max: 128 - 2,
+            min_io_size: 1,
+            opt_io_size: 1,
+            num_queues: num_queues as u16,
+            writeback: 1,
+            ..Default::default()
+        };
 
         let mut queues_per_thread = Vec::new();
         let mut threads = Vec::new();
