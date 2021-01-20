@@ -4,6 +4,9 @@
 //
 
 use crate::arch::emulator::{PlatformEmulator, PlatformError};
+
+use thiserror::Error;
+
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::emulator::{Emulator, EmulatorCpuState};
 use crate::cpu;
@@ -11,7 +14,9 @@ use crate::cpu::Vcpu;
 use crate::hypervisor;
 use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, InterruptRequest, Mshv, VcpuFd, VmFd};
+use mshv_ioctls::{set_registers_64, InterruptRequest, NoDatamatch, Mshv, VcpuFd, VmFd};
+pub use mshv_ioctls::IoEventAddress;
+
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
@@ -24,13 +29,10 @@ use vmm_sys_util::eventfd::EventFd;
 pub use x86_64::VcpuMshvState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
-// Wei: for emulating irqfd and ioeventfd
+
 use std::collections::HashMap;
-use std::fs::File;
-use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Mutex, RwLock};
-use std::thread;
+use std::os::unix::io::AsRawFd;
+use std::sync::RwLock;
 
 pub const PAGE_SHIFT: usize = 12;
 
@@ -40,195 +42,6 @@ pub struct HvState {
 }
 
 pub use HvState as VmState;
-
-struct IrqfdCtrlEpollHandler {
-    vm_fd: Arc<VmFd>, /* For issuing hypercall */
-    irqfd: EventFd,   /* Registered by caller */
-    kill: EventFd,    /* Created by us, signal thread exit */
-    epoll_fd: RawFd,  /* epoll fd */
-    gsi: u32,
-    gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
-}
-
-fn register_listener(
-    epoll_fd: RawFd,
-    fd: RawFd,
-    ev_type: epoll::Events,
-    data: u64,
-) -> std::result::Result<(), io::Error> {
-    epoll::ctl(
-        epoll_fd,
-        epoll::ControlOptions::EPOLL_CTL_ADD,
-        fd,
-        epoll::Event::new(ev_type, data),
-    )
-}
-
-const KILL_EVENT: u16 = 1;
-const IRQFD_EVENT: u16 = 2;
-
-impl IrqfdCtrlEpollHandler {
-    fn assert_virtual_interrupt(&self, e: &MshvIrqRoutingEntry) -> vm::Result<()> {
-        // GSI routing contains MSI information.
-        // We still need to translate that to APIC ID etc
-
-        debug!("Inject {:x?}", e);
-
-        let MshvIrqRouting::Msi(msi) = e.route;
-
-        /* Make an assumption here ... */
-        if msi.address_hi != 0 {
-            panic!("MSI high address part is not zero");
-        }
-
-        let typ = self
-            .get_interrupt_type(self.get_delivery_mode(msi.data))
-            .unwrap();
-        let apic_id = self.get_destination(msi.address_lo);
-        let vector = self.get_vector(msi.data);
-        let level_triggered = self.get_trigger_mode(msi.data);
-        let logical_destination_mode = self.get_destination_mode(msi.address_lo);
-
-        debug!(
-            "{:x} {:x} {:x} {} {}",
-            typ, apic_id, vector, level_triggered, logical_destination_mode
-        );
-
-        let request: InterruptRequest = InterruptRequest {
-            interrupt_type: typ,
-            apic_id,
-            vector: vector.into(),
-            level_triggered,
-            logical_destination_mode,
-            long_mode: false,
-        };
-
-        self.vm_fd
-            .request_virtual_interrupt(&request)
-            .map_err(|e| vm::HypervisorVmError::AsserttVirtualInterrupt(e.into()))?;
-
-        Ok(())
-    }
-    fn run_ctrl(&mut self) {
-        self.epoll_fd = epoll::create(true).unwrap();
-        let epoll_file = unsafe { File::from_raw_fd(self.epoll_fd) };
-
-        register_listener(
-            epoll_file.as_raw_fd(),
-            self.kill.as_raw_fd(),
-            epoll::Events::EPOLLIN,
-            u64::from(KILL_EVENT),
-        )
-        .unwrap_or_else(|err| {
-            info!(
-                "IrqfdCtrlEpollHandler: failed to register listener: {:?}",
-                err
-            );
-        });
-
-        register_listener(
-            epoll_file.as_raw_fd(),
-            self.irqfd.as_raw_fd(),
-            epoll::Events::EPOLLIN,
-            u64::from(IRQFD_EVENT),
-        )
-        .unwrap_or_else(|err| {
-            info!(
-                "IrqfdCtrlEpollHandler: failed to register listener: {:?}",
-                err
-            );
-        });
-
-        let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 2];
-
-        'epoll: loop {
-            let num_events = match epoll::wait(epoll_file.as_raw_fd(), -1, &mut events[..]) {
-                Ok(res) => res,
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    panic!("irqfd epoll ???");
-                }
-            };
-
-            for event in events.iter().take(num_events) {
-                let ev_type = event.data as u16;
-
-                match ev_type {
-                    KILL_EVENT => {
-                        break 'epoll;
-                    }
-                    IRQFD_EVENT => {
-                        debug!("IRQFD_EVENT received, inject to guest");
-                        let _ = self.irqfd.read().unwrap();
-                        let gsi_routes = self.gsi_routes.read().unwrap();
-
-                        if let Some(e) = gsi_routes.get(&self.gsi) {
-                            self.assert_virtual_interrupt(&e).unwrap();
-                        } else {
-                            debug!("No routing info found for GSI {}", self.gsi);
-                        }
-                    }
-                    _ => {
-                        error!("Unknown event");
-                    }
-                }
-            }
-        }
-    }
-
-    ///
-    /// See Intel SDM vol3 10.11.1
-    /// We assume APIC ID and Hyper-V Vcpu ID are the same value
-    ///
-
-    fn get_destination(&self, message_address: u32) -> u64 {
-        ((message_address >> 12) & 0xff).into()
-    }
-
-    fn get_destination_mode(&self, message_address: u32) -> bool {
-        if (message_address >> 2) & 0x1 == 0x1 {
-            return true;
-        }
-
-        false
-    }
-
-    fn get_vector(&self, message_data: u32) -> u8 {
-        (message_data & 0xff) as u8
-    }
-
-    ///
-    ///  True means level triggered
-    ///
-    fn get_trigger_mode(&self, message_data: u32) -> bool {
-        if (message_data >> 15) & 0x1 == 0x1 {
-            return true;
-        }
-
-        false
-    }
-
-    fn get_delivery_mode(&self, message_data: u32) -> u8 {
-        ((message_data & 0x700) >> 8) as u8
-    }
-    ///
-    ///  Translate from architectural defined delivery mode to Hyper-V type
-    /// See Intel SDM vol3 10.11.2
-    ///
-    fn get_interrupt_type(&self, delivery_mode: u8) -> Option<hv_interrupt_type> {
-        match delivery_mode {
-            0 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_FIXED),
-            1 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_LOWESTPRIORITY),
-            2 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_SMI),
-            4 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_NMI),
-            5 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_INIT),
-            7 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT),
-            _ => None,
-        }
-    }
-}
 
 /// Wrapper over mshv system ioctls.
 pub struct MshvHypervisor {
@@ -289,15 +102,11 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         }
         let vm_fd = Arc::new(fd);
 
-        let irqfds = Mutex::new(HashMap::new());
-        let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
         let gsi_routes = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(MshvVm {
             fd: vm_fd,
             msrs,
-            irqfds,
-            ioeventfds,
             gsi_routes,
             hv_state: hv_state_init(),
             vmmops: None,
@@ -360,7 +169,6 @@ pub struct MshvVcpu {
     vp_index: u8,
     cpuid: CpuId,
     msrs: MsrEntries,
-    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
     vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
@@ -763,19 +571,6 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             gpa
         );
 
-        if let Some((datamatch, efd)) = self
-            .vcpu
-            .ioeventfds
-            .read()
-            .unwrap()
-            .get(&IoEventAddress::Mmio(gpa))
-        {
-            debug!("ioevent {:x} {:x?} {}", gpa, datamatch, efd.as_raw_fd());
-
-            /* TODO: use datamatch to provide the correct semantics */
-            efd.write(1).unwrap();
-        }
-
         if let Some(vmmops) = &self.vcpu.vmmops {
             vmmops
                 .mmio_write(gpa, data)
@@ -844,10 +639,6 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
 pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: MsrEntries,
-    // Emulate irqfd
-    irqfds: Mutex<HashMap<u32, (EventFd, EventFd)>>,
-    // Emulate ioeventfd
-    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
     // GSI routing information
     gsi_routes: Arc<RwLock<HashMap<u32, MshvIrqRoutingEntry>>>,
     // Hypervisor State
@@ -888,36 +679,32 @@ impl vm::Vm for MshvVm {
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
-        let dup_fd = fd.try_clone().unwrap();
-        let kill_fd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
-
-        let mut ctrl_handler = IrqfdCtrlEpollHandler {
-            vm_fd: self.fd.clone(),
-            kill: kill_fd.try_clone().unwrap(),
-            irqfd: fd.try_clone().unwrap(),
-            epoll_fd: 0,
-            gsi,
-            gsi_routes: self.gsi_routes.clone(),
-        };
-
         debug!("register_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
 
-        thread::Builder::new()
-            .name(format!("irqfd_{}", gsi))
-            .spawn(move || ctrl_handler.run_ctrl())
-            .unwrap();
+        let gsi_routes = self.gsi_routes.read().unwrap();
 
-        self.irqfds.lock().unwrap().insert(gsi, (dup_fd, kill_fd));
+        if let Some(e) = gsi_routes.get(&gsi) {
+            let msi = e.get_msi_routing()
+            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
+            let request = msi.to_interrupt_request();
+            self.fd
+            .register_irqfd(&fd, gsi, &request)
+            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
+        } else {
+            error!("No routing info found for GSI {}", gsi)
+        }
 
         Ok(())
     }
     ///
     /// Unregisters an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn unregister_irqfd(&self, _fd: &EventFd, gsi: u32) -> vm::Result<()> {
-        debug!("unregister_irqfd fd {} gsi {}", _fd.as_raw_fd(), gsi);
-        let (_, kill_fd) = self.irqfds.lock().unwrap().remove(&gsi).unwrap();
-        kill_fd.write(1).unwrap();
+    fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
+        debug!("unregister_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
+
+        self.fd.unregister_irqfd(&fd, gsi)
+            .map_err(|e| vm::HypervisorVmError::UnregisterIrqFd(e.into()))?;
+
         Ok(())
     }
     ///
@@ -937,7 +724,6 @@ impl vm::Vm for MshvVm {
             vp_index: id,
             cpuid: CpuId::new(1),
             msrs: self.msrs.clone(),
-            ioeventfds: self.ioeventfds.clone(),
             gsi_routes: self.gsi_routes.clone(),
             hv_state: self.hv_state.clone(),
             vmmops,
@@ -954,26 +740,36 @@ impl vm::Vm for MshvVm {
         addr: &IoEventAddress,
         datamatch: Option<DataMatch>,
     ) -> vm::Result<()> {
-        let dup_fd = fd.try_clone().unwrap();
-
         debug!(
             "register_ioevent fd {} addr {:x?} datamatch {:?}",
             fd.as_raw_fd(),
             addr,
             datamatch
         );
-
-        self.ioeventfds
-            .write()
-            .unwrap()
-            .insert(*addr, (datamatch, dup_fd));
-        Ok(())
+        if let Some(dm) = datamatch {
+            match dm {
+                vm::DataMatch::DataMatch32(mshv_dm32) => self
+                    .fd
+                    .register_ioevent(fd, addr, mshv_dm32)
+                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+                vm::DataMatch::DataMatch64(mshv_dm64) => self
+                    .fd
+                    .register_ioevent(fd, addr, mshv_dm64)
+                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+            }
+        } else {
+            self.fd
+                .register_ioevent(fd, addr, NoDatamatch)
+                .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
+        }
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
         debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
-        self.ioeventfds.write().unwrap().remove(addr).unwrap();
-        Ok(())
+
+        self.fd
+            .unregister_ioevent(fd, addr, NoDatamatch)
+            .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
     }
 
     /// Creates/modifies a guest physical memory slot.
@@ -1060,11 +856,92 @@ pub enum MshvIrqRouting {
     Msi(MshvIrqRoutingMsi),
 }
 
+#[derive(Error, Debug)]
+pub enum MshvIrqRoutingEntryError {
+    #[error("Invalid MSI address: {0}")]
+    InvalidMsiAddress(#[source] anyhow::Error),
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct MshvIrqRoutingEntry {
     pub gsi: u32,
     pub route: MshvIrqRouting,
 }
 pub type IrqRoutingEntry = MshvIrqRoutingEntry;
+
+impl MshvIrqRoutingEntry {
+    fn get_msi_routing(&self) -> Result<MshvIrqRoutingMsi, MshvIrqRoutingEntryError> {
+        let MshvIrqRouting::Msi(msi) = self.route;
+        if msi.address_hi != 0 {
+            return Err(MshvIrqRoutingEntryError::InvalidMsiAddress(anyhow!(
+                       "MSI high address part is not zero"
+                   )));
+        }
+        Ok(msi)
+    }
+}
+
+impl MshvIrqRoutingMsi {
+    ///
+    /// See Intel SDM vol3 10.11.1
+    /// We assume APIC ID and Hyper-V Vcpu ID are the same value
+    ///
+
+    fn get_destination(&self) -> u64 {
+        ((self.address_lo >> 12) & 0xff).into()
+    }
+
+    fn get_destination_mode(&self) -> bool {
+        if (self.address_lo >> 2) & 0x1 == 0x1 {
+            return true;
+        }
+        false
+    }
+
+    fn get_vector(&self) -> u8 {
+        (self.data & 0xff) as u8
+    }
+
+    ///
+    ///  True means level triggered
+    ///
+    fn get_trigger_mode(&self) -> bool {
+        if (self.data >> 15) & 0x1 == 0x1 {
+            return true;
+        }
+        false
+    }
+
+    fn get_delivery_mode(&self) -> u8 {
+        ((self.data & 0x700) >> 8) as u8
+    }
+
+    ///
+    ///  Translate from architectural defined delivery mode to Hyper-V type
+    /// See Intel SDM vol3 10.11.2
+    ///
+    fn get_interrupt_type(&self) -> Option<hv_interrupt_type> {
+        match self.get_delivery_mode() {
+            0 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_FIXED),
+            1 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_LOWESTPRIORITY),
+            2 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_SMI),
+            4 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_NMI),
+            5 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_INIT),
+            7 => Some(hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT),
+            _ => None,
+        }
+    }
+
+    pub fn to_interrupt_request(&self) -> InterruptRequest {
+        InterruptRequest {
+            interrupt_type: self.get_interrupt_type().unwrap(),
+            apic_id: self.get_destination(),
+            vector: self.get_vector() as u32,
+            level_triggered: self.get_trigger_mode(),
+            logical_destination_mode: self.get_destination_mode(),
+            long_mode: false
+        }
+    }
+}
 
 pub const CPUID_FLAG_VALID_INDEX: u32 = 0;
