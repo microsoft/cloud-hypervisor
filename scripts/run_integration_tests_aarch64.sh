@@ -186,8 +186,8 @@ if [[ "$hypervisor" = "mshv" ]]; then
     exit 1
 fi
 
-features_build="--no-default-features --features kvm "
-features_test="--no-default-features --features integration_tests,kvm"
+features_build="--no-default-features --features $hypervisor "
+features_test="--no-default-features --features integration_tests,$hypervisor"
 
 # lock the workloads folder to avoid parallel updating by different containers
 (

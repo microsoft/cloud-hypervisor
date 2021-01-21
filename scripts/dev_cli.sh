@@ -208,7 +208,7 @@ cmd_build() {
     libc="gnu"
     hypervisor="kvm"
     features_build=""
-
+    exported_device="/dev/kvm"
     while [ $# -gt 0 ]; do
 	case "$1" in
             "-h"|"--help")  { cmd_help; exit 1; } ;;
@@ -239,14 +239,16 @@ cmd_build() {
     if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
     fi
-
+    if [[ "$hypervisor" = "mshv" ]]; then
+        exported_device="/dev/mshv"
+    fi
     target="$(uname -m)-unknown-linux-${libc}"
 
     cargo_args=("$@")
     [ $build = "release" ] && cargo_args+=("--release")
     cargo_args+=(--target "$target")
     [ $(uname -m) = "aarch64" ] && cargo_args+=("--no-default-features")
-    [ $(uname -m) = "aarch64" ] && cargo_args+=(--features "kvm")
+    [ $(uname -m) = "aarch64" ] && cargo_args+=(--features $hypervisor)
 
     rustflags=""
     if [ $(uname -m) = "aarch64" ] && [ $libc = "musl" ] ; then
@@ -257,7 +259,7 @@ cmd_build() {
 	   --user "$(id -u):$(id -g)" \
 	   --workdir "$CTR_CLH_ROOT_DIR" \
 	   --rm \
-	   --volume /dev:/dev \
+	   --volume $exported_device \
 	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
 	   --env RUSTFLAGS="$rustflags" \
 	   "$CTR_IMAGE" \
@@ -289,6 +291,7 @@ cmd_tests() {
     libc="gnu"
     arg_vols=""
     hypervisor="kvm"
+    exported_device="/dev/kvm"
     while [ $# -gt 0 ]; do
 	case "$1" in
             "-h"|"--help")           { cmd_help; exit 1; } ;;
@@ -322,6 +325,9 @@ cmd_tests() {
     if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
     fi
+    if [[ "$hypervisor" = "mshv" ]]; then
+        exported_device="/dev/mshv"
+    fi
     set -- "$@" '--hypervisor' $hypervisor
 
     process_volumes_args
@@ -333,12 +339,12 @@ cmd_tests() {
 	cflags="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
     fi
 
-    if [[ "$unit" = true && $hypervisor = "kvm" ]] ;  then
+    if [[ "$unit" = true  ]] ;  then
 	say "Running unit tests for $target..."
 	$DOCKER_RUNTIME run \
 	       --workdir "$CTR_CLH_ROOT_DIR" \
 	       --rm \
-	       --device /dev/kvm \
+	       --device $exported_device \
 	       --device /dev/net/tun \
 	       --cap-add net_admin \
 	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
