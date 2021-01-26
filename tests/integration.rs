@@ -2606,6 +2606,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_power_button() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3163,11 +3164,13 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_multiple_queues() {
             test_vhost_user_net(None, 4, Some(&prepare_vhost_user_net_daemon), false)
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_tap_multiple_queues() {
             test_vhost_user_net(
                 Some("vunet-tap1"),
@@ -3458,6 +3461,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         fn test_serial_off() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -4349,6 +4353,7 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
         // This test validates that it can find the virtio-iommu device at first.
         // It also verifies that both disks and the network card are attached to
         // the virtual IOMMU by looking at /sys/kernel/iommu_groups directory.
@@ -5763,6 +5768,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_tap_from_fd() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
