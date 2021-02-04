@@ -4,7 +4,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 //
-// Copyright © 2019 Intel Corporation
+// Copyright © 2020 Intel Corporation
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
@@ -16,20 +16,21 @@ use super::{
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
-use block_util::{build_disk_image_id, Request, RequestType, VirtioBlockConfig};
+use block_util::{
+    async_io::AsyncIo, async_io::AsyncIoError, async_io::DiskFile, build_disk_image_id, Request,
+    RequestType, VirtioBlockConfig,
+};
 use seccomp::{SeccompAction, SeccompFilter};
 use std::collections::HashMap;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io;
 use std::num::Wrapping;
-use std::ops::DerefMut;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use virtio_bindings::bindings::virtio_blk::*;
-use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{
     ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryError,
     GuestMemoryMmap,
@@ -45,6 +46,8 @@ pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
 
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
+// New completed tasks are pending on the completion ring.
+const COMPLETION_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 
 #[derive(Debug)]
 pub enum Error {
@@ -64,10 +67,21 @@ pub enum Error {
     GetFileMetadata,
     /// The requested operation would cause a seek beyond disk end.
     InvalidOffset,
+    /// Unsupported operation on the disk.
+    Unsupported(u32),
+    /// Failed to parse the request.
+    RequestParsing(block_util::Error),
+    /// Failed to execute the request.
+    RequestExecuting(block_util::ExecuteError),
+    /// Missing the expected entry in the list of requests.
+    MissingEntryRequestList,
+    /// The asynchronous request returned with failure.
+    AsyncRequestFailure,
+    /// Failed synchronizing the file
+    Fsync(AsyncIoError),
 }
 
-pub trait DiskFile: Read + Seek + Write + Clone {}
-impl<D: Read + Seek + Write + Clone> DiskFile for D {}
+pub type Result<T> = result::Result<T, Error>;
 
 #[derive(Default, Clone)]
 pub struct BlockCounters {
@@ -77,23 +91,64 @@ pub struct BlockCounters {
     write_ops: Arc<AtomicU64>,
 }
 
-struct BlockEpollHandler<T: DiskFile> {
+struct BlockEpollHandler {
     queue: Queue,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    disk_image: Arc<Mutex<T>>,
+    disk_image: Box<dyn AsyncIo>,
     disk_nsectors: u64,
     interrupt_cb: Arc<dyn VirtioInterrupt>,
     disk_image_id: Vec<u8>,
     kill_evt: EventFd,
     pause_evt: EventFd,
-    event_idx: bool,
     writeback: Arc<AtomicBool>,
     counters: BlockCounters,
     queue_evt: EventFd,
+    request_list: HashMap<u16, Request>,
 }
 
-impl<T: DiskFile> BlockEpollHandler<T> {
-    fn process_queue(&mut self) -> bool {
+impl BlockEpollHandler {
+    fn process_queue_submit(&mut self) -> Result<bool> {
+        let queue = &mut self.queue;
+        let mem = self.mem.memory();
+
+        let mut used_desc_heads = Vec::new();
+        let mut used_count = 0;
+
+        for avail_desc in queue.iter(&mem) {
+            let mut request = Request::parse(&avail_desc, &mem).map_err(Error::RequestParsing)?;
+            request.set_writeback(self.writeback.load(Ordering::Acquire));
+
+            if request
+                .execute_async(
+                    &mem,
+                    self.disk_nsectors,
+                    self.disk_image.as_mut(),
+                    &self.disk_image_id,
+                    avail_desc.index as u64,
+                )
+                .map_err(Error::RequestExecuting)?
+            {
+                self.request_list.insert(avail_desc.index, request);
+            } else {
+                // We use unwrap because the request parsing process already
+                // checked that the status_addr was valid.
+                mem.write_obj(VIRTIO_BLK_S_OK, request.status_addr).unwrap();
+
+                // If no asynchronous operation has been submitted, we can
+                // simply return the used descriptor.
+                used_desc_heads.push((avail_desc.index, 0));
+                used_count += 1;
+            }
+        }
+
+        for &(desc_index, len) in used_desc_heads.iter() {
+            queue.add_used(&mem, desc_index, len);
+        }
+
+        Ok(used_count > 0)
+    }
+
+    fn process_queue_complete(&mut self) -> Result<bool> {
         let queue = &mut self.queue;
 
         let mut used_desc_heads = Vec::new();
@@ -104,55 +159,48 @@ impl<T: DiskFile> BlockEpollHandler<T> {
         let mut read_ops = Wrapping(0);
         let mut write_ops = Wrapping(0);
 
-        for avail_desc in queue.iter(&mem) {
-            let len;
-            match Request::parse(&avail_desc, &mem) {
-                Ok(mut request) => {
-                    request.set_writeback(self.writeback.load(Ordering::Acquire));
+        let completion_list = self.disk_image.complete();
+        for (user_data, result) in completion_list {
+            let desc_index = user_data as u16;
+            let request = self
+                .request_list
+                .remove(&desc_index)
+                .ok_or(Error::MissingEntryRequestList)?;
 
-                    let mut disk_image_locked = self.disk_image.lock().unwrap();
-                    let mut disk_image = disk_image_locked.deref_mut();
-                    let status = match request.execute(
-                        &mut disk_image,
-                        self.disk_nsectors,
-                        &mem,
-                        &self.disk_image_id,
-                    ) {
-                        Ok(l) => {
-                            len = l;
-                            match request.request_type {
-                                RequestType::In => {
-                                    for (_, data_len) in &request.data_descriptors {
-                                        read_bytes += Wrapping(*data_len as u64);
-                                    }
-                                    read_ops += Wrapping(1);
-                                }
-                                RequestType::Out => {
-                                    for (_, data_len) in &request.data_descriptors {
-                                        write_bytes += Wrapping(*data_len as u64);
-                                    }
-                                    write_ops += Wrapping(1);
-                                }
-                                _ => {}
-                            };
-                            VIRTIO_BLK_S_OK
+            let (status, len) = if result >= 0 {
+                match request.request_type {
+                    RequestType::In => {
+                        for (_, data_len) in &request.data_descriptors {
+                            read_bytes += Wrapping(*data_len as u64);
                         }
-                        Err(e) => {
-                            error!("Failed to execute request: {:?}", e);
-                            len = 1; // We need at least 1 byte for the status.
-                            e.status()
+                        read_ops += Wrapping(1);
+                    }
+                    RequestType::Out => {
+                        if !request.writeback {
+                            self.disk_image.fsync(None).map_err(Error::Fsync)?;
                         }
-                    };
-                    // We use unwrap because the request parsing process already checked that the
-                    // status_addr was valid.
-                    mem.write_obj(status, request.status_addr).unwrap();
+                        for (_, data_len) in &request.data_descriptors {
+                            write_bytes += Wrapping(*data_len as u64);
+                        }
+                        write_ops += Wrapping(1);
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    error!("Failed to parse available descriptor chain: {:?}", e);
-                    len = 0;
-                }
-            }
-            used_desc_heads.push((avail_desc.index, len));
+
+                (VIRTIO_BLK_S_OK, result as u32)
+            } else {
+                error!(
+                    "Request failed: {:?}",
+                    io::Error::from_raw_os_error(-result)
+                );
+                return Err(Error::AsyncRequestFailure);
+            };
+
+            // We use unwrap because the request parsing process already
+            // checked that the status_addr was valid.
+            mem.write_obj(status, request.status_addr).unwrap();
+
+            used_desc_heads.push((desc_index as u16, len));
             used_count += 1;
         }
 
@@ -174,7 +222,7 @@ impl<T: DiskFile> BlockEpollHandler<T> {
             .read_ops
             .fetch_add(read_ops.0, Ordering::AcqRel);
 
-        used_count > 0
+        Ok(used_count > 0)
     }
 
     fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
@@ -186,21 +234,6 @@ impl<T: DiskFile> BlockEpollHandler<T> {
             })
     }
 
-    #[allow(dead_code)]
-    fn update_disk_image(
-        &mut self,
-        mut disk_image: T,
-        disk_path: &PathBuf,
-    ) -> result::Result<(), DeviceError> {
-        self.disk_nsectors = disk_image
-            .seek(SeekFrom::End(0))
-            .map_err(DeviceError::IoError)?
-            / SECTOR_SIZE;
-        self.disk_image_id = build_disk_image_id(disk_path);
-        self.disk_image = Arc::new(Mutex::new(disk_image));
-        Ok(())
-    }
-
     fn run(
         &mut self,
         paused: Arc<AtomicBool>,
@@ -208,13 +241,14 @@ impl<T: DiskFile> BlockEpollHandler<T> {
     ) -> result::Result<(), EpollHelperError> {
         let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
         helper.add_event(self.queue_evt.as_raw_fd(), QUEUE_AVAIL_EVENT)?;
+        helper.add_event(self.disk_image.notifier().as_raw_fd(), COMPLETION_EVENT)?;
         helper.run(paused, paused_sync, self)?;
 
         Ok(())
     }
 }
 
-impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
+impl EpollHelperHandler for BlockEpollHandler {
     fn handle_event(&mut self, _helper: &mut EpollHelper, event: &epoll::Event) -> bool {
         let ev_type = event.data as u16;
         match ev_type {
@@ -222,31 +256,40 @@ impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
                 if let Err(e) = self.queue_evt.read() {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
-                } else if self.event_idx {
-                    // vm-virtio's Queue implementation only checks avail_index
-                    // once, so to properly support EVENT_IDX we need to keep
-                    // calling process_queue() until it stops finding new
-                    // requests on the queue.
-                    loop {
-                        if self.process_queue() {
-                            self.queue.update_avail_event(&self.mem.memory());
+                }
 
-                            if self
-                                .queue
-                                .needs_notification(&self.mem.memory(), self.queue.next_used)
-                            {
-                                if let Err(e) = self.signal_used_queue() {
-                                    error!("Failed to signal used queue: {:?}", e);
-                                    return true;
-                                }
+                match self.process_queue_submit() {
+                    Ok(needs_notification) => {
+                        if needs_notification {
+                            if let Err(e) = self.signal_used_queue() {
+                                error!("Failed to signal used queue: {:?}", e);
+                                return true;
                             }
-                        } else {
-                            break;
                         }
                     }
-                } else if self.process_queue() {
-                    if let Err(e) = self.signal_used_queue() {
-                        error!("Failed to signal used queue: {:?}", e);
+                    Err(e) => {
+                        error!("Failed to process queue (submit): {:?}", e);
+                        return true;
+                    }
+                }
+            }
+            COMPLETION_EVENT => {
+                if let Err(e) = self.disk_image.notifier().read() {
+                    error!("Failed to get queue event: {:?}", e);
+                    return true;
+                }
+
+                match self.process_queue_complete() {
+                    Ok(needs_notification) => {
+                        if needs_notification {
+                            if let Err(e) = self.signal_used_queue() {
+                                error!("Failed to signal used queue: {:?}", e);
+                                return true;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to process queue (complete): {:?}", e);
                         return true;
                     }
                 }
@@ -261,10 +304,10 @@ impl<T: DiskFile> EpollHelperHandler for BlockEpollHandler<T> {
 }
 
 /// Virtio device for exposing block level read/write operations on a host file.
-pub struct Block<T: DiskFile> {
+pub struct Block {
     common: VirtioCommon,
     id: String,
-    disk_image: Arc<Mutex<T>>,
+    disk_image: Box<dyn DiskFile>,
     disk_path: PathBuf,
     disk_nsectors: u64,
     config: VirtioBlockConfig,
@@ -282,22 +325,25 @@ pub struct BlockState {
     pub config: VirtioBlockConfig,
 }
 
-impl<T: DiskFile> Block<T> {
+impl Block {
     /// Create a new virtio block device that operates on the given file.
-    ///
-    /// The given file must be seekable and sizable.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
-        mut disk_image: T,
+        mut disk_image: Box<dyn DiskFile>,
         disk_path: PathBuf,
         is_disk_read_only: bool,
         iommu: bool,
         num_queues: usize,
         queue_size: u16,
         seccomp_action: SeccompAction,
-    ) -> io::Result<Block<T>> {
-        let disk_size = disk_image.seek(SeekFrom::End(0))? as u64;
+    ) -> io::Result<Self> {
+        let disk_size = disk_image.size().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed getting disk size: {}", e),
+            )
+        })?;
         if disk_size % SECTOR_SIZE != 0 {
             warn!(
                 "Disk size {} is not a multiple of sector size {}; \
@@ -308,7 +354,6 @@ impl<T: DiskFile> Block<T> {
 
         let mut avail_features = (1u64 << VIRTIO_F_VERSION_1)
             | (1u64 << VIRTIO_BLK_F_FLUSH)
-            | (1u64 << VIRTIO_RING_F_EVENT_IDX)
             | (1u64 << VIRTIO_BLK_F_CONFIG_WCE);
 
         if iommu {
@@ -337,10 +382,11 @@ impl<T: DiskFile> Block<T> {
                 avail_features,
                 paused_sync: Some(Arc::new(Barrier::new(num_queues + 1))),
                 queue_sizes: vec![queue_size; num_queues],
+                min_queues: 1,
                 ..Default::default()
             },
             id,
-            disk_image: Arc::new(Mutex::new(disk_image)),
+            disk_image,
             disk_path,
             disk_nsectors,
             config,
@@ -391,13 +437,22 @@ impl<T: DiskFile> Block<T> {
     }
 }
 
-impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
+impl Drop for Block {
+    fn drop(&mut self) {
+        if let Some(kill_evt) = self.common.kill_evt.take() {
+            // Ignore the result because there is nothing we can do about it.
+            let _ = kill_evt.write(1);
+        }
+    }
+}
+
+impl VirtioDevice for Block {
     fn device_type(&self) -> u32 {
         self.common.device_type
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        self.common.queue_sizes.as_slice()
+        &self.common.queue_sizes
     }
 
     fn features(&self) -> u64 {
@@ -440,12 +495,13 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
 
         let disk_image_id = build_disk_image_id(&self.disk_path);
-        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
         self.update_writeback();
 
         let mut epoll_threads = Vec::new();
-        for i in 0..self.common.queue_sizes.len() {
+        for i in 0..queues.len() {
             let queue_evt = queue_evts.remove(0);
+            let queue = queues.remove(0);
+            let queue_size = queue.size;
             let kill_evt = self
                 .common
                 .kill_evt
@@ -466,35 +522,40 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
                     error!("failed to clone pause_evt eventfd: {}", e);
                     ActivateError::BadActivate
                 })?;
+
             let mut handler = BlockEpollHandler {
-                queue: queues.remove(0),
+                queue,
                 mem: mem.clone(),
-                disk_image: self.disk_image.clone(),
+                disk_image: self
+                    .disk_image
+                    .new_async_io(queue_size as u32)
+                    .map_err(|e| {
+                        error!("failed to create new AsyncIo: {}", e);
+                        ActivateError::BadActivate
+                    })?,
                 disk_nsectors: self.disk_nsectors,
                 interrupt_cb: interrupt_cb.clone(),
                 disk_image_id: disk_image_id.clone(),
                 kill_evt,
                 pause_evt,
-                event_idx,
                 writeback: self.writeback.clone(),
                 counters: self.counters.clone(),
                 queue_evt,
+                request_list: HashMap::with_capacity(queue_size.into()),
             };
-
-            handler.queue.set_event_idx(event_idx);
 
             let paused = self.common.paused.clone();
             let paused_sync = self.common.paused_sync.clone();
 
-            // Retrieve seccomp filter for virtio_blk thread
-            let virtio_blk_seccomp_filter =
-                get_seccomp_filter(&self.seccomp_action, Thread::VirtioBlk)
+            // Retrieve seccomp filter for virtio_block thread
+            let virtio_block_seccomp_filter =
+                get_seccomp_filter(&self.seccomp_action, Thread::VirtioBlock)
                     .map_err(ActivateError::CreateSeccompFilter)?;
 
             thread::Builder::new()
                 .name(format!("{}_q{}", self.id.clone(), i))
                 .spawn(move || {
-                    if let Err(e) = SeccompFilter::apply(virtio_blk_seccomp_filter) {
+                    if let Err(e) = SeccompFilter::apply(virtio_block_seccomp_filter) {
                         error!("Error applying seccomp filter: {:?}", e);
                     } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                         error!("Error running worker: {:?}", e);
@@ -502,7 +563,7 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
                 })
                 .map(|thread| epoll_threads.push(thread))
                 .map_err(|e| {
-                    error!("failed to clone the virtio-blk epoll thread: {}", e);
+                    error!("failed to clone the virtio-block epoll thread: {}", e);
                     ActivateError::BadActivate
                 })?;
         }
@@ -540,16 +601,7 @@ impl<T: 'static + DiskFile + Send> VirtioDevice for Block<T> {
     }
 }
 
-impl<T: DiskFile> Drop for Block<T> {
-    fn drop(&mut self) {
-        if let Some(kill_evt) = self.common.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
-        }
-    }
-}
-
-impl<T: 'static + DiskFile + Send> Pausable for Block<T> {
+impl Pausable for Block {
     fn pause(&mut self) -> result::Result<(), MigratableError> {
         self.common.pause()
     }
@@ -559,7 +611,7 @@ impl<T: 'static + DiskFile + Send> Pausable for Block<T> {
     }
 }
 
-impl<T: 'static + DiskFile + Send> Snapshottable for Block<T> {
+impl Snapshottable for Block {
     fn id(&self) -> String {
         self.id.clone()
     }
@@ -599,5 +651,5 @@ impl<T: 'static + DiskFile + Send> Snapshottable for Block<T> {
         )))
     }
 }
-impl<T: 'static + DiskFile + Send> Transportable for Block<T> {}
-impl<T: 'static + DiskFile + Send> Migratable for Block<T> {}
+impl Transportable for Block {}
+impl Migratable for Block {}

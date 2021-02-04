@@ -235,6 +235,12 @@ cmd_build() {
 	esac
 	shift
     done
+
+    ensure_build_dir
+    if [ $(uname -m) = "x86_64" ]; then
+	ensure_latest_ctr
+    fi
+
     process_volumes_args
     if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
@@ -270,6 +276,11 @@ cmd_build() {
 
 cmd_clean() {
     cargo_args=("$@")
+
+    ensure_build_dir
+    if [ $(uname -m) = "x86_64" ]; then
+	ensure_latest_ctr
+    fi
 
     $DOCKER_RUNTIME run \
 	   --user "$(id -u):$(id -g)" \
@@ -328,7 +339,15 @@ cmd_tests() {
     if [[ "$hypervisor" = "mshv" ]]; then
         exported_device="/dev/mshv"
     fi
+    if [[ "$hypervisor" = "mshv" ]]; then
+        exported_device="/dev/mshv"
+    fi
     set -- "$@" '--hypervisor' $hypervisor
+
+    ensure_build_dir
+    if [ $(uname -m) = "x86_64" ]; then
+	ensure_latest_ctr
+    fi
 
     process_volumes_args
     target="$(uname -m)-unknown-linux-${libc}"
@@ -439,6 +458,11 @@ cmd_build-container() {
 	shift
     done
 
+    ensure_build_dir
+    if [ $(uname -m) = "x86_64" ]; then
+	ensure_latest_ctr
+    fi
+
     BUILD_DIR=/tmp/cloud-hypervisor/container/
 
     mkdir -p $BUILD_DIR
@@ -456,6 +480,10 @@ cmd_build-container() {
 }
 
 cmd_shell() {
+    ensure_build_dir
+    if [ $(uname -m) = "x86_64" ]; then
+	ensure_latest_ctr
+    fi
     say_warn "Starting a privileged shell prompt as root ..."
     say_warn "WARNING: Your $CLH_ROOT_DIR folder will be bind-mounted in the container under $CTR_CLH_ROOT_DIR"
     $DOCKER_RUNTIME run \
@@ -502,9 +530,5 @@ ok_or_die "Unknown command: $1. Please use \`$0 help\` for help."
 cmd=cmd_$1
 shift
 
-ensure_build_dir
-if [ $(uname -m) = "x86_64" ]; then
-    ensure_latest_ctr
-fi
 
 $cmd "$@"

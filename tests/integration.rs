@@ -96,6 +96,10 @@ mod tests {
     const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-arm64-custom.qcow2";
     #[cfg(target_arch = "x86_64")]
     const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210106-1.qcow2";
+    #[cfg(target_arch = "aarch64")]
+    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-arm64-custom.vhd";
+    #[cfg(target_arch = "x86_64")]
+    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210106-1.vhd";
     #[cfg(target_arch = "x86_64")]
     const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
 
@@ -456,8 +460,8 @@ mod tests {
                 .expect("Expect device mapper nodes to be ready");
 
             self.osdisk_path = format!("/dev/mapper/{}", windows_snapshot);
-            self.windows_snapshot_cow = windows_snapshot_cow.clone();
-            self.windows_snapshot = windows_snapshot.clone();
+            self.windows_snapshot_cow = windows_snapshot_cow;
+            self.windows_snapshot = windows_snapshot;
         }
 
         fn disk(&self, disk_type: DiskType) -> Option<String> {
@@ -3138,6 +3142,31 @@ mod tests {
         }
 
         #[test]
+        fn test_virtio_block_vhd() {
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+
+            let mut raw_file_path = workload_path.clone();
+            let mut vhd_file_path = workload_path;
+            raw_file_path.push(FOCAL_IMAGE_NAME);
+            vhd_file_path.push(FOCAL_IMAGE_NAME_VHD);
+
+            // Generate VHD file from RAW file
+            std::process::Command::new("qemu-img")
+                .arg("convert")
+                .arg("-p")
+                .args(&["-f", "raw"])
+                .args(&["-O", "vpc"])
+                .args(&["-o", "subformat=fixed"])
+                .arg(raw_file_path.to_str().unwrap())
+                .arg(vhd_file_path.to_str().unwrap())
+                .output()
+                .expect("Expect generating VHD image from RAW image");
+
+            _test_virtio_block(FOCAL_IMAGE_NAME_VHD, false)
+        }
+
+        #[test]
         fn test_vhost_user_net_default() {
             test_vhost_user_net(None, 2, Some(&prepare_vhost_user_net_daemon), false)
         }
@@ -5772,43 +5801,37 @@ mod tests {
         fn test_tap_from_fd() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
-
-            std::process::Command::new("bash")
-                .args(&["-c", "sudo ip tuntap add name chtap0 mode tap"])
-                .status()
-                .expect("Expected creating interface to work");
-
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!("sudo ip addr add {}/24 dev chtap0", guest.network.host_ip),
-                ])
-                .status()
-                .expect("Expected programming interface to work");
-
-            std::process::Command::new("bash")
-                .args(&["-c", "sudo ip link set dev chtap0 up"])
-                .status()
-                .expect("Expected upping interface to work");
-
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path().unwrap();
 
-            let tap = net_util::Tap::open_named("chtap0", 1, Some(libc::O_RDWR | libc::O_NONBLOCK))
-                .expect("Expect to be able to open tap");
-            let tap_fd = tap.as_raw_fd();
+            // Create a TAP interface with multi-queue enabled
+            let num_queue_pairs: usize = 2;
+
+            use std::str::FromStr;
+            let taps = net_util::open_tap(
+                Some("chtap0"),
+                Some(std::net::Ipv4Addr::from_str(&guest.network.host_ip).unwrap()),
+                None,
+                &mut None,
+                num_queue_pairs,
+                Some(libc::O_RDWR | libc::O_NONBLOCK),
+            )
+            .unwrap();
 
             let mut child = GuestCommand::new(&guest)
-                .args(&["--cpus", "boot=1"])
+                .args(&["--cpus", &format!("boot={}", num_queue_pairs)])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .args(&[
                     "--net",
-                    &format!("fd={},mac={}", tap_fd, guest.network.guest_mac),
+                    &format!(
+                        "fd={}:{},mac={},num_queues={}",
+                        taps[0].as_raw_fd(),
+                        taps[1].as_raw_fd(),
+                        guest.network.guest_mac,
+                        num_queue_pairs * 2
+                    ),
                 ])
                 .capture_output()
                 .spawn()
@@ -5830,11 +5853,6 @@ mod tests {
 
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
-
-            std::process::Command::new("bash")
-                .args(&["-c", "sudo ip tuntap del mode tap name chtap0"])
-                .status()
-                .expect("Expected upping interface to work");
 
             handle_child_output(r, &output);
         }

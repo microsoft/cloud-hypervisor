@@ -18,6 +18,8 @@ use crate::interrupt::kvm::KvmMsiInterruptManager as MsiInterruptManager;
 #[cfg(feature = "mshv")]
 use crate::interrupt::mshv::MshvMsiInterruptManager as MsiInterruptManager;
 use crate::interrupt::LegacyUserspaceInterruptManager;
+#[cfg(feature = "acpi")]
+use crate::memory_manager::MEMORY_MANAGER_ACPI_SIZE;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "acpi")]
 use crate::vm::NumaNodes;
@@ -36,7 +38,11 @@ use arch::layout;
 use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
-use block_util::block_io_uring_is_supported;
+use block_util::{
+    async_io::DiskFile, block_io_uring_is_supported, detect_image_type,
+    fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
+    raw_async::RawFileDisk, raw_sync::RawFileDiskSync, ImageType,
+};
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
@@ -57,7 +63,6 @@ use pci::{
     DeviceRelocation, PciBarRegionType, PciBus, PciConfigIo, PciConfigMmio, PciDevice, PciRoot,
     VfioPciDevice,
 };
-use qcow::{self, ImageType, QcowFile};
 use seccomp::SeccompAction;
 use std::any::Any;
 use std::collections::HashMap;
@@ -173,7 +178,7 @@ pub enum DeviceManagerError {
     CreateVirtioWatchdog(io::Error),
 
     /// Failed parsing disk image format
-    DetectImageType(qcow::Error),
+    DetectImageType(io::Error),
 
     /// Cannot open qcow disk path
     QcowDeviceCreate(qcow::Error),
@@ -243,6 +248,9 @@ pub enum DeviceManagerError {
 
     /// Failed to allocate IO port
     AllocateIOPort,
+
+    /// Failed to allocate MMIO address
+    AllocateMMIOAddress,
 
     // Failed to make hotplug notification
     HotPlugNotification(io::Error),
@@ -369,10 +377,22 @@ pub enum DeviceManagerError {
 
     /// Failed to do power button notification
     PowerButtonNotification(io::Error),
+
+    /// Failed to set O_DIRECT flag to file descriptor
+    SetDirectIo,
+
+    /// Failed to create FixedVhdDiskAsync
+    CreateFixedVhdDiskAsync(io::Error),
+
+    /// Failed to create FixedVhdDiskSync
+    CreateFixedVhdDiskSync(io::Error),
 }
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
 
 type VirtioDeviceArc = Arc<Mutex<dyn virtio_devices::VirtioDevice>>;
+
+#[cfg(feature = "acpi")]
+const DEVICE_MANAGER_ACPI_SIZE: usize = 0x10;
 
 pub fn get_win_size() -> (u16, u16) {
     #[repr(C)]
@@ -382,7 +402,7 @@ pub fn get_win_size() -> (u16, u16) {
         cols: u16,
         xpixel: u16,
         ypixel: u16,
-    };
+    }
     let ws: WS = WS::default();
 
     unsafe {
@@ -783,6 +803,9 @@ pub struct DeviceManager {
     // Virtio Device activation EventFd to allow the VMM thread to trigger device
     // activation and thus start the threads from the VMM thread
     activate_evt: EventFd,
+
+    #[cfg(feature = "acpi")]
+    acpi_address: GuestAddress,
 }
 
 impl DeviceManager {
@@ -819,6 +842,14 @@ impl DeviceManager {
                 Arc::clone(&address_manager.allocator),
                 vm,
             ));
+
+        #[cfg(feature = "acpi")]
+        let acpi_address = address_manager
+            .allocator
+            .lock()
+            .unwrap()
+            .allocate_mmio_addresses(None, DEVICE_MANAGER_ACPI_SIZE as u64, None)
+            .ok_or(DeviceManagerError::AllocateIOPort)?;
         let device_manager = DeviceManager {
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),
@@ -854,25 +885,19 @@ impl DeviceManager {
             activate_evt: activate_evt
                 .try_clone()
                 .map_err(DeviceManagerError::EventFd)?,
+            #[cfg(feature = "acpi")]
+            acpi_address,
         };
-
-        #[cfg(feature = "acpi")]
-        address_manager
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0xae00)), 0x10, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
 
         let device_manager = Arc::new(Mutex::new(device_manager));
 
         #[cfg(feature = "acpi")]
         address_manager
-            .io_bus
+            .mmio_bus
             .insert(
                 Arc::clone(&device_manager) as Arc<Mutex<dyn BusDevice>>,
-                0xae00,
-                0x10,
+                acpi_address.0,
+                DEVICE_MANAGER_ACPI_SIZE as u64,
             )
             .map_err(DeviceManagerError::BusError)?;
 
@@ -893,22 +918,17 @@ impl DeviceManager {
         )));
 
         #[cfg(feature = "acpi")]
-        self.address_manager
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0x0a00)), 0x18, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
-
-        #[cfg(feature = "acpi")]
-        self.address_manager
-            .io_bus
-            .insert(
-                Arc::clone(&self.memory_manager) as Arc<Mutex<dyn BusDevice>>,
-                0xa00,
-                0x18,
-            )
-            .map_err(DeviceManagerError::BusError)?;
+        {
+            let memory_manager_acpi_address = self.memory_manager.lock().unwrap().acpi_address;
+            self.address_manager
+                .mmio_bus
+                .insert(
+                    Arc::clone(&self.memory_manager) as Arc<Mutex<dyn BusDevice>>,
+                    memory_manager_acpi_address.0,
+                    MEMORY_MANAGER_ACPI_SIZE as u64,
+                )
+                .map_err(DeviceManagerError::BusError)?;
+        }
 
         #[cfg(target_arch = "x86_64")]
         self.add_legacy_devices(
@@ -1183,24 +1203,27 @@ impl DeviceManager {
         reset_evt: EventFd,
         exit_evt: EventFd,
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGEDDevice>>>> {
-        let acpi_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
+        let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
             exit_evt, reset_evt,
         )));
 
         self.bus_devices
-            .push(Arc::clone(&acpi_device) as Arc<Mutex<dyn BusDevice>>);
+            .push(Arc::clone(&shutdown_device) as Arc<Mutex<dyn BusDevice>>);
 
-        self.address_manager
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0x3c0)), 0x8, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.address_manager
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate_io_addresses(Some(GuestAddress(0x3c0)), 0x8, None)
+                .ok_or(DeviceManagerError::AllocateIOPort)?;
 
-        self.address_manager
-            .io_bus
-            .insert(acpi_device, 0x3c0, 0x4)
-            .map_err(DeviceManagerError::BusError)?;
+            self.address_manager
+                .io_bus
+                .insert(shutdown_device, 0x3c0, 0x4)
+                .map_err(DeviceManagerError::BusError)?;
+        }
 
         let ged_irq = self
             .address_manager
@@ -1209,49 +1232,53 @@ impl DeviceManager {
             .unwrap()
             .allocate_irq()
             .unwrap();
-
         let interrupt_group = interrupt_manager
             .create_group(LegacyIrqGroupConfig {
                 irq: ged_irq as InterruptIndex,
             })
             .map_err(DeviceManagerError::CreateInterruptGroup)?;
-
-        let ged_device = Arc::new(Mutex::new(devices::AcpiGEDDevice::new(
-            interrupt_group,
-            ged_irq,
-        )));
-
-        self.bus_devices
-            .push(Arc::clone(&ged_device) as Arc<Mutex<dyn BusDevice>>);
-
-        self.address_manager
+        let ged_address = self
+            .address_manager
             .allocator
             .lock()
             .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0xb000)), 0x1, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
-
+            .allocate_mmio_addresses(None, devices::acpi::GED_DEVICE_ACPI_SIZE as u64, None)
+            .ok_or(DeviceManagerError::AllocateMMIOAddress)?;
+        let ged_device = Arc::new(Mutex::new(devices::AcpiGEDDevice::new(
+            interrupt_group,
+            ged_irq,
+            ged_address,
+        )));
         self.address_manager
-            .io_bus
-            .insert(ged_device.clone(), 0xb000, 0x1)
+            .mmio_bus
+            .insert(
+                ged_device.clone(),
+                ged_address.0,
+                devices::acpi::GED_DEVICE_ACPI_SIZE as u64,
+            )
             .map_err(DeviceManagerError::BusError)?;
+        self.bus_devices
+            .push(Arc::clone(&ged_device) as Arc<Mutex<dyn BusDevice>>);
 
         let pm_timer_device = Arc::new(Mutex::new(devices::AcpiPMTimerDevice::new()));
 
         self.bus_devices
             .push(Arc::clone(&pm_timer_device) as Arc<Mutex<dyn BusDevice>>);
 
-        self.address_manager
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0xb008)), 0x4, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.address_manager
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate_io_addresses(Some(GuestAddress(0xb008)), 0x4, None)
+                .ok_or(DeviceManagerError::AllocateIOPort)?;
 
-        self.address_manager
-            .io_bus
-            .insert(pm_timer_device, 0xb008, 0x4)
-            .map_err(DeviceManagerError::BusError)?;
+            self.address_manager
+                .io_bus
+                .insert(pm_timer_device, 0xb008, 0x4)
+                .map_err(DeviceManagerError::BusError)?;
+        }
 
         Ok(Some(ged_device))
     }
@@ -1627,7 +1654,7 @@ impl DeviceManager {
                 options.custom_flags(libc::O_DIRECT);
             }
             // Open block device path
-            let image: File = options
+            let mut file: File = options
                 .open(
                     disk_cfg
                         .path
@@ -1637,89 +1664,65 @@ impl DeviceManager {
                 )
                 .map_err(DeviceManagerError::Disk)?;
 
-            let mut raw_img = qcow::RawFile::new(image.try_clone().unwrap(), disk_cfg.direct);
+            let image_type =
+                detect_image_type(&mut file).map_err(DeviceManagerError::DetectImageType)?;
 
-            let image_type = qcow::detect_image_type(&mut raw_img)
-                .map_err(DeviceManagerError::DetectImageType)?;
-            let (virtio_device, migratable_device) = match image_type {
+            let image = match image_type {
+                ImageType::FixedVhd => {
+                    // Use asynchronous backend relying on io_uring if the
+                    // syscalls are supported.
+                    if block_io_uring_is_supported() && !disk_cfg.disable_io_uring {
+                        info!("Using asynchronous fixed VHD disk file (io_uring)");
+                        Box::new(
+                            FixedVhdDiskAsync::new(file)
+                                .map_err(DeviceManagerError::CreateFixedVhdDiskAsync)?,
+                        ) as Box<dyn DiskFile>
+                    } else {
+                        info!("Using synchronous fixed VHD disk file");
+                        Box::new(
+                            FixedVhdDiskSync::new(file)
+                                .map_err(DeviceManagerError::CreateFixedVhdDiskSync)?,
+                        ) as Box<dyn DiskFile>
+                    }
+                }
                 ImageType::Raw => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
                     if block_io_uring_is_supported() && !disk_cfg.disable_io_uring {
-                        let dev = Arc::new(Mutex::new(
-                            virtio_devices::BlockIoUring::new(
-                                id.clone(),
-                                image,
-                                disk_cfg
-                                    .path
-                                    .as_ref()
-                                    .ok_or(DeviceManagerError::NoDiskPath)?
-                                    .clone(),
-                                disk_cfg.readonly,
-                                disk_cfg.iommu,
-                                disk_cfg.num_queues,
-                                disk_cfg.queue_size,
-                                self.seccomp_action.clone(),
-                            )
-                            .map_err(DeviceManagerError::CreateVirtioBlock)?,
-                        ));
-
-                        (
-                            Arc::clone(&dev) as VirtioDeviceArc,
-                            dev as Arc<Mutex<dyn Migratable>>,
-                        )
+                        info!("Using asynchronous RAW disk file (io_uring)");
+                        Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
                     } else {
-                        let dev = Arc::new(Mutex::new(
-                            virtio_devices::Block::new(
-                                id.clone(),
-                                raw_img,
-                                disk_cfg
-                                    .path
-                                    .as_ref()
-                                    .ok_or(DeviceManagerError::NoDiskPath)?
-                                    .clone(),
-                                disk_cfg.readonly,
-                                disk_cfg.iommu,
-                                disk_cfg.num_queues,
-                                disk_cfg.queue_size,
-                                self.seccomp_action.clone(),
-                            )
-                            .map_err(DeviceManagerError::CreateVirtioBlock)?,
-                        ));
-
-                        (
-                            Arc::clone(&dev) as VirtioDeviceArc,
-                            dev as Arc<Mutex<dyn Migratable>>,
-                        )
+                        info!("Using synchronous RAW disk file");
+                        Box::new(RawFileDiskSync::new(file)) as Box<dyn DiskFile>
                     }
                 }
                 ImageType::Qcow2 => {
-                    let qcow_img =
-                        QcowFile::from(raw_img).map_err(DeviceManagerError::QcowDeviceCreate)?;
-                    let dev = Arc::new(Mutex::new(
-                        virtio_devices::Block::new(
-                            id.clone(),
-                            qcow_img,
-                            disk_cfg
-                                .path
-                                .as_ref()
-                                .ok_or(DeviceManagerError::NoDiskPath)?
-                                .clone(),
-                            disk_cfg.readonly,
-                            disk_cfg.iommu,
-                            disk_cfg.num_queues,
-                            disk_cfg.queue_size,
-                            self.seccomp_action.clone(),
-                        )
-                        .map_err(DeviceManagerError::CreateVirtioBlock)?,
-                    ));
-
-                    (
-                        Arc::clone(&dev) as VirtioDeviceArc,
-                        dev as Arc<Mutex<dyn Migratable>>,
-                    )
+                    info!("Using synchronous QCOW disk file");
+                    Box::new(QcowDiskSync::new(file, disk_cfg.direct)) as Box<dyn DiskFile>
                 }
             };
+
+            let dev = Arc::new(Mutex::new(
+                virtio_devices::Block::new(
+                    id.clone(),
+                    image,
+                    disk_cfg
+                        .path
+                        .as_ref()
+                        .ok_or(DeviceManagerError::NoDiskPath)?
+                        .clone(),
+                    disk_cfg.readonly,
+                    disk_cfg.iommu,
+                    disk_cfg.num_queues,
+                    disk_cfg.queue_size,
+                    self.seccomp_action.clone(),
+                )
+                .map_err(DeviceManagerError::CreateVirtioBlock)?,
+            ));
+
+            let virtio_device = Arc::clone(&dev) as VirtioDeviceArc;
+            let migratable_device = dev as Arc<Mutex<dyn Migratable>>;
+
             // Fill the device tree with a new node. In case of restore, we
             // know there is nothing to do, so we can simply override the
             // existing entry.
@@ -1811,11 +1814,11 @@ impl DeviceManager {
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
-            } else if let Some(fd) = net_cfg.fd {
+            } else if let Some(fds) = &net_cfg.fds {
                 Arc::new(Mutex::new(
-                    virtio_devices::Net::from_tap_fd(
+                    virtio_devices::Net::from_tap_fds(
                         id.clone(),
-                        fd,
+                        fds,
                         Some(net_cfg.mac),
                         net_cfg.iommu,
                         net_cfg.queue_size,
@@ -3182,14 +3185,13 @@ impl DeviceManager {
 
     #[cfg(feature = "acpi")]
     pub fn notify_power_button(&self) -> DeviceManagerResult<()> {
-        return self
-            .ged_notification_device
+        self.ged_notification_device
             .as_ref()
             .unwrap()
             .lock()
             .unwrap()
             .notify(AcpiNotificationFlags::POWER_BUTTON_CHANGED)
-            .map_err(DeviceManagerError::PowerButtonNotification);
+            .map_err(DeviceManagerError::PowerButtonNotification)
     }
 }
 
@@ -3313,15 +3315,22 @@ impl Aml for DeviceManager {
                     &aml::Name::new("_STA".into(), &0x0bu8),
                     &aml::Name::new("_UID".into(), &"PCI Hotplug Controller"),
                     &aml::Mutex::new("BLCK".into(), 0),
-                    // I/O port for PCI hotplug controller
                     &aml::Name::new(
                         "_CRS".into(),
-                        &aml::ResourceTemplate::new(vec![&aml::IO::new(
-                            0xae00, 0xae00, 0x01, 0x10,
+                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                            aml::AddressSpaceCachable::NotCacheable,
+                            true,
+                            self.acpi_address.0 as u64,
+                            self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
                         )]),
                     ),
-                    // OpRegion and Fields map I/O port into individual field values
-                    &aml::OpRegion::new("PCST".into(), aml::OpRegionSpace::SystemIO, 0xae00, 0x10),
+                    // OpRegion and Fields map MMIO range into individual field values
+                    &aml::OpRegion::new(
+                        "PCST".into(),
+                        aml::OpRegionSpace::SystemMemory,
+                        self.acpi_address.0 as usize,
+                        DEVICE_MANAGER_ACPI_SIZE,
+                    ),
                     &aml::Field::new(
                         "PCST".into(),
                         aml::FieldAccessType::DWord,

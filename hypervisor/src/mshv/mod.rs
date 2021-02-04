@@ -14,9 +14,8 @@ use crate::cpu::Vcpu;
 use crate::hypervisor;
 use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, InterruptRequest, NoDatamatch, Mshv, VcpuFd, VmFd};
 pub use mshv_ioctls::IoEventAddress;
-
+use mshv_ioctls::{set_registers_64, InterruptRequest, Mshv, NoDatamatch, VcpuFd, VmFd};
 use serde_derive::{Deserialize, Serialize};
 use std::sync::Arc;
 use vm::DataMatch;
@@ -684,12 +683,13 @@ impl vm::Vm for MshvVm {
         let gsi_routes = self.gsi_routes.read().unwrap();
 
         if let Some(e) = gsi_routes.get(&gsi) {
-            let msi = e.get_msi_routing()
-            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
+            let msi = e
+                .get_msi_routing()
+                .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
             let request = msi.to_interrupt_request();
             self.fd
-            .register_irqfd(&fd, gsi, &request)
-            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
+                .register_irqfd(&fd, gsi, &request)
+                .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
         } else {
             error!("No routing info found for GSI {}", gsi)
         }
@@ -702,7 +702,8 @@ impl vm::Vm for MshvVm {
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
         debug!("unregister_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
 
-        self.fd.unregister_irqfd(&fd, gsi)
+        self.fd
+            .unregister_irqfd(&fd, gsi)
             .map_err(|e| vm::HypervisorVmError::UnregisterIrqFd(e.into()))?;
 
         Ok(())
@@ -874,8 +875,8 @@ impl MshvIrqRoutingEntry {
         let MshvIrqRouting::Msi(msi) = self.route;
         if msi.address_hi != 0 {
             return Err(MshvIrqRoutingEntryError::InvalidMsiAddress(anyhow!(
-                       "MSI high address part is not zero"
-                   )));
+                "MSI high address part is not zero"
+            )));
         }
         Ok(msi)
     }
@@ -939,7 +940,7 @@ impl MshvIrqRoutingMsi {
             vector: self.get_vector() as u32,
             level_triggered: self.get_trigger_mode(),
             logical_destination_mode: self.get_destination_mode(),
-            long_mode: false
+            long_mode: false,
         }
     }
 }

@@ -22,8 +22,6 @@ use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml, sdt::SDT};
 use anyhow::anyhow;
-#[cfg(feature = "acpi")]
-use arch::layout;
 #[cfg(target_arch = "x86_64")]
 use arch::x86_64::SgxEpcSection;
 #[cfg(target_arch = "x86_64")]
@@ -42,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{cmp, io, result, thread};
 use vm_device::BusDevice;
-#[cfg(target_arch = "x86_64")]
+#[cfg(feature = "acpi")]
 use vm_memory::GuestAddress;
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vm_migration::{
@@ -59,6 +57,9 @@ const TSC_DEADLINE_TIMER_ECX_BIT: u8 = 24; // tsc deadline timer ecx bit.
 const HYPERVISOR_ECX_BIT: u8 = 31; // Hypervisor ecx bit.
 #[cfg(target_arch = "x86_64")]
 const MTRR_EDX_BIT: u8 = 12; // Hypervisor ecx bit.
+
+#[cfg(feature = "acpi")]
+pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
 
 #[derive(Debug)]
 pub enum Error {
@@ -97,9 +98,6 @@ pub enum Error {
 
     /// Cannot add legacy device to Bus.
     BusError(vm_device::BusError),
-
-    /// Failed to allocate IO port
-    AllocateIOPort,
 
     /// Asking for more vCPUs that we can have
     DesiredVCPUCountExceedsMax,
@@ -172,6 +170,9 @@ pub enum Error {
 
     /// Error because an unexpected VmExit type was received.
     UnexpectedVmExit,
+
+    /// Failed to allocate MMIO address
+    AllocateMMIOAddress,
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -410,6 +411,8 @@ pub struct CpuManager {
     vcpus: Vec<Arc<Mutex<Vcpu>>>,
     seccomp_action: SeccompAction,
     vmmops: Arc<Box<dyn VmmOps>>,
+    #[cfg(feature = "acpi")]
+    acpi_address: GuestAddress,
 }
 
 const CPU_ENABLE_FLAG: usize = 0;
@@ -426,6 +429,8 @@ impl BusDevice for CpuManager {
             CPU_STATUS_OFFSET => {
                 if self.selected_cpu < self.present_vcpus() {
                     let state = &self.vcpu_states[usize::from(self.selected_cpu)];
+                    // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
+                    data.copy_from_slice(&[0; 8][0..data.len()]);
                     if state.active() {
                         data[0] |= 1 << CPU_ENABLE_FLAG;
                     }
@@ -557,6 +562,13 @@ impl CpuManager {
         let cpuid = CpuManager::patch_cpuid(hypervisor, &config.topology, sgx_epc_sections)?;
 
         let device_manager = device_manager.lock().unwrap();
+        #[cfg(feature = "acpi")]
+        let acpi_address = device_manager
+            .allocator()
+            .lock()
+            .unwrap()
+            .allocate_mmio_addresses(None, CPU_MANAGER_ACPI_SIZE as u64, None)
+            .ok_or(Error::AllocateMMIOAddress)?;
         let cpu_manager = Arc::new(Mutex::new(CpuManager {
             config: config.clone(),
             interrupt_controller: device_manager.interrupt_controller().clone(),
@@ -573,20 +585,18 @@ impl CpuManager {
             vcpus: Vec::with_capacity(usize::from(config.max_vcpus)),
             seccomp_action,
             vmmops,
+            #[cfg(feature = "acpi")]
+            acpi_address,
         }));
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "acpi")]
         device_manager
-            .allocator()
-            .lock()
-            .unwrap()
-            .allocate_io_addresses(Some(GuestAddress(0x0cd8)), 0x8, None)
-            .ok_or(Error::AllocateIOPort)?;
-
-        #[cfg(target_arch = "x86_64")]
-        device_manager
-            .io_bus()
-            .insert(cpu_manager.clone(), 0x0cd8, 0xc)
+            .mmio_bus()
+            .insert(
+                cpu_manager.clone(),
+                acpi_address.0,
+                CPU_MANAGER_ACPI_SIZE as u64,
+            )
             .map_err(Error::BusError)?;
 
         Ok(cpu_manager)
@@ -1019,40 +1029,48 @@ impl CpuManager {
         assert!(self.config.boot_vcpus <= self.config.max_vcpus);
 
         let mut madt = SDT::new(*b"APIC", 44, 5, *b"CLOUDH", *b"CHMADT  ", 1);
-        madt.write(36, layout::APIC_START);
+        #[cfg(target_arch = "x86_64")]
+        {
+            madt.write(36, arch::layout::APIC_START);
 
-        for cpu in 0..self.config.max_vcpus {
-            let lapic = LocalAPIC {
-                r#type: 0,
-                length: 8,
-                processor_id: cpu,
-                apic_id: cpu,
-                flags: if cpu < self.config.boot_vcpus {
-                    1 << MADT_CPU_ENABLE_FLAG
-                } else {
-                    0
-                },
-            };
-            madt.append(lapic);
+            for cpu in 0..self.config.max_vcpus {
+                let lapic = LocalAPIC {
+                    r#type: 0,
+                    length: 8,
+                    processor_id: cpu,
+                    apic_id: cpu,
+                    flags: if cpu < self.config.boot_vcpus {
+                        1 << MADT_CPU_ENABLE_FLAG
+                    } else {
+                        0
+                    },
+                };
+                madt.append(lapic);
+            }
+
+            madt.append(IOAPIC {
+                r#type: 1,
+                length: 12,
+                ioapic_id: 0,
+                apic_address: arch::layout::IOAPIC_START.0 as u32,
+                gsi_base: 0,
+                ..Default::default()
+            });
+
+            madt.append(InterruptSourceOverride {
+                r#type: 2,
+                length: 10,
+                bus: 0,
+                source: 4,
+                gsi: 4,
+                flags: 0,
+            });
         }
 
-        madt.append(IOAPIC {
-            r#type: 1,
-            length: 12,
-            ioapic_id: 0,
-            apic_address: layout::IOAPIC_START.0 as u32,
-            gsi_base: 0,
-            ..Default::default()
-        });
-
-        madt.append(InterruptSourceOverride {
-            r#type: 2,
-            length: 10,
-            bus: 0,
-            source: 4,
-            gsi: 4,
-            flags: 0,
-        });
+        #[cfg(target_arch = "aarch64")]
+        {
+            madt.update_checksum();
+        }
 
         madt
     }
@@ -1115,10 +1133,7 @@ impl Aml for CPU {
                     1,
                     false,
                     // Call into CEJ0 method which will actually eject device
-                    vec![&aml::Return::new(&aml::MethodCall::new(
-                        "CEJ0".into(),
-                        vec![&self.cpu_id],
-                    ))],
+                    vec![&aml::MethodCall::new("CEJ0".into(), vec![&self.cpu_id])],
                 ),
             ],
         )
@@ -1160,7 +1175,7 @@ impl Aml for CPUMethods {
                 true,
                 vec![
                     // Take lock defined above
-                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xfff),
+                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xffff),
                     // Write CPU number (in first argument) to I/O port via field
                     &aml::Store::new(&aml::Path::new("\\_SB_.PRES.CSEL"), &aml::Arg(0)),
                     &aml::Store::new(&aml::Local(0), &aml::ZERO),
@@ -1198,7 +1213,7 @@ impl Aml for CPUMethods {
                 1,
                 true,
                 vec![
-                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xfff),
+                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xffff),
                     // Write CPU number (in first argument) to I/O port via field
                     &aml::Store::new(&aml::Path::new("\\_SB_.PRES.CSEL"), &aml::Arg(0)),
                     // Set CEJ0 bit
@@ -1216,7 +1231,7 @@ impl Aml for CPUMethods {
                 true,
                 vec![
                     // Take lock defined above
-                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xfff),
+                    &aml::Acquire::new("\\_SB_.PRES.CPLK".into(), 0xffff),
                     &aml::Store::new(&aml::Local(0), &aml::ZERO),
                     &aml::While::new(
                         &aml::LessThan::new(&aml::Local(0), &self.max_vcpus),
@@ -1281,15 +1296,22 @@ impl Aml for CpuManager {
                     &aml::Name::new("_UID".into(), &"CPU Hotplug Controller"),
                     // Mutex to protect concurrent access as we write to choose CPU and then read back status
                     &aml::Mutex::new("CPLK".into(), 0),
-                    // I/O port for CPU controller
                     &aml::Name::new(
                         "_CRS".into(),
-                        &aml::ResourceTemplate::new(vec![&aml::IO::new(
-                            0x0cd8, 0x0cd8, 0x01, 0x0c,
+                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                            aml::AddressSpaceCachable::NotCacheable,
+                            true,
+                            self.acpi_address.0 as u64,
+                            self.acpi_address.0 + CPU_MANAGER_ACPI_SIZE as u64 - 1,
                         )]),
                     ),
-                    // OpRegion and Fields map I/O port into individual field values
-                    &aml::OpRegion::new("PRST".into(), aml::OpRegionSpace::SystemIO, 0x0cd8, 0x0c),
+                    // OpRegion and Fields map MMIO range into individual field values
+                    &aml::OpRegion::new(
+                        "PRST".into(),
+                        aml::OpRegionSpace::SystemMemory,
+                        self.acpi_address.0 as usize,
+                        CPU_MANAGER_ACPI_SIZE,
+                    ),
                     &aml::Field::new(
                         "PRST".into(),
                         aml::FieldAccessType::Byte,
@@ -1434,6 +1456,7 @@ mod tests {
     use arch::x86_64::regs::*;
     use arch::x86_64::BootProtocol;
     use hypervisor::x86_64::{FpuState, LapicState, SpecialRegisters, StandardRegisters};
+    use vm_memory::GuestAddress;
 
     #[test]
     fn test_setlint() {
