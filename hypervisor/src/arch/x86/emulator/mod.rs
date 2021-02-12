@@ -662,10 +662,12 @@ mod mock_vmm {
             let _ = env_logger::try_init();
             let cs_reg = segment_from_gdt(gdt_entry(0xc09b, 0, 0xffffffff), 1);
             let ds_reg = segment_from_gdt(gdt_entry(0xc093, 0, 0xffffffff), 2);
+            let es_reg = segment_from_gdt(gdt_entry(0xc093, 0, 0xffffffff), 3);
             let mut initial_state = CpuState::default();
             initial_state.set_ip(ip);
             initial_state.write_segment(Register::CS, cs_reg).unwrap();
             initial_state.write_segment(Register::DS, ds_reg).unwrap();
+            initial_state.write_segment(Register::ES, es_reg).unwrap();
             for (reg, value) in regs {
                 initial_state.write_reg(reg, value).unwrap();
             }
@@ -771,7 +773,7 @@ mod tests {
     //
     // mov rax, 0x1000
     // Test with a first instruction truncated.
-    fn test_fetch_first_instruction() -> MockResult {
+    fn test_fetch_first_instruction() {
         let ip: u64 = 0x1000;
         let cpu_id = 0;
         let memory = [
@@ -797,8 +799,6 @@ mod tests {
             .read_reg(Register::RAX)
             .unwrap();
         assert_eq!(rax, ip);
-
-        Ok(())
     }
 
     #[test]
@@ -807,7 +807,7 @@ mod tests {
     // mov rax, 0x1000
     // mov rbx, qword ptr [rax+10h]
     // Test with a 2nd instruction truncated.
-    fn test_fetch_second_instruction() -> MockResult {
+    fn test_fetch_second_instruction() {
         let target_rax: u64 = 0x1234567812345678;
         let ip: u64 = 0x1000;
         let cpu_id = 0;
@@ -834,8 +834,6 @@ mod tests {
             .read_reg(Register::RBX)
             .unwrap();
         assert_eq!(rbx, target_rax);
-
-        Ok(())
     }
 
     #[test]
@@ -844,7 +842,7 @@ mod tests {
     // mov rax, 0x1000
     // Test with a first instruction truncated and a bad fetched instruction.
     // Verify that the instruction emulation returns an error.
-    fn test_fetch_bad_insn() -> MockResult {
+    fn test_fetch_bad_insn() {
         let ip: u64 = 0x1000;
         let cpu_id = 0;
         let memory = [
@@ -859,7 +857,5 @@ mod tests {
 
         let mut vmm = MockVMM::new(ip, vec![], Some((ip, &memory)));
         assert!(vmm.emulate_first_insn(cpu_id, &insn).is_err());
-
-        Ok(())
     }
 }

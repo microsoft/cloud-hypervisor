@@ -27,7 +27,8 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::str::FromStr;
     use std::string::String;
-    use std::sync::Mutex;
+    use std::sync::mpsc::Receiver;
+    use std::sync::{mpsc, Mutex};
     use std::thread;
     use tempdir::TempDir;
     use tempfile::NamedTempFile;
@@ -108,7 +109,7 @@ mod tests {
         "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
     #[cfg(feature = "mshv")]
     const DIRECT_KERNEL_BOOT_CMDLINE: &str =
-        "root=/dev/vda1 console=ttyS0 console=hvc0 quiet rw apic=verbose clocksource=acpi_pm systemd.journald.forward_to_console=1";
+        "root=/dev/vda1 console=hvc0 quiet rw apic=verbose clocksource=acpi_pm systemd.journald.forward_to_console=1";
 
     #[cfg(not(feature = "mshv"))]
     const ENABLE_SECCOMP: &str = "true";
@@ -585,7 +586,7 @@ mod tests {
     // Creates the path for direct kernel boot and return the path.
     // For x86_64, this function returns the vmlinux kernel path.
     // For AArch64, this function returns the PE kernel path.
-    fn direct_kernel_boot_path() -> Option<PathBuf> {
+    fn direct_kernel_boot_path() -> PathBuf {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
@@ -595,7 +596,7 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         kernel_path.push("Image");
 
-        Some(kernel_path)
+        kernel_path
     }
 
     fn prepare_vhost_user_net_daemon(
@@ -932,7 +933,7 @@ mod tests {
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
                      cpu_count,
-                     direct_kernel_boot_path().unwrap().to_str().unwrap(),
+                     direct_kernel_boot_path().to_str().unwrap(),
                      DIRECT_KERNEL_BOOT_CMDLINE,
                      self.network.host_ip,
                      self.network.guest_mac,
@@ -1383,10 +1384,7 @@ mod tests {
                 ),
             ])
             .args(&["--memory", "size=512M"])
-            .args(&[
-                "--kernel",
-                direct_kernel_boot_path().unwrap().to_str().unwrap(),
-            ])
+            .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
             .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args(&["--seccomp", ENABLE_SECCOMP])
             .default_disks()
@@ -1454,7 +1452,7 @@ mod tests {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let host_mac = if generate_host_mac {
             Some(MacAddr::local_random())
@@ -1607,7 +1605,7 @@ mod tests {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let (blk_params, daemon_child) = {
             let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
@@ -1761,7 +1759,7 @@ mod tests {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let disk_path = guest.disk_config.disk(DiskType::OperatingSystem).unwrap();
 
@@ -1841,7 +1839,7 @@ mod tests {
         let mut shared_dir = workload_path;
         shared_dir.push("shared_dir");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let (dax_vmm_param, dax_mount_param) = if dax { ("on", "-o dax") } else { ("off", "") };
         let cache_size_vmm_param = if let Some(cache) = cache_size {
@@ -2023,7 +2021,7 @@ mod tests {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let mut pmem_temp_file = NamedTempFile::new().unwrap();
         pmem_temp_file.as_file_mut().set_len(128 << 20).unwrap();
@@ -2110,7 +2108,7 @@ mod tests {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path().unwrap();
+        let kernel_path = direct_kernel_boot_path();
 
         let socket = temp_vsock_path(&guest.tmp_dir);
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -2380,6 +2378,37 @@ mod tests {
         }
     }
 
+    fn pty_read(mut pty: std::fs::File) -> Receiver<String> {
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || loop {
+            thread::sleep(std::time::Duration::new(1, 0));
+            let mut buf = [0; 512];
+            match pty.read(&mut buf) {
+                Ok(_) => {
+                    let output = std::str::from_utf8(&buf).unwrap().to_string();
+                    match tx.send(output) {
+                        Ok(_) => (),
+                        Err(_) => break,
+                    }
+                }
+                Err(_) => break,
+            }
+        });
+        rx
+    }
+
+    fn get_pty_path(api_socket: &str, pty_type: &str) -> PathBuf {
+        let (cmd_success, cmd_output) = remote_command_w_output(&api_socket, "info", None);
+        assert!(cmd_success);
+        let info: serde_json::Value = serde_json::from_slice(&cmd_output).unwrap_or_default();
+        assert_eq!("Pty", info["config"][pty_type]["mode"]);
+        PathBuf::from(
+            info["config"][pty_type]["file"]
+                .as_str()
+                .expect("Missing pty path"),
+        )
+    }
+
     mod parallel {
         use crate::tests::*;
 
@@ -2435,10 +2464,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=2,max=4"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
@@ -2511,10 +2537,7 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", &format!("max_phys_bits={}", max_phys_bits)])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
@@ -2550,10 +2573,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=48"])
                 .args(&["--memory", "size=5120M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
@@ -2584,10 +2604,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=128G"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
@@ -2619,10 +2636,7 @@ mod tests {
 
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .capture_output()
                 .default_disks()
@@ -2818,10 +2832,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
@@ -2863,7 +2874,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -2918,7 +2929,7 @@ mod tests {
                 let mut workload_path = dirs::home_dir().unwrap();
                 workload_path.push("workloads");
 
-                let kernel_path = direct_kernel_boot_path().unwrap();
+                let kernel_path = direct_kernel_boot_path();
 
                 let mut child = GuestCommand::new(&guest)
                     .args(&["--cpus", "boot=1"])
@@ -3051,7 +3062,7 @@ mod tests {
             let mut blk_file_path = workload_path;
             blk_file_path.push("blk.img");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut cloud_child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=4"])
@@ -3249,10 +3260,7 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", "false"])
                 .default_disks()
@@ -3382,7 +3390,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -3441,7 +3449,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -3542,10 +3550,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&[
                     "--cmdline",
                     DIRECT_KERNEL_BOOT_CMDLINE
@@ -3597,7 +3602,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -3658,10 +3663,7 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&[
                     "--cmdline",
                     DIRECT_KERNEL_BOOT_CMDLINE
@@ -3717,6 +3719,92 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
+        fn test_pty_interaction() {
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let api_socket = temp_api_path(&guest.tmp_dir);
+            let cmdline = DIRECT_KERNEL_BOOT_CMDLINE.to_owned() + " console=ttyS0";
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--cpus", "boot=1"])
+                .args(&["--memory", "size=512M"])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                .args(&["--cmdline", &cmdline])
+                .default_disks()
+                .default_net()
+                .args(&["--serial", "null"])
+                .args(&["--console", "pty"])
+                .args(&["--api-socket", &api_socket])
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+                // Get pty fd for console
+                let console_path = get_pty_path(&api_socket, "console");
+                // TODO: Get serial pty test working
+                let mut cf = std::fs::OpenOptions::new()
+                    .write(true)
+                    .read(true)
+                    .open(console_path)
+                    .unwrap();
+
+                // Some dumb sleeps but we don't want to write
+                // before the console is up and we don't want
+                // to try and write the next line before the
+                // login process is ready.
+                thread::sleep(std::time::Duration::new(5, 0));
+                assert_eq!(cf.write(b"cloud\n").unwrap(), 6);
+                thread::sleep(std::time::Duration::new(2, 0));
+                assert_eq!(cf.write(b"cloud123\n").unwrap(), 9);
+                thread::sleep(std::time::Duration::new(2, 0));
+                assert_eq!(cf.write(b"echo test_pty_console\n").unwrap(), 22);
+                thread::sleep(std::time::Duration::new(2, 0));
+
+                // read pty and ensure they have a login shell
+                // some fairly hacky workarounds to avoid looping
+                // forever in case the channel is blocked getting output
+                let ptyc = pty_read(cf);
+                let mut empty = 0;
+                let mut prev = String::new();
+                loop {
+                    thread::sleep(std::time::Duration::new(2, 0));
+                    match ptyc.try_recv() {
+                        Ok(line) => {
+                            empty = 0;
+                            prev = prev + &line;
+                            if prev.contains("test_pty_console") {
+                                break;
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            empty += 1;
+                            if empty > 5 {
+                                panic!("No login on pty");
+                            }
+                        }
+                        _ => panic!("No login on pty"),
+                    }
+                }
+
+                guest.ssh_command("sudo shutdown -h now").unwrap();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(20));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+
+            let r = std::panic::catch_unwind(|| {
+                // Check that the cloud-hypervisor binary actually terminated
+                assert_eq!(output.status.success(), true);
+            });
+            handle_child_output(r, &output);
+        }
+
+        #[test]
         fn test_virtio_console() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
@@ -3724,7 +3812,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -3776,10 +3864,7 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", "false"])
                 .default_disks()
@@ -4069,7 +4154,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -4117,10 +4202,7 @@ mod tests {
                 let mut cmd = GuestCommand::new(&guest);
                 cmd.args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
-                    .args(&[
-                        "--kernel",
-                        direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                    ])
+                    .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                     .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                     .args(&["--seccomp", "false"])
                     .default_disks()
@@ -4482,10 +4564,7 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", "false"])
                 .default_disks()
@@ -4581,7 +4660,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=2,max=4"])
@@ -4684,7 +4763,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=2,max=4"])
@@ -4803,7 +4882,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=2,max=4"])
@@ -4893,7 +4972,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=2,max=4"])
@@ -4953,7 +5032,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let guest_memory_size_kb = 512 * 1024;
 
@@ -4997,7 +5076,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5177,7 +5256,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5311,7 +5390,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5421,7 +5500,7 @@ mod tests {
             workload_path.push("workloads");
 
             let mut kernels = vec![];
-            kernels.push(direct_kernel_boot_path().unwrap());
+            kernels.push(direct_kernel_boot_path());
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -5646,10 +5725,7 @@ mod tests {
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&[
-                    "--kernel",
-                    direct_kernel_boot_path().unwrap().to_str().unwrap(),
-                ])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .args(&["--net", guest.default_net_string().as_str()])
@@ -5686,7 +5762,7 @@ mod tests {
             let guest = Guest::new(&mut focal);
             let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             let mut cmd = GuestCommand::new(&guest);
             cmd.args(&["--cpus", "boot=1"])
@@ -5801,7 +5877,7 @@ mod tests {
         fn test_tap_from_fd() {
             let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut focal);
-            let kernel_path = direct_kernel_boot_path().unwrap();
+            let kernel_path = direct_kernel_boot_path();
 
             // Create a TAP interface with multi-queue enabled
             let num_queue_pairs: usize = 2;
@@ -5852,6 +5928,140 @@ mod tests {
             });
 
             let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        // By design, a guest VM won't be able to connect to the host
+        // machine when using a macvtap network interface (while it can
+        // communicate externally). As a workaround, this integration
+        // test creates two macvtap interfaces in 'bridge' mode on the
+        // same physical net interface, one for the guest and one for
+        // the host. With additional setup on the IP address and the
+        // routing table, it enables the communications between the
+        // guest VM and the host machine.
+        // Details: https://wiki.libvirt.org/page/TroubleshootMacvtapHostFail
+        fn test_macvtap() {
+            let mut focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut focal);
+            let kernel_path = direct_kernel_boot_path();
+            let phy_net = "eth0";
+
+            // Create a macvtap interface for the guest VM to use
+            let guest_macvtap_name = "guestmacvtap0";
+            std::process::Command::new("bash")
+                .args(&[
+                    "-c",
+                    &format!(
+                        "sudo ip link add link {} name {} type macvtap mod bridge",
+                        phy_net, guest_macvtap_name
+                    ),
+                ])
+                .status()
+                .expect("Expected 'ip link add' to work");
+            std::process::Command::new("bash")
+                .args(&[
+                    "-c",
+                    &format!(
+                        "sudo ip link set {} address {} up",
+                        guest_macvtap_name, guest.network.guest_mac
+                    ),
+                ])
+                .status()
+                .expect("Expected 'ip link set' to work");
+            std::process::Command::new("bash")
+                .args(&["-c", &format!("sudo ip link show {}", guest_macvtap_name)])
+                .status()
+                .expect("Expected 'ip link show' to work");
+
+            let tap_index =
+                fs::read_to_string(&format!("/sys/class/net/{}/ifindex", guest_macvtap_name))
+                    .unwrap();
+            let tap_device = format!("/dev/tap{}", tap_index.trim());
+
+            std::process::Command::new("bash")
+                .args(&["-c", &format!("sudo chown $UID.$UID {}", tap_device)])
+                .status()
+                .expect("Expected 'chown' to work");
+
+            let cstr_tap_device = std::ffi::CString::new(tap_device).unwrap();
+            let tap_fd = unsafe { libc::open(cstr_tap_device.as_ptr(), libc::O_RDWR) };
+            assert!(tap_fd > 0);
+
+            // Create a macvtap on the same physical net interface for
+            // the host machine to use
+            let host_macvtap_name = "hostmacvtap0";
+            std::process::Command::new("bash")
+                .args(&[
+                    "-c",
+                    &format!(
+                        "sudo ip link add link {} name {} type macvtap mod bridge",
+                        phy_net, host_macvtap_name
+                    ),
+                ])
+                .status()
+                .expect("Expected 'ip link add' to work");
+            // Use default mask "255.255.255.0"
+            std::process::Command::new("bash")
+                .args(&[
+                    "-c",
+                    &format!(
+                        "sudo ip address add {}/24 dev {}",
+                        guest.network.host_ip, host_macvtap_name
+                    ),
+                ])
+                .status()
+                .expect("Expected 'ip address add' to work");
+            std::process::Command::new("bash")
+                .args(&[
+                    "-c",
+                    &format!("sudo ip link set dev {} up", host_macvtap_name),
+                ])
+                .status()
+                .expect("Expected 'ip link set dev up' to work");
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--cpus", "boot=1"])
+                .args(&["--memory", "size=512M"])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .default_disks()
+                .args(&[
+                    "--net",
+                    &format!("fd={},mac={}", tap_fd, guest.network.guest_mac),
+                ])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
+                assert_eq!(
+                    guest
+                        .ssh_command("ip -o link | wc -l")
+                        .unwrap()
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or_default(),
+                    2
+                );
+            });
+
+            let _ = child.kill();
+
+            std::process::Command::new("bash")
+                .args(&["-c", &format!("sudo ip link del {}", guest_macvtap_name)])
+                .status()
+                .expect("Expected 'ip link del' to work");
+            std::process::Command::new("bash")
+                .args(&["-c", &format!("sudo ip link del {}", host_macvtap_name)])
+                .status()
+                .expect("Expected 'ip link del' to work");
+
             let output = child.wait_with_output().unwrap();
 
             handle_child_output(r, &output);

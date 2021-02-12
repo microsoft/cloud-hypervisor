@@ -17,6 +17,7 @@ use crate::config::CpusConfig;
 use crate::device_manager::DeviceManager;
 use crate::memory_manager::MemoryManager;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+#[cfg(target_arch = "x86_64")]
 use crate::vm::physical_bits;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
@@ -30,9 +31,9 @@ use arch::EntryPoint;
 use devices::interrupt_controller::InterruptController;
 #[cfg(target_arch = "aarch64")]
 use hypervisor::kvm::kvm_bindings;
-#[cfg(target_arch = "x86_64")]
-use hypervisor::CpuId;
 use hypervisor::{vm::VmmOps, CpuState, HypervisorCpuError, VmExit};
+#[cfg(target_arch = "x86_64")]
+use hypervisor::{CpuId, CpuIdEntry};
 use libc::{c_void, siginfo_t};
 use seccomp::{SeccompAction, SeccompFilter};
 use std::os::unix::thread::JoinHandleExt;
@@ -173,6 +174,18 @@ pub enum Error {
 
     /// Failed to allocate MMIO address
     AllocateMMIOAddress,
+
+    /// Error populating CPUID with KVM HyperV emulation details
+    #[cfg(target_arch = "x86_64")]
+    CpuidKVMHyperV(vmm_sys_util::fam::Error),
+
+    /// Error populating CPUID with KVM HyperV emulation details
+    #[cfg(target_arch = "x86_64")]
+    CpuidSGX(arch::x86_64::Error),
+
+    /// Error populating CPUID with CPU identification
+    #[cfg(target_arch = "x86_64")]
+    CpuidIdentification(vmm_sys_util::fam::Error),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -258,19 +271,12 @@ impl Vcpu {
         vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
         #[cfg(target_arch = "x86_64")] cpuid: CpuId,
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
-        phys_bits: u8,
     ) -> Result<()> {
         #[cfg(target_arch = "aarch64")]
         {
             self.init(vm)?;
-            self.mpidr = arch::configure_vcpu(
-                &self.vcpu,
-                self.id,
-                kernel_entry_point,
-                vm_memory,
-                phys_bits,
-            )
-            .map_err(Error::VcpuConfiguration)?;
+            self.mpidr = arch::configure_vcpu(&self.vcpu, self.id, kernel_entry_point, vm_memory)
+                .map_err(Error::VcpuConfiguration)?;
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -281,7 +287,6 @@ impl Vcpu {
             vm_memory,
             cpuid,
             kvm_hyperv,
-            phys_bits,
         )
         .map_err(Error::VcpuConfiguration)?;
 
@@ -559,7 +564,16 @@ impl CpuManager {
                 None
             };
         #[cfg(target_arch = "x86_64")]
-        let cpuid = CpuManager::patch_cpuid(hypervisor, &config.topology, sgx_epc_sections)?;
+        let cpuid = {
+            let phys_bits = physical_bits(config.max_phys_bits);
+            CpuManager::generate_common_cpuid(
+                hypervisor,
+                &config.topology,
+                sgx_epc_sections,
+                phys_bits,
+                config.kvm_hyperv,
+            )?
+        };
 
         let device_manager = device_manager.lock().unwrap();
         #[cfg(feature = "acpi")]
@@ -603,10 +617,12 @@ impl CpuManager {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn patch_cpuid(
+    fn generate_common_cpuid(
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         topology: &Option<CpuTopology>,
         sgx_epc_sections: Option<Vec<SgxEpcSection>>,
+        phys_bits: u8,
+        kvm_hyperv: bool,
     ) -> Result<CpuId> {
         let mut cpuid_patches = Vec::new();
 
@@ -660,7 +676,82 @@ impl CpuManager {
         }
 
         if let Some(sgx_epc_sections) = sgx_epc_sections {
-            arch::x86_64::update_cpuid_sgx(&mut cpuid, sgx_epc_sections).unwrap();
+            arch::x86_64::update_cpuid_sgx(&mut cpuid, sgx_epc_sections)
+                .map_err(Error::CpuidSGX)?;
+        }
+
+        // Set CPU physical bits
+        for entry in cpuid.as_mut_slice().iter_mut() {
+            if entry.function == 0x8000_0008 {
+                entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
+            }
+        }
+
+        // Copy CPU identification string
+        for i in 0x8000_0002..=0x8000_0004 {
+            cpuid.retain(|c| c.function != i);
+            let leaf = unsafe { std::arch::x86_64::__cpuid(i) };
+            cpuid
+                .push(CpuIdEntry {
+                    function: i,
+                    eax: leaf.eax,
+                    ebx: leaf.ebx,
+                    ecx: leaf.ecx,
+                    edx: leaf.edx,
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidIdentification)?;
+        }
+
+        if kvm_hyperv {
+            // Remove conflicting entries
+            cpuid.retain(|c| c.function != 0x4000_0000);
+            cpuid.retain(|c| c.function != 0x4000_0001);
+            // See "Hypervisor Top Level Functional Specification" for details
+            // Compliance with "Hv#1" requires leaves up to 0x4000_000a
+            cpuid
+                .push(CpuIdEntry {
+                    function: 0x40000000,
+                    eax: 0x4000000a, // Maximum cpuid leaf
+                    ebx: 0x756e694c, // "Linu"
+                    ecx: 0x564b2078, // "x KV"
+                    edx: 0x7648204d, // "M Hv"
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidKVMHyperV)?;
+            cpuid
+                .push(CpuIdEntry {
+                    function: 0x40000001,
+                    eax: 0x31237648, // "Hv#1"
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidKVMHyperV)?;
+            cpuid
+                .push(CpuIdEntry {
+                    function: 0x40000002,
+                    eax: 0x3839,  // "Build number"
+                    ebx: 0xa0000, // "Version"
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidKVMHyperV)?;
+            cpuid
+                .push(CpuIdEntry {
+                    function: 0x4000_0003,
+                    eax: 1 << 1 // AccessPartitionReferenceCounter
+                       | 1 << 2 // AccessSynicRegs
+                       | 1 << 3 // AccessSyntheticTimerRegs
+                       | 1 << 9, // AccessPartitionReferenceTsc
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidKVMHyperV)?;
+            for i in 0x4000_0004..=0x4000_000a {
+                cpuid
+                    .push(CpuIdEntry {
+                        function: i,
+                        ..Default::default()
+                    })
+                    .map_err(Error::CpuidKVMHyperV)?;
+            }
         }
 
         Ok(cpuid)
@@ -688,8 +779,6 @@ impl CpuManager {
         } else {
             let vm_memory = self.vm_memory.clone();
 
-            let phys_bits = physical_bits(self.config.max_phys_bits);
-
             #[cfg(target_arch = "x86_64")]
             vcpu.lock()
                 .unwrap()
@@ -698,14 +787,13 @@ impl CpuManager {
                     &vm_memory,
                     self.cpuid.clone(),
                     self.config.kvm_hyperv,
-                    phys_bits,
                 )
                 .expect("Failed to configure vCPU");
 
             #[cfg(target_arch = "aarch64")]
             vcpu.lock()
                 .unwrap()
-                .configure(&self.vm, entry_point, &vm_memory, phys_bits)
+                .configure(&self.vm, entry_point, &vm_memory)
                 .expect("Failed to configure vCPU");
         }
 
@@ -904,12 +992,11 @@ impl CpuManager {
         Ok(())
     }
 
-    fn mark_vcpus_for_removal(&mut self, desired_vcpus: u8) -> Result<()> {
+    fn mark_vcpus_for_removal(&mut self, desired_vcpus: u8) {
         // Mark vCPUs for removal, actual removal happens on ejection
         for cpu_id in desired_vcpus..self.present_vcpus() {
             self.vcpu_states[usize::from(cpu_id)].removing = true;
         }
-        Ok(())
     }
 
     fn remove_vcpu(&mut self, cpu_id: u8) -> Result<()> {
@@ -961,7 +1048,10 @@ impl CpuManager {
                 self.activate_vcpus(desired_vcpus, true)?;
                 Ok(true)
             }
-            cmp::Ordering::Less => self.mark_vcpus_for_removal(desired_vcpus).and(Ok(true)),
+            cmp::Ordering::Less => {
+                self.mark_vcpus_for_removal(desired_vcpus);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }

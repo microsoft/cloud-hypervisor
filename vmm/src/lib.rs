@@ -104,6 +104,10 @@ pub enum Error {
     #[error("Error handling VM stdin: {0:?}")]
     Stdin(VmError),
 
+    /// Cannot handle the VM pty stream
+    #[error("Error handling VM pty: {0:?}")]
+    Pty(VmError),
+
     /// Cannot reboot the VM
     #[error("Error rebooting VM: {0:?}")]
     VmReboot(VmError),
@@ -145,6 +149,7 @@ pub enum EpollDispatch {
     Stdin,
     Api,
     ActivateVirtioDevices,
+    Pty,
 }
 
 pub struct EpollContext {
@@ -354,6 +359,16 @@ impl Vmm {
                     self.hypervisor.clone(),
                     activate_evt,
                 )?;
+                if let Some(ref serial_pty) = vm.serial_pty() {
+                    self.epoll
+                        .add_event(serial_pty, EpollDispatch::Pty)
+                        .map_err(VmError::EventfdError)?;
+                };
+                if let Some(ref console_pty) = vm.console_pty() {
+                    self.epoll
+                        .add_event(console_pty, EpollDispatch::Pty)
+                        .map_err(VmError::EventfdError)?;
+                };
                 self.vm = Some(vm);
             }
         }
@@ -524,10 +539,10 @@ impl Vmm {
         }
     }
 
-    fn vmm_ping(&self) -> result::Result<VmmPingResponse, ApiError> {
-        Ok(VmmPingResponse {
+    fn vmm_ping(&self) -> VmmPingResponse {
+        VmmPingResponse {
             version: self.version.clone(),
-        })
+        }
     }
 
     fn vm_delete(&mut self) -> result::Result<(), VmError> {
@@ -1116,6 +1131,11 @@ impl Vmm {
                                     .map_err(Error::ActivateVirtioDevices)?;
                             }
                         }
+                        EpollDispatch::Pty => {
+                            if let Some(ref vm) = self.vm {
+                                vm.handle_pty().map_err(Error::Pty)?;
+                            }
+                        }
                         EpollDispatch::Api => {
                             // Consume the event.
                             self.api_evt.read().map_err(Error::EventFdRead)?;
@@ -1185,9 +1205,9 @@ impl Vmm {
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }
                                 ApiRequest::VmmPing(sender) => {
-                                    let response = self.vmm_ping().map(ApiResponsePayload::VmmPing);
+                                    let response = ApiResponsePayload::VmmPing(self.vmm_ping());
 
-                                    sender.send(response).map_err(Error::ApiResponseSend)?;
+                                    sender.send(Ok(response)).map_err(Error::ApiResponseSend)?;
                                 }
                                 ApiRequest::VmPause(sender) => {
                                     let response = self

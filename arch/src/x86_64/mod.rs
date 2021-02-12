@@ -173,9 +173,6 @@ pub enum Error {
 
     /// Missing SGX_LC CPU feature
     MissingSgxLaunchControlFeature,
-
-    // Error populating Cpuid
-    PopulatingCpuid,
 }
 
 impl From<Error> for super::Error {
@@ -336,86 +333,11 @@ pub fn configure_vcpu(
     vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     cpuid: CpuId,
     kvm_hyperv: bool,
-    phys_bits: u8,
 ) -> super::Result<()> {
+    // Per vCPU CPUID changes; common are handled via CpuManager::generate_common_cpuid()
     let mut cpuid = cpuid;
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
-
-    if kvm_hyperv {
-        // Remove conflicting entries
-        cpuid.retain(|c| c.function != 0x4000_0000);
-        cpuid.retain(|c| c.function != 0x4000_0001);
-
-        // See "Hypervisor Top Level Functional Specification" for details
-        // Compliance with "Hv#1" requires leaves up to 0x4000_000a
-        cpuid
-            .push(CpuIdEntry {
-                function: 0x40000000,
-                eax: 0x4000000a, // Maximum cpuid leaf
-                ebx: 0x756e694c, // "Linu"
-                ecx: 0x564b2078, // "x KV"
-                edx: 0x7648204d, // "M Hv"
-                ..Default::default()
-            })
-            .map_err(|_| Error::PopulatingCpuid)?;
-        cpuid
-            .push(CpuIdEntry {
-                function: 0x40000001,
-                eax: 0x31237648, // "Hv#1"
-                ..Default::default()
-            })
-            .map_err(|_| Error::PopulatingCpuid)?;
-        cpuid
-            .push(CpuIdEntry {
-                function: 0x40000002,
-                eax: 0x3839,  // "Build number"
-                ebx: 0xa0000, // "Version"
-                ..Default::default()
-            })
-            .map_err(|_| Error::PopulatingCpuid)?;
-        cpuid
-            .push(CpuIdEntry {
-                function: 0x4000_0003,
-                eax: 1 << 1 // AccessPartitionReferenceCounter
-                   | 1 << 2 // AccessSynicRegs
-                   | 1 << 3 // AccessSyntheticTimerRegs
-                   | 1 << 9, // AccessPartitionReferenceTsc
-                ..Default::default()
-            })
-            .map_err(|_| Error::PopulatingCpuid)?;
-        for i in 0x4000_0004..=0x4000_000a {
-            cpuid
-                .push(CpuIdEntry {
-                    function: i,
-                    ..Default::default()
-                })
-                .map_err(|_| Error::PopulatingCpuid)?;
-        }
-    }
-
-    // Copy CPU identification string
-    for i in 0x8000_0002..=0x8000_0004 {
-        cpuid.retain(|c| c.function != i);
-        let leaf = unsafe { x86_64::__cpuid(i) };
-        cpuid
-            .push(CpuIdEntry {
-                function: i,
-                eax: leaf.eax,
-                ebx: leaf.ebx,
-                ecx: leaf.ecx,
-                edx: leaf.edx,
-                ..Default::default()
-            })
-            .map_err(|_| Error::PopulatingCpuid)?;
-    }
-
-    // Set CPU physical bits
-    for entry in cpuid.as_mut_slice().iter_mut() {
-        if entry.function == 0x8000_0008 {
-            entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
-        }
-    }
 
     fd.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
@@ -594,7 +516,7 @@ fn configure_pvh(
     let mut memmap: Vec<hvm_memmap_table_entry> = Vec::new();
 
     // Create the memory map entries.
-    add_memmap_entry(&mut memmap, 0, layout::EBDA_START.raw_value(), E820_RAM)?;
+    add_memmap_entry(&mut memmap, 0, layout::EBDA_START.raw_value(), E820_RAM);
 
     let mem_end = guest_mem.last_addr();
 
@@ -604,21 +526,21 @@ fn configure_pvh(
             layout::HIGH_RAM_START.raw_value(),
             mem_end.unchecked_offset_from(layout::HIGH_RAM_START) + 1,
             E820_RAM,
-        )?;
+        );
     } else {
         add_memmap_entry(
             &mut memmap,
             layout::HIGH_RAM_START.raw_value(),
             layout::MEM_32BIT_RESERVED_START.unchecked_offset_from(layout::HIGH_RAM_START),
             E820_RAM,
-        )?;
+        );
         if mem_end > layout::RAM_64BIT_START {
             add_memmap_entry(
                 &mut memmap,
                 layout::RAM_64BIT_START.raw_value(),
                 mem_end.unchecked_offset_from(layout::RAM_64BIT_START) + 1,
                 E820_RAM,
-            )?;
+            );
         }
     }
 
@@ -627,7 +549,7 @@ fn configure_pvh(
         layout::PCI_MMCONFIG_START.0,
         layout::PCI_MMCONFIG_SIZE,
         E820_RESERVED,
-    )?;
+    );
 
     if let Some(sgx_epc_region) = sgx_epc_region {
         add_memmap_entry(
@@ -635,7 +557,7 @@ fn configure_pvh(
             sgx_epc_region.start().raw_value(),
             sgx_epc_region.size() as u64,
             E820_RESERVED,
-        )?;
+        );
     }
 
     start_info.0.memmap_entries = memmap.len() as u32;
@@ -680,12 +602,7 @@ fn configure_pvh(
     Ok(())
 }
 
-fn add_memmap_entry(
-    memmap: &mut Vec<hvm_memmap_table_entry>,
-    addr: u64,
-    size: u64,
-    mem_type: u32,
-) -> Result<(), Error> {
+fn add_memmap_entry(memmap: &mut Vec<hvm_memmap_table_entry>, addr: u64, size: u64, mem_type: u32) {
     // Add the table entry to the vector
     memmap.push(hvm_memmap_table_entry {
         addr,
@@ -693,8 +610,6 @@ fn add_memmap_entry(
         type_: mem_type,
         reserved: 0,
     });
-
-    Ok(())
 }
 
 fn configure_64bit_boot(
@@ -1170,8 +1085,8 @@ mod tests {
             },
         ];
 
-        add_memmap_entry(&mut memmap, 0, 0x1000, E820_RAM).unwrap();
-        add_memmap_entry(&mut memmap, 0x10000, 0xa000, E820_RESERVED).unwrap();
+        add_memmap_entry(&mut memmap, 0, 0x1000, E820_RAM);
+        add_memmap_entry(&mut memmap, 0x10000, 0xa000, E820_RESERVED);
 
         assert_eq!(format!("{:?}", memmap), format!("{:?}", expected_memmap));
     }

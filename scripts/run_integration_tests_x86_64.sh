@@ -247,7 +247,7 @@ echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
 export RUST_BACKTRACE=1
-time cargo test $features_test "tests::parallel::$test_filter"
+time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=4
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests

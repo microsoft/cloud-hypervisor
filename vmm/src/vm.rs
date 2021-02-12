@@ -130,6 +130,9 @@ pub enum Error {
     /// Write to the console failed.
     Console(vmm_sys_util::errno::Error),
 
+    /// Write to the pty console failed.
+    PtyConsole(io::Error),
+
     /// Cannot setup terminal in raw mode.
     SetTerminalRaw(vmm_sys_util::errno::Error),
 
@@ -389,35 +392,31 @@ impl VmOps {
 }
 
 impl VmmOps for VmOps {
-    fn guest_mem_write(&self, buf: &[u8], gpa: u64) -> hypervisor::vm::Result<usize> {
+    fn guest_mem_write(&self, gpa: u64, buf: &[u8]) -> hypervisor::vm::Result<usize> {
         self.memory
             .memory()
             .write(buf, GuestAddress(gpa))
             .map_err(|e| HypervisorVmError::GuestMemWrite(e.into()))
     }
 
-    fn guest_mem_read(&self, buf: &mut [u8], gpa: u64) -> hypervisor::vm::Result<usize> {
+    fn guest_mem_read(&self, gpa: u64, buf: &mut [u8]) -> hypervisor::vm::Result<usize> {
         self.memory
             .memory()
             .read(buf, GuestAddress(gpa))
             .map_err(|e| HypervisorVmError::GuestMemRead(e.into()))
     }
 
-    fn mmio_read(&self, addr: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
-        if let Err(e) = self.mmio_bus.read(addr, data) {
-            if let vm_device::BusError::MissingAddressRange = e {
-                warn!("Guest MMIO read to unregistered address 0x{:x}", addr);
-            }
+    fn mmio_read(&self, gpa: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
+        if let Err(vm_device::BusError::MissingAddressRange) = self.mmio_bus.read(gpa, data) {
+            warn!("Guest MMIO read to unregistered address 0x{:x}", gpa);
         }
         Ok(())
     }
 
-    fn mmio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
-        match self.mmio_bus.write(addr, data) {
-            Err(e) => {
-                if let vm_device::BusError::MissingAddressRange = e {
-                    warn!("Guest MMIO write to unregistered address 0x{:x}", addr);
-                }
+    fn mmio_write(&self, gpa: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
+        match self.mmio_bus.write(gpa, data) {
+            Err(vm_device::BusError::MissingAddressRange) => {
+                warn!("Guest MMIO write to unregistered address 0x{:x}", gpa);
             }
             Ok(Some(barrier)) => {
                 info!("Waiting for barrier");
@@ -430,27 +429,23 @@ impl VmmOps for VmOps {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn pio_read(&self, addr: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
-        if let Err(e) = self.io_bus.read(addr, data) {
-            if let vm_device::BusError::MissingAddressRange = e {
-                warn!("Guest PIO read to unregistered address 0x{:x}", addr);
-            }
+    fn pio_read(&self, port: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
+        if let Err(vm_device::BusError::MissingAddressRange) = self.io_bus.read(port, data) {
+            warn!("Guest PIO read to unregistered address 0x{:x}", port);
         }
         Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn pio_write(&self, addr: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
-        if addr == DEBUG_IOPORT as u64 && data.len() == 1 {
+    fn pio_write(&self, port: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
+        if port == DEBUG_IOPORT as u64 && data.len() == 1 {
             self.log_debug_ioport(data[0]);
             return Ok(());
         }
 
-        match self.io_bus.write(addr, data) {
-            Err(e) => {
-                if let vm_device::BusError::MissingAddressRange = e {
-                    warn!("Guest PIO write to unregistered address 0x{:x}", addr);
-                }
+        match self.io_bus.write(port, data) {
+            Err(vm_device::BusError::MissingAddressRange) => {
+                warn!("Guest PIO write to unregistered address 0x{:x}", port);
             }
             Ok(Some(barrier)) => {
                 info!("Waiting for barrier");
@@ -1073,6 +1068,14 @@ impl Vm {
         Ok(())
     }
 
+    pub fn serial_pty(&self) -> Option<File> {
+        self.device_manager.lock().unwrap().serial_pty()
+    }
+
+    pub fn console_pty(&self) -> Option<File> {
+        self.device_manager.lock().unwrap().console_pty()
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
         let new_state = VmState::Shutdown;
@@ -1553,6 +1556,33 @@ impl Vm {
 
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
         *state = new_state;
+
+        Ok(())
+    }
+
+    pub fn handle_pty(&self) -> Result<()> {
+        // Could be a little dangerous, picks up a lock on device_manager
+        // and goes into a blocking read. If the epoll loops starts to be
+        // services by multiple threads likely need to revist this.
+        let dm = self.device_manager.lock().unwrap();
+        let mut out = [0u8; 64];
+        if let Some(mut pty) = dm.serial_pty() {
+            let count = pty.read(&mut out).map_err(Error::PtyConsole)?;
+            let console = dm.console();
+            if console.input_enabled() {
+                console
+                    .queue_input_bytes_serial(&out[..count])
+                    .map_err(Error::Console)?;
+            }
+        };
+        let count = match dm.console_pty() {
+            Some(mut pty) => pty.read(&mut out).map_err(Error::PtyConsole)?,
+            None => return Ok(()),
+        };
+        let console = dm.console();
+        if console.input_enabled() {
+            console.queue_input_bytes_console(&out[..count])
+        }
 
         Ok(())
     }
