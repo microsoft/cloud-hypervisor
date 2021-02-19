@@ -5,17 +5,17 @@ authors = ["The Chromium OS Authors"]
 
 [dependencies]
 epoll = ">=4.0.1"
-libc = "0.2.85"
+libc = "0.2.86"
 log = "0.4.14"
 net_gen = { path = "../net_gen" }
 rand = "0.8.3"
 serde = "1.0.123"
 virtio-bindings = "0.1.0"
-vm-memory = { version = "0.4.0", features = ["backend-mmap", "backend-atomic"] }
+vm-memory = { version = "0.5.0", features = ["backend-mmap", "backend-atomic"] }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = ">=0.3.1"
 
 [dev-dependencies]
 lazy_static = "1.3.0"
 pnet = "0.27.2"
-serde_json = "1.0.61"
+serde_json = "1.0.62"

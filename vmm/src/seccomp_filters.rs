@@ -47,6 +47,8 @@ const SYS_IO_URING_REGISTER: i64 = 427;
 const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
 const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSPTLCK: u64 = 0x4004_5431;
+const TIOCGTPEER: u64 = 0x5441;
 const FIOCLEX: u64 = 0x5451;
 const FIONBIO: u64 = 0x5421;
 
@@ -155,6 +157,8 @@ fn create_vmm_ioctl_seccomp_rule_common() -> Result<Vec<SeccompRule>, Error> {
         and![Cond::new(1, ArgLen::DWORD, Eq, TCSETS)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, TCGETS)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, TIOCGWINSZ)?],
+        and![Cond::new(1, ArgLen::DWORD, Eq, TIOCSPTLCK)?],
+        and![Cond::new(1, ArgLen::DWORD, Eq, TIOCGTPEER)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, TUNGETFEATURES)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, TUNGETIFF)?],
         and![Cond::new(1, ArgLen::DWORD, Eq, TUNSETIFF)?],
@@ -409,11 +413,15 @@ fn create_vcpu_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, Error> {
 fn vcpu_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
     Ok(vec![
         allow_syscall(libc::SYS_brk),
+        allow_syscall(libc::SYS_clock_gettime),
         allow_syscall(libc::SYS_close),
+        allow_syscall(libc::SYS_dup),
         allow_syscall(libc::SYS_exit),
+        allow_syscall(libc::SYS_fstat),
         allow_syscall(libc::SYS_futex),
         allow_syscall(libc::SYS_getpid),
         allow_syscall_if(libc::SYS_ioctl, create_vcpu_ioctl_seccomp_rule()?),
+        allow_syscall(libc::SYS_lseek),
         allow_syscall(libc::SYS_madvise),
         allow_syscall(libc::SYS_mprotect),
         allow_syscall(libc::SYS_munmap),
@@ -423,6 +431,7 @@ fn vcpu_thread_rules() -> Result<Vec<SyscallRuleSet>, Error> {
         allow_syscall(libc::SYS_openat),
         allow_syscall(libc::SYS_pread64),
         allow_syscall(libc::SYS_pwrite64),
+        allow_syscall(libc::SYS_read),
         allow_syscall(libc::SYS_recvmsg),
         allow_syscall(libc::SYS_rt_sigaction),
         allow_syscall(libc::SYS_rt_sigprocmask),

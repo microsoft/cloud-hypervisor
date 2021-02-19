@@ -21,9 +21,9 @@ use super::{
 
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::{VirtioInterrupt, VirtioInterruptType};
+use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
-use std::cmp;
 use std::io;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -44,10 +44,9 @@ const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
 
 // 128MiB is the standard memory block size in Linux. A virtio-mem region must
 // be aligned on this size, and the region size must be a multiple of it.
-pub const VIRTIO_MEM_ALIGN_SIZE: u64 = 128 * 1024 * 1024;
+pub const VIRTIO_MEM_ALIGN_SIZE: u64 = 128 << 20;
 // Use 2 MiB alignment so transparent hugepages can be used by KVM.
-const VIRTIO_MEM_DEFAULT_BLOCK_SIZE: u64 = 512 * 4096;
-const VIRTIO_MEM_USABLE_EXTENT: u64 = 256 * 1024 * 1024;
+const VIRTIO_MEM_DEFAULT_BLOCK_SIZE: u64 = 2 << 20;
 
 // Request processed successfully, applicable for
 // - VIRTIO_MEM_REQ_PLUG
@@ -64,7 +63,8 @@ const VIRTIO_MEM_RESP_NACK: u16 = 1;
 // - VIRTIO_MEM_REQ_PLUG
 // - VIRTIO_MEM_REQ_UNPLUG
 // - VIRTIO_MEM_REQ_UNPLUG_ALL
-// VIRTIO_MEM_RESP_BUSY: u16 = 2;
+#[allow(unused)]
+const VIRTIO_MEM_RESP_BUSY: u16 = 2;
 
 // Error in request (e.g. addresses/alignment), applicable for
 // - VIRTIO_MEM_REQ_PLUG
@@ -117,16 +117,15 @@ pub enum Error {
     // Failed to MpscRecv.
     MpscRecvFail(mpsc::RecvError),
     // Resize invalid argument
-    ResizeInval(String),
+    ResizeError(anyhow::Error),
     // Fail to resize trigger
     ResizeTriggerFail(DeviceError),
+    // Invalid configuration
+    ValidateError(anyhow::Error),
+    // Failed discarding memory range
+    DiscardMemoryRange(std::io::Error),
 }
 
-// Got from qemu/include/standard-headers/linux/virtio_mem.h
-// rust union doesn't support std::default::Default that
-// need by mem.read_obj.
-// Then move virtio_mem_req_plug, virtio_mem_req_unplug and
-// virtio_mem_req_state to virtio_mem_req.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct VirtioMemReq {
@@ -134,31 +133,23 @@ struct VirtioMemReq {
     padding: [u16; 3],
     addr: u64,
     nb_blocks: u16,
+    padding_1: [u16; 3],
 }
 
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioMemReq {}
-
-// Got from qemu/include/standard-headers/linux/virtio_mem.h
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
-struct VirtioMemRespState {
-    state: u16,
-}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct VirtioMemResp {
     resp_type: u16,
     padding: [u16; 3],
-
-    state: VirtioMemRespState,
+    state: u16,
 }
 
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioMemResp {}
 
-// Got from qemu/include/standard-headers/linux/virtio_mem.h
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct VirtioMemConfig {
@@ -185,34 +176,85 @@ struct VirtioMemConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioMemConfig {}
 
-fn virtio_mem_config_resize(config: &mut VirtioMemConfig, size: u64) -> result::Result<(), Error> {
-    if config.requested_size == size {
-        return Err(Error::ResizeInval(format!(
-            "Virtio-mem resize {} is same with current config.requested_size",
-            size
-        )));
-    } else if size > config.region_size {
-        let region_size = config.region_size;
-        return Err(Error::ResizeInval(format!(
-            "Virtio-mem resize {} is bigger than config.region_size {}",
-            size, region_size
-        )));
-    } else if size % (config.block_size as u64) != 0 {
-        let block_size = config.block_size;
-        return Err(Error::ResizeInval(format!(
-            "Virtio-mem resize {} is not aligned with config.block_size {}",
-            size, block_size
-        )));
+impl VirtioMemConfig {
+    fn validate(&self) -> result::Result<(), Error> {
+        if self.addr % self.block_size != 0 {
+            return Err(Error::ValidateError(anyhow!(
+                "addr 0x{:x} is not aligned on block_size 0x{:x}",
+                self.addr,
+                self.block_size
+            )));
+        }
+        if self.region_size % self.block_size != 0 {
+            return Err(Error::ValidateError(anyhow!(
+                "region_size 0x{:x} is not aligned on block_size 0x{:x}",
+                self.region_size,
+                self.block_size
+            )));
+        }
+        if self.usable_region_size % self.block_size != 0 {
+            return Err(Error::ValidateError(anyhow!(
+                "usable_region_size 0x{:x} is not aligned on block_size 0x{:x}",
+                self.usable_region_size,
+                self.block_size
+            )));
+        }
+        if self.plugged_size % self.block_size != 0 {
+            return Err(Error::ValidateError(anyhow!(
+                "plugged_size 0x{:x} is not aligned on block_size 0x{:x}",
+                self.plugged_size,
+                self.block_size
+            )));
+        }
+        if self.requested_size % self.block_size != 0 {
+            return Err(Error::ValidateError(anyhow!(
+                "requested_size 0x{:x} is not aligned on block_size 0x{:x}",
+                self.requested_size,
+                self.block_size
+            )));
+        }
+
+        Ok(())
     }
 
-    config.requested_size = size;
-    let tmp_size = cmp::min(
-        config.region_size,
-        config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
-    );
-    config.usable_region_size = cmp::max(config.usable_region_size, tmp_size);
+    fn resize(&mut self, size: u64) -> result::Result<(), Error> {
+        if self.requested_size == size {
+            return Err(Error::ResizeError(anyhow!(
+                "new size 0x{:x} and requested_size are identical",
+                size
+            )));
+        } else if size > self.region_size {
+            return Err(Error::ResizeError(anyhow!(
+                "new size 0x{:x} is bigger than region_size 0x{:x}",
+                size,
+                self.region_size
+            )));
+        } else if size % (self.block_size as u64) != 0 {
+            return Err(Error::ResizeError(anyhow!(
+                "new size 0x{:x} is not aligned on block_size 0x{:x}",
+                size,
+                self.block_size
+            )));
+        }
 
-    Ok(())
+        self.requested_size = size;
+
+        Ok(())
+    }
+
+    fn is_valid_range(&self, addr: u64, size: u64) -> bool {
+        // Start address must be aligned on block_size, the size must be
+        // greater than 0, and all blocks covered by the request must be
+        // in the usable region.
+        if addr % self.block_size != 0
+            || size == 0
+            || (addr < self.addr || addr + size >= self.addr + self.usable_region_size)
+        {
+            return false;
+        }
+
+        true
+    }
 }
 
 struct Request {
@@ -252,12 +294,56 @@ impl Request {
             status_addr: status_desc.addr,
         })
     }
+
+    fn send_response(&self, mem: &GuestMemoryMmap, resp_type: u16, state: u16) -> u32 {
+        let resp = VirtioMemResp {
+            resp_type,
+            state,
+            ..Default::default()
+        };
+        match mem.write_obj(resp, self.status_addr) {
+            Ok(_) => size_of::<VirtioMemResp>() as u32,
+            Err(e) => {
+                error!("bad guest memory address: {}", e);
+                0
+            }
+        }
+    }
+}
+
+pub struct ResizeSender {
+    size: Arc<AtomicU64>,
+    tx: mpsc::Sender<Result<(), Error>>,
+    evt: EventFd,
+}
+
+impl ResizeSender {
+    fn size(&self) -> u64 {
+        self.size.load(Ordering::Acquire)
+    }
+
+    fn send(&self, r: Result<(), Error>) -> Result<(), mpsc::SendError<Result<(), Error>>> {
+        self.tx.send(r)
+    }
+}
+
+impl Clone for ResizeSender {
+    fn clone(&self) -> Self {
+        ResizeSender {
+            size: self.size.clone(),
+            tx: self.tx.clone(),
+            evt: self
+                .evt
+                .try_clone()
+                .expect("Failed cloning EventFd from ResizeSender"),
+        }
+    }
 }
 
 pub struct Resize {
     size: Arc<AtomicU64>,
     tx: mpsc::Sender<Result<(), Error>>,
-    rx: Option<mpsc::Receiver<Result<(), Error>>>,
+    rx: mpsc::Receiver<Result<(), Error>>,
     evt: EventFd,
 }
 
@@ -268,96 +354,36 @@ impl Resize {
         Ok(Resize {
             size: Arc::new(AtomicU64::new(0)),
             tx,
-            rx: Some(rx),
+            rx,
             evt: EventFd::new(EFD_NONBLOCK)?,
         })
     }
 
-    pub fn try_clone(&self) -> Result<Self, Error> {
-        Ok(Resize {
+    pub fn new_resize_sender(&self) -> Result<ResizeSender, Error> {
+        Ok(ResizeSender {
             size: self.size.clone(),
             tx: self.tx.clone(),
-            rx: None,
             evt: self.evt.try_clone().map_err(Error::EventFdTryCloneFail)?,
         })
     }
 
     pub fn work(&self, size: u64) -> Result<(), Error> {
-        if let Some(rx) = &self.rx {
-            self.size.store(size, Ordering::Release);
-            self.evt.write(1).map_err(Error::EventFdWriteFail)?;
-            rx.recv().map_err(Error::MpscRecvFail)?
-        } else {
-            panic!("work should not work with cloned resize")
-        }
-    }
-
-    fn get_size(&self) -> u64 {
-        self.size.load(Ordering::Acquire)
-    }
-
-    fn send(&self, r: Result<(), Error>) -> Result<(), mpsc::SendError<Result<(), Error>>> {
-        self.tx.send(r)
+        self.size.store(size, Ordering::Release);
+        self.evt.write(1).map_err(Error::EventFdWriteFail)?;
+        self.rx.recv().map_err(Error::MpscRecvFail)?
     }
 }
 
-struct MemEpollHandler {
-    host_addr: u64,
-    host_fd: Option<RawFd>,
-    mem_state: Vec<bool>,
-    config: Arc<Mutex<VirtioMemConfig>>,
-    resize: Resize,
-    queue: Queue,
-    mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    interrupt_cb: Arc<dyn VirtioInterrupt>,
-    queue_evt: EventFd,
-    kill_evt: EventFd,
-    pause_evt: EventFd,
-}
+struct BlocksState(Vec<bool>);
 
-struct StateChangeRequest<'a> {
-    config: VirtioMemConfig,
-    addr: u64,
-    size: u64,
-    nb_blocks: u16,
-    mem_state: &'a mut Vec<bool>,
-    host_addr: u64,
-    host_fd: Option<RawFd>,
-    plug: bool,
-}
-
-impl MemEpollHandler {
-    fn virtio_mem_valid_range(config: &VirtioMemConfig, addr: u64, size: u64) -> bool {
-        // address properly aligned?
-        if addr % config.block_size as u64 != 0 {
-            return false;
-        }
-
-        // reasonable size
-        if addr + size <= addr || size == 0 {
-            return false;
-        }
-
-        // start address in usable range?
-        if addr < config.addr || addr >= config.addr + config.usable_region_size {
-            return false;
-        }
-
-        // end address in usable range?
-        if addr + size > config.addr + config.usable_region_size {
-            return false;
-        }
-
-        true
-    }
-
-    fn virtio_mem_check_bitmap(
-        bit_index: usize,
-        nb_blocks: u16,
-        mem_state: &[bool],
-        plug: bool,
-    ) -> bool {
-        for state in mem_state.iter().skip(bit_index).take(nb_blocks as usize) {
+impl BlocksState {
+    fn is_range_state(&self, first_block_index: usize, nb_blocks: u16, plug: bool) -> bool {
+        for state in self
+            .0
+            .iter()
+            .skip(first_block_index)
+            .take(nb_blocks as usize)
+        {
             if *state != plug {
                 return false;
             }
@@ -365,145 +391,154 @@ impl MemEpollHandler {
         true
     }
 
-    fn virtio_mem_set_bitmap(
-        bit_index: usize,
-        nb_blocks: u16,
-        mem_state: &mut Vec<bool>,
-        plug: bool,
-    ) {
-        for state in mem_state
+    fn set_range(&mut self, first_block_index: usize, nb_blocks: u16, plug: bool) {
+        for state in self
+            .0
             .iter_mut()
-            .skip(bit_index)
+            .skip(first_block_index)
             .take(nb_blocks as usize)
         {
             *state = plug;
         }
     }
+}
 
-    fn virtio_mem_state_change_request(r: StateChangeRequest) -> u16 {
-        if r.plug && (r.config.plugged_size + r.size > r.config.requested_size) {
-            return VIRTIO_MEM_RESP_NACK;
-        }
-        if !MemEpollHandler::virtio_mem_valid_range(&r.config, r.addr, r.size) {
-            return VIRTIO_MEM_RESP_ERROR;
-        }
+struct MemEpollHandler {
+    host_addr: u64,
+    host_fd: Option<RawFd>,
+    blocks_state: BlocksState,
+    config: Arc<Mutex<VirtioMemConfig>>,
+    resize: ResizeSender,
+    queue: Queue,
+    mem: GuestMemoryAtomic<GuestMemoryMmap>,
+    interrupt_cb: Arc<dyn VirtioInterrupt>,
+    queue_evt: EventFd,
+    kill_evt: EventFd,
+    pause_evt: EventFd,
+    hugepages: bool,
+}
 
-        let offset = r.addr - r.config.addr;
-
-        let bit_index = (offset / r.config.block_size as u64) as usize;
-        if !MemEpollHandler::virtio_mem_check_bitmap(bit_index, r.nb_blocks, r.mem_state, !r.plug) {
-            return VIRTIO_MEM_RESP_ERROR;
-        }
-
-        if !r.plug {
-            if let Some(fd) = r.host_fd {
-                let res = unsafe {
-                    libc::fallocate64(
-                        fd,
-                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-                        offset as libc::off64_t,
-                        r.size as libc::off64_t,
-                    )
-                };
-                if res != 0 {
-                    error!("fallocate64 get error {}", io::Error::last_os_error());
-                    return VIRTIO_MEM_RESP_ERROR;
-                }
+impl MemEpollHandler {
+    fn discard_memory_range(&self, offset: u64, size: u64) -> Result<(), Error> {
+        // Use fallocate if the memory region is backed by a file.
+        if let Some(fd) = self.host_fd {
+            let res = unsafe {
+                libc::fallocate64(
+                    fd,
+                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                    offset as libc::off64_t,
+                    size as libc::off64_t,
+                )
+            };
+            if res != 0 {
+                let err = io::Error::last_os_error();
+                error!("Deallocating file space failed: {}", err);
+                return Err(Error::DiscardMemoryRange(err));
             }
+        }
+
+        // Only use madvise if the memory region is not allocated with
+        // hugepages.
+        if !self.hugepages {
             let res = unsafe {
                 libc::madvise(
-                    (r.host_addr + offset) as *mut libc::c_void,
-                    r.size as libc::size_t,
+                    (self.host_addr + offset) as *mut libc::c_void,
+                    size as libc::size_t,
                     libc::MADV_DONTNEED,
                 )
             };
             if res != 0 {
-                error!("madvise get error {}", io::Error::last_os_error());
+                let err = io::Error::last_os_error();
+                error!("Advising kernel about pages range failed: {}", err);
+                return Err(Error::DiscardMemoryRange(err));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn state_change_request(&mut self, addr: u64, nb_blocks: u16, plug: bool) -> u16 {
+        let mut config = self.config.lock().unwrap();
+        let size: u64 = nb_blocks as u64 * config.block_size;
+
+        if plug && (config.plugged_size + size > config.requested_size) {
+            return VIRTIO_MEM_RESP_NACK;
+        }
+        if !config.is_valid_range(addr, size) {
+            return VIRTIO_MEM_RESP_ERROR;
+        }
+
+        let offset = addr - config.addr;
+
+        let first_block_index = (offset / config.block_size) as usize;
+        if !self
+            .blocks_state
+            .is_range_state(first_block_index, nb_blocks, !plug)
+        {
+            return VIRTIO_MEM_RESP_ERROR;
+        }
+
+        if !plug {
+            if let Err(e) = self.discard_memory_range(offset, size) {
+                error!("failed discarding memory range: {:?}", e);
                 return VIRTIO_MEM_RESP_ERROR;
             }
         }
 
-        MemEpollHandler::virtio_mem_set_bitmap(bit_index, r.nb_blocks, r.mem_state, r.plug);
+        self.blocks_state
+            .set_range(first_block_index, nb_blocks, plug);
 
-        VIRTIO_MEM_RESP_ACK
-    }
-
-    fn virtio_mem_unplug_all(
-        config: VirtioMemConfig,
-        mem_state: &mut Vec<bool>,
-        host_addr: u64,
-        host_fd: Option<RawFd>,
-    ) -> u16 {
-        for x in 0..(config.region_size / config.block_size as u64) as usize {
-            if mem_state[x] {
-                let resp_type =
-                    MemEpollHandler::virtio_mem_state_change_request(StateChangeRequest {
-                        config,
-                        addr: config.addr + x as u64 * config.block_size as u64,
-                        size: config.block_size as u64,
-                        nb_blocks: 1,
-                        mem_state,
-                        host_addr,
-                        host_fd,
-                        plug: false,
-                    });
-                if resp_type != VIRTIO_MEM_RESP_ACK {
-                    return resp_type;
-                }
-                mem_state[x] = false;
-            }
+        if plug {
+            config.plugged_size += size;
+        } else {
+            config.plugged_size -= size;
         }
 
         VIRTIO_MEM_RESP_ACK
     }
 
-    fn virtio_mem_state_request(
-        config: VirtioMemConfig,
-        addr: u64,
-        nb_blocks: u16,
-        mem_state: &mut Vec<bool>,
-    ) -> (u16, u16) {
-        let size: u64 = nb_blocks as u64 * config.block_size as u64;
-        let resp_type = if MemEpollHandler::virtio_mem_valid_range(&config, addr, size) {
+    fn unplug_all(&mut self) -> u16 {
+        let mut config = self.config.lock().unwrap();
+        if let Err(e) = self.discard_memory_range(0, config.region_size) {
+            error!("failed discarding memory range: {:?}", e);
+            return VIRTIO_MEM_RESP_ERROR;
+        }
+
+        self.blocks_state
+            .set_range(0, (config.region_size / config.block_size) as u16, false);
+
+        config.plugged_size = 0;
+
+        VIRTIO_MEM_RESP_ACK
+    }
+
+    fn state_request(&self, addr: u64, nb_blocks: u16) -> (u16, u16) {
+        let config = self.config.lock().unwrap();
+        let size: u64 = nb_blocks as u64 * config.block_size;
+
+        let resp_type = if config.is_valid_range(addr, size) {
             VIRTIO_MEM_RESP_ACK
         } else {
             VIRTIO_MEM_RESP_ERROR
         };
 
         let offset = addr - config.addr;
-        let bit_index = (offset / config.block_size as u64) as usize;
-        let resp_state =
-            if MemEpollHandler::virtio_mem_check_bitmap(bit_index, nb_blocks, mem_state, true) {
-                VIRTIO_MEM_STATE_PLUGGED
-            } else if MemEpollHandler::virtio_mem_check_bitmap(
-                bit_index, nb_blocks, mem_state, false,
-            ) {
-                VIRTIO_MEM_STATE_UNPLUGGED
-            } else {
-                VIRTIO_MEM_STATE_MIXED
-            };
+        let first_block_index = (offset / config.block_size) as usize;
+        let resp_state = if self
+            .blocks_state
+            .is_range_state(first_block_index, nb_blocks, true)
+        {
+            VIRTIO_MEM_STATE_PLUGGED
+        } else if self
+            .blocks_state
+            .is_range_state(first_block_index, nb_blocks, false)
+        {
+            VIRTIO_MEM_STATE_UNPLUGGED
+        } else {
+            VIRTIO_MEM_STATE_MIXED
+        };
 
         (resp_type, resp_state)
-    }
-
-    fn virtio_mem_send_response(
-        mem: &GuestMemoryMmap,
-        resp_type: u16,
-        state: u16,
-        status_addr: GuestAddress,
-    ) -> u32 {
-        let resp = VirtioMemResp {
-            resp_type,
-            state: VirtioMemRespState { state },
-            ..Default::default()
-        };
-        match mem.write_obj(resp, status_addr) {
-            Ok(_) => size_of::<VirtioMemResp>() as u32,
-            Err(e) => {
-                error!("bad guest memory address: {}", e);
-                0
-            }
-        }
     }
 
     fn signal(&self, int_type: &VirtioInterruptType) -> result::Result<(), DeviceError> {
@@ -516,115 +551,51 @@ impl MemEpollHandler {
     }
 
     fn process_queue(&mut self) -> bool {
-        let mut used_desc_heads = [(0, 0); QUEUE_SIZE as usize];
+        let mut request_list = Vec::new();
         let mut used_count = 0;
         let mem = self.mem.memory();
         for avail_desc in self.queue.iter(&mem) {
-            let len = match Request::parse(&avail_desc, &mem) {
+            request_list.push((avail_desc.index, Request::parse(&avail_desc, &mem)));
+        }
+
+        for (desc_index, request) in request_list.iter() {
+            let len = match request {
                 Err(e) => {
                     error!("failed parse VirtioMemReq: {:?}", e);
                     0
                 }
-                Ok(r) => {
-                    let mut config = self.config.lock().unwrap();
-                    match r.req.req_type {
-                        VIRTIO_MEM_REQ_PLUG => {
-                            let size: u64 = r.req.nb_blocks as u64 * config.block_size as u64;
-                            let resp_type = MemEpollHandler::virtio_mem_state_change_request(
-                                StateChangeRequest {
-                                    config: *config,
-                                    addr: r.req.addr,
-                                    size,
-                                    nb_blocks: r.req.nb_blocks,
-                                    mem_state: &mut self.mem_state,
-                                    host_addr: self.host_addr,
-                                    host_fd: self.host_fd,
-                                    plug: true,
-                                },
-                            );
-                            if resp_type == VIRTIO_MEM_RESP_ACK {
-                                config.plugged_size += size;
-                            }
-                            MemEpollHandler::virtio_mem_send_response(
-                                &mem,
-                                resp_type,
-                                0u16,
-                                r.status_addr,
-                            )
-                        }
-                        VIRTIO_MEM_REQ_UNPLUG => {
-                            let size: u64 = r.req.nb_blocks as u64 * config.block_size as u64;
-                            let resp_type = MemEpollHandler::virtio_mem_state_change_request(
-                                StateChangeRequest {
-                                    config: *config,
-                                    addr: r.req.addr,
-                                    size,
-                                    nb_blocks: r.req.nb_blocks,
-                                    mem_state: &mut self.mem_state,
-                                    host_addr: self.host_addr,
-                                    host_fd: self.host_fd,
-                                    plug: false,
-                                },
-                            );
-                            if resp_type == VIRTIO_MEM_RESP_ACK {
-                                config.plugged_size -= size;
-                            }
-                            MemEpollHandler::virtio_mem_send_response(
-                                &mem,
-                                resp_type,
-                                0u16,
-                                r.status_addr,
-                            )
-                        }
-                        VIRTIO_MEM_REQ_UNPLUG_ALL => {
-                            let resp_type = MemEpollHandler::virtio_mem_unplug_all(
-                                *config,
-                                &mut self.mem_state,
-                                self.host_addr,
-                                self.host_fd,
-                            );
-                            if resp_type == VIRTIO_MEM_RESP_ACK {
-                                config.plugged_size = 0;
-                                config.usable_region_size = cmp::min(
-                                    config.region_size,
-                                    config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
-                                );
-                            }
-                            MemEpollHandler::virtio_mem_send_response(
-                                &mem,
-                                resp_type,
-                                0u16,
-                                r.status_addr,
-                            )
-                        }
-                        VIRTIO_MEM_REQ_STATE => {
-                            let (resp_type, resp_state) = MemEpollHandler::virtio_mem_state_request(
-                                *config,
-                                r.req.addr,
-                                r.req.nb_blocks,
-                                &mut self.mem_state,
-                            );
-                            MemEpollHandler::virtio_mem_send_response(
-                                &mem,
-                                resp_type,
-                                resp_state,
-                                r.status_addr,
-                            )
-                        }
-                        _ => {
-                            error!("VirtioMemReq unknown request type {:?}", r.req.req_type);
-                            0
-                        }
+                Ok(r) => match r.req.req_type {
+                    VIRTIO_MEM_REQ_PLUG => {
+                        let resp_type =
+                            self.state_change_request(r.req.addr, r.req.nb_blocks, true);
+                        r.send_response(&mem, resp_type, 0u16)
                     }
-                }
+                    VIRTIO_MEM_REQ_UNPLUG => {
+                        let resp_type =
+                            self.state_change_request(r.req.addr, r.req.nb_blocks, false);
+                        r.send_response(&mem, resp_type, 0u16)
+                    }
+                    VIRTIO_MEM_REQ_UNPLUG_ALL => {
+                        let resp_type = self.unplug_all();
+                        r.send_response(&mem, resp_type, 0u16)
+                    }
+                    VIRTIO_MEM_REQ_STATE => {
+                        let (resp_type, resp_state) =
+                            self.state_request(r.req.addr, r.req.nb_blocks);
+                        r.send_response(&mem, resp_type, resp_state)
+                    }
+                    _ => {
+                        error!("VirtioMemReq unknown request type {:?}", r.req.req_type);
+                        0
+                    }
+                },
             };
-            used_desc_heads[used_count] = (avail_desc.index, len);
+
+            self.queue.add_used(&mem, *desc_index, len);
+
             used_count += 1;
         }
 
-        for &(desc_index, len) in &used_desc_heads[..used_count] {
-            self.queue.add_used(&mem, desc_index, len);
-        }
         used_count > 0
     }
 
@@ -651,10 +622,10 @@ impl EpollHelperHandler for MemEpollHandler {
                     error!("Failed to get resize event: {:?}", e);
                     return true;
                 } else {
-                    let size = self.resize.get_size();
+                    let size = self.resize.size();
                     let mut config = self.config.lock().unwrap();
                     let mut signal_error = false;
-                    let mut r = virtio_mem_config_resize(&mut config, size);
+                    let mut r = config.resize(size);
                     r = match r {
                         Err(e) => Err(e),
                         _ => match self.signal(&VirtioInterruptType::Config) {
@@ -698,11 +669,12 @@ impl EpollHelperHandler for MemEpollHandler {
 pub struct Mem {
     common: VirtioCommon,
     id: String,
-    resize: Resize,
+    resize: ResizeSender,
     host_addr: u64,
     host_fd: Option<RawFd>,
     config: Arc<Mutex<VirtioMemConfig>>,
     seccomp_action: SeccompAction,
+    hugepages: bool,
 }
 
 impl Mem {
@@ -710,10 +682,11 @@ impl Mem {
     pub fn new(
         id: String,
         region: &Arc<GuestRegionMmap>,
-        resize: Resize,
+        resize: ResizeSender,
         seccomp_action: SeccompAction,
         numa_node_id: Option<u16>,
         initial_size: u64,
+        hugepages: bool,
     ) -> io::Result<Mem> {
         let region_len = region.len();
 
@@ -729,20 +702,24 @@ impl Mem {
 
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
-        let mut config = VirtioMemConfig::default();
-        config.block_size = VIRTIO_MEM_DEFAULT_BLOCK_SIZE;
-        config.addr = region.start_addr().raw_value();
-        config.region_size = region.len();
-        config.usable_region_size = cmp::min(
-            config.region_size,
-            config.requested_size + VIRTIO_MEM_USABLE_EXTENT,
-        );
+        let mut config = VirtioMemConfig {
+            block_size: VIRTIO_MEM_DEFAULT_BLOCK_SIZE,
+            addr: region.start_addr().raw_value(),
+            region_size: region.len(),
+            usable_region_size: region.len(),
+            plugged_size: 0,
+            requested_size: 0,
+            ..Default::default()
+        };
 
         if initial_size != 0 {
-            virtio_mem_config_resize(&mut config, initial_size).map_err(|e| {
+            config.resize(initial_size).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
-                    format!("Virtio-mem resize {} got {:?}", initial_size, e),
+                    format!(
+                        "Failed to resize virtio-mem configuration to {}: {:?}",
+                        initial_size, e
+                    ),
                 )
             })?;
         }
@@ -752,11 +729,18 @@ impl Mem {
             config.node_id = node_id;
         }
 
-        let host_fd = if let Some(f_offset) = region.file_offset() {
-            Some(f_offset.file().as_raw_fd())
-        } else {
-            None
-        };
+        // Make sure the virtio-mem configuration complies with the
+        // specification.
+        config.validate().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Invalid virtio-mem configuration: {:?}", e),
+            )
+        })?;
+
+        let host_fd = region
+            .file_offset()
+            .map(|f_offset| f_offset.file().as_raw_fd());
 
         Ok(Mem {
             common: VirtioCommon {
@@ -773,6 +757,7 @@ impl Mem {
             host_fd,
             config: Arc::new(Mutex::new(config)),
             seccomp_action,
+            hugepages,
         })
     }
 }
@@ -840,19 +825,27 @@ impl VirtioDevice for Mem {
         let mut handler = MemEpollHandler {
             host_addr: self.host_addr,
             host_fd: self.host_fd,
-            mem_state: vec![false; config.region_size as usize / config.block_size as usize],
+            blocks_state: BlocksState(vec![
+                false;
+                (config.region_size / config.block_size) as usize
+            ]),
             config: self.config.clone(),
-            resize: self.resize.try_clone().map_err(|e| {
-                error!("failed to clone resize EventFd: {:?}", e);
-                ActivateError::BadActivate
-            })?,
+            resize: self.resize.clone(),
             queue: queues.remove(0),
             mem,
             interrupt_cb,
             queue_evt: queue_evts.remove(0),
             kill_evt,
             pause_evt,
+            hugepages: self.hugepages,
         };
+
+        handler
+            .discard_memory_range(0, config.region_size)
+            .map_err(|e| {
+                error!("failed discarding memory range: {:?}", e);
+                ActivateError::BadActivate
+            })?;
 
         let paused = self.common.paused.clone();
         let paused_sync = self.common.paused_sync.clone();

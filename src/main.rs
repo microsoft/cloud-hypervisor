@@ -147,7 +147,8 @@ fn create_app<'a, 'b>(
                 .long("memory")
                 .help(
                     "Memory parameters \
-                     \"size=<guest_memory_size>,mergeable=on|off,shared=on|off,hugepages=on|off,\
+                     \"size=<guest_memory_size>,mergeable=on|off,shared=on|off,\
+                     hugepages=on|off,hugepage_size=<hugepage_size>\
                      hotplug_method=acpi|virtio-mem,\
                      hotplug_size=<hotpluggable_memory_size>,\
                      hotplugged_size=<hotplugged_memory_size>\"",
@@ -161,7 +162,9 @@ fn create_app<'a, 'b>(
                 .help(
                     "User defined memory zone parameters \
                      \"size=<guest_memory_region_size>,file=<backing_file>,\
-                     shared=on|off,hugepages=on|off,host_numa_node=<node_id>,\
+                     shared=on|off,\
+                     hugepages=on|off,hugepage_size=<hugepage_size>\
+                     host_numa_node=<node_id>,\
                      id=<zone_identifier>,hotplug_size=<hotpluggable_memory_size>,\
                      hotplugged_size=<hotplugged_memory_size>\"",
                 )
@@ -244,7 +247,7 @@ fn create_app<'a, 'b>(
         .arg(
             Arg::with_name("serial")
                 .long("serial")
-                .help("Control serial port: off|null|tty|file=/path/to/a/file")
+                .help("Control serial port: off|null|pty|tty|file=/path/to/a/file")
                 .default_value("null")
                 .group("vm-config"),
         )
@@ -252,7 +255,7 @@ fn create_app<'a, 'b>(
             Arg::with_name("console")
                 .long("console")
                 .help(
-                    "Control (virtio) console: \"off|null|tty|file=/path/to/a/file,iommu=on|off\"",
+                    "Control (virtio) console: \"off|null|pty|tty|file=/path/to/a/file,iommu=on|off\"",
                 )
                 .default_value("tty")
                 .group("vm-config"),
@@ -585,6 +588,7 @@ mod unit_tests {
                     shared: false,
                     hugepages: false,
                     zones: None,
+                    hugepage_size: None,
                 },
                 kernel: Some(KernelConfig {
                     path: PathBuf::from("/path/to/kernel"),
@@ -1398,6 +1402,57 @@ mod unit_tests {
                     "kernel": {"path": "/path/to/kernel"},
                     "serial": {"mode": "Tty"},
                     "console": {"mode": "Off"}
+                }"#,
+                true,
+            ),
+        ]
+        .iter()
+        .for_each(|(cli, openapi, equal)| {
+            compare_vm_config_cli_vs_json(cli, openapi, *equal);
+        });
+    }
+
+    #[test]
+    fn test_valid_vm_config_serial_pty_console_pty() {
+        vec![
+            (
+                vec!["cloud-hypervisor", "--kernel", "/path/to/kernel"],
+                r#"{
+                    "kernel": {"path": "/path/to/kernel"},
+                    "serial": {"mode": "Null"},
+                    "console": {"mode": "Tty"}
+                }"#,
+                true,
+            ),
+            (
+                vec![
+                    "cloud-hypervisor",
+                    "--kernel",
+                    "/path/to/kernel",
+                    "--serial",
+                    "null",
+                    "--console",
+                    "tty",
+                ],
+                r#"{
+                    "kernel": {"path": "/path/to/kernel"}
+                }"#,
+                true,
+            ),
+            (
+                vec![
+                    "cloud-hypervisor",
+                    "--kernel",
+                    "/path/to/kernel",
+                    "--serial",
+                    "pty",
+                    "--console",
+                    "pty",
+                ],
+                r#"{
+                    "kernel": {"path": "/path/to/kernel"},
+                    "serial": {"mode": "Pty"},
+                    "console": {"mode": "Pty"}
                 }"#,
                 true,
             ),
