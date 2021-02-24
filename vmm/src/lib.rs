@@ -5,6 +5,8 @@
 
 extern crate anyhow;
 extern crate arc_swap;
+#[macro_use]
+extern crate event_monitor;
 extern crate hypervisor;
 extern crate option_parser;
 #[macro_use]
@@ -15,7 +17,6 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-extern crate tempfile;
 extern crate url;
 extern crate vmm_sys_util;
 #[cfg(test)]
@@ -503,12 +504,10 @@ impl Vmm {
 
         // Then we start the new VM.
         if let Some(ref mut vm) = self.vm {
-            vm.boot()?;
+            vm.boot()
         } else {
-            return Err(VmError::VmNotCreated);
+            Err(VmError::VmNotCreated)
         }
-
-        Ok(())
     }
 
     fn vm_info(&self) -> result::Result<VmInfo, VmError> {
@@ -557,11 +556,15 @@ impl Vmm {
 
         self.vm_config = None;
 
+        event!("vm", "deleted");
+
         Ok(())
     }
 
     fn vmm_shutdown(&mut self) -> result::Result<(), VmError> {
-        self.vm_delete()
+        self.vm_delete()?;
+        event!("vmm", "shutdown");
+        Ok(())
     }
 
     fn vm_resize(

@@ -5,14 +5,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use hypervisor::x86_64::LapicState;
 use std::io::Cursor;
 use std::mem;
 use std::result;
 use std::sync::Arc;
-
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-
-use hypervisor::x86_64::LapicState;
 
 #[derive(Debug)]
 pub enum Error {
@@ -82,12 +80,7 @@ pub fn set_lint(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
 }
 
 #[cfg(test)]
-#[cfg(feature = "kvm")]
 mod tests {
-
-    extern crate rand;
-    use self::rand::Rng;
-
     use super::*;
 
     const KVM_APIC_REG_SIZE: usize = 0x400;
@@ -111,8 +104,15 @@ mod tests {
 
     #[test]
     fn test_apic_delivery_mode() {
-        let mut rng = rand::thread_rng();
-        let mut v: Vec<u32> = (0..20).map(|_| rng.gen::<u32>()).collect();
+        let mut v: Vec<u32> = Vec::new();
+        v.resize(20, 0);
+
+        unsafe {
+            assert_eq!(
+                libc::getrandom(v.as_mut_ptr() as *mut _ as *mut libc::c_void, 80, 0),
+                80
+            );
+        }
 
         v.iter_mut()
             .for_each(|x| *x = set_apic_delivery_mode(*x, 2));
