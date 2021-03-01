@@ -22,7 +22,7 @@ use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
-use vfio_ioctls::ExternalDmaMapping;
+use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
     GuestMemoryError, GuestMemoryMmap,
@@ -948,11 +948,14 @@ impl VirtioDevice for Iommu {
 
         self.common.epoll_threads = Some(epoll_threads);
 
+        event!("virtio-device", "activated", "id", &self.id);
         Ok(())
     }
 
     fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
-        self.common.reset()
+        let result = self.common.reset();
+        event!("virtio-device", "reset", "id", &self.id);
+        result
     }
 }
 

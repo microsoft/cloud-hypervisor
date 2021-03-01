@@ -87,16 +87,15 @@ impl NetEpollHandler {
             error!("Failed to get rx queue event: {:?}", e);
         }
 
-        if self
-            .net
-            .resume_rx(&mut self.queue_pair[0])
-            .map_err(DeviceError::NetQueuePair)?
-            || !self.driver_awake
-        {
-            self.signal_used_queue(&self.queue_pair[0])?;
-            debug!("Signalling RX queue");
-        } else {
-            debug!("Not signalling RX queue");
+        if !self.net.rx_tap_listening {
+            net_util::register_listener(
+                self.net.epoll_fd.unwrap(),
+                self.net.tap.as_raw_fd(),
+                epoll::Events::EPOLLIN,
+                u64::from(self.net.tap_event_id),
+            )
+            .map_err(DeviceError::IoError)?;
+            self.net.rx_tap_listening = true;
         }
 
         Ok(())
@@ -124,7 +123,7 @@ impl NetEpollHandler {
     fn handle_rx_tap_event(&mut self) -> result::Result<(), DeviceError> {
         if self
             .net
-            .process_rx_tap(&mut self.queue_pair[0])
+            .process_rx(&mut self.queue_pair[0])
             .map_err(DeviceError::NetQueuePair)?
             || !self.driver_awake
         {
@@ -524,13 +523,16 @@ impl VirtioDevice for Net {
 
             self.common.epoll_threads = Some(epoll_threads);
 
+            event!("virtio-device", "activated", "id", &self.id);
             return Ok(());
         }
         Err(ActivateError::BadActivate)
     }
 
     fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
-        self.common.reset()
+        let result = self.common.reset();
+        event!("virtio-device", "reset", "id", &self.id);
+        result
     }
 
     fn counters(&self) -> Option<HashMap<&'static str, Wrapping<u64>>> {

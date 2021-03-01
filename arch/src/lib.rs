@@ -6,13 +6,7 @@
 
 //! Implements platform specific functionality.
 //! Supported platforms: x86_64, aarch64.
-#![allow(
-    clippy::unreadable_literal,
-    clippy::redundant_static_lifetimes,
-    clippy::cast_lossless,
-    clippy::transmute_ptr_to_ptr,
-    clippy::cast_ptr_alignment
-)]
+#![allow(clippy::transmute_ptr_to_ptr, clippy::redundant_static_lifetimes)]
 
 extern crate anyhow;
 extern crate byteorder;
@@ -31,6 +25,7 @@ extern crate vm_migration;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
+extern crate thiserror;
 
 use std::fmt;
 use std::result;

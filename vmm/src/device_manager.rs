@@ -79,13 +79,15 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
 #[cfg(feature = "kvm")]
-use vfio_ioctls::{VfioContainer, VfioDevice, VfioDmaMapping};
+use vfio_ioctls::{VfioContainer, VfioDevice};
 use virtio_devices::transport::VirtioPciDevice;
 use virtio_devices::transport::VirtioTransport;
 use virtio_devices::vhost_user::VhostUserConfig;
 use virtio_devices::{DmaRemapping, IommuMapping};
 use virtio_devices::{VirtioSharedMemory, VirtioSharedMemoryList};
 use vm_allocator::SystemAllocator;
+#[cfg(feature = "kvm")]
+use vm_device::dma_mapping::vfio::VfioDmaMapping;
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, LegacyIrqGroupConfig, MsiIrqGroupConfig,
 };
@@ -2689,12 +2691,8 @@ impl DeviceManager {
                 .map_err(DeviceManagerError::VfioCreate)?,
         );
 
-        let vfio_device = VfioDevice::new(
-            &device_cfg.path,
-            Arc::clone(&vfio_container),
-            device_cfg.iommu,
-        )
-        .map_err(DeviceManagerError::VfioCreate)?;
+        let vfio_device = VfioDevice::new(&device_cfg.path, Arc::clone(&vfio_container))
+            .map_err(DeviceManagerError::VfioCreate)?;
 
         if device_cfg.iommu {
             if let Some(iommu) = &self.iommu_device {
@@ -2729,9 +2727,11 @@ impl DeviceManager {
         let mut vfio_pci_device = VfioPciDevice::new(
             &self.address_manager.vm,
             vfio_device,
+            vfio_container,
             &self.msi_interrupt_manager,
             legacy_interrupt_group,
             memory,
+            device_cfg.iommu,
         )
         .map_err(DeviceManagerError::VfioPciCreate)?;
 
