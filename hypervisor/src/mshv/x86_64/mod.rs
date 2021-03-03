@@ -118,4 +118,5 @@ pub fn boot_msr_entries() -> MsrEntries {
         msr!(msr_index::MSR_SYSCALL_MASK),
         msr!(msr_index::MSR_IA32_TSC),
     ])
+    .unwrap()
 }
