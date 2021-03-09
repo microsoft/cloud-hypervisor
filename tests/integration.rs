@@ -6263,6 +6263,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore]
         fn test_windows_guest_snapshot_restore() {
             let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut windows);
