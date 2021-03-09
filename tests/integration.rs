@@ -6230,6 +6230,7 @@ mod tests {
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
                 .args(&["--net", "tap="])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -6262,6 +6263,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore]
         fn test_windows_guest_snapshot_restore() {
             let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
             let guest = Guest::new(&mut windows);
@@ -6287,6 +6289,7 @@ mod tests {
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
                 .args(&["--net", "tap="])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
