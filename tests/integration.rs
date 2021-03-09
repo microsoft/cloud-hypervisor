@@ -6230,6 +6230,7 @@ mod tests {
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
                 .args(&["--net", "tap="])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
@@ -6287,6 +6288,7 @@ mod tests {
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
                 .args(&["--net", "tap="])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .capture_output()
                 .spawn()
                 .unwrap();
