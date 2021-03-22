@@ -186,6 +186,9 @@ pub enum Error {
     /// Error populating CPUID with CPU identification
     #[cfg(target_arch = "x86_64")]
     CpuidIdentification(vmm_sys_util::fam::Error),
+
+    #[cfg(feature = "tdx")]
+    InitializeTdx(hypervisor::HypervisorCpuError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -1013,8 +1016,8 @@ impl CpuManager {
         Ok(())
     }
 
-    pub fn create_boot_vcpus(&mut self, entry_point: EntryPoint) -> Result<()> {
-        self.create_vcpus(self.boot_vcpus(), Some(entry_point))
+    pub fn create_boot_vcpus(&mut self, entry_point: Option<EntryPoint>) -> Result<()> {
+        self.create_vcpus(self.boot_vcpus(), entry_point)
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
@@ -1083,12 +1086,29 @@ impl CpuManager {
         Ok(())
     }
 
+    #[cfg(feature = "tdx")]
+    pub fn initialize_tdx(&self, hob_address: u64) -> Result<()> {
+        for vcpu in &self.vcpus {
+            vcpu.lock()
+                .unwrap()
+                .vcpu
+                .tdx_init(hob_address)
+                .map_err(Error::InitializeTdx)?;
+        }
+        Ok(())
+    }
+
     pub fn boot_vcpus(&self) -> u8 {
         self.config.boot_vcpus
     }
 
     pub fn max_vcpus(&self) -> u8 {
         self.config.max_vcpus
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn common_cpuid(&self) -> CpuId {
+        self.cpuid.clone()
     }
 
     fn present_vcpus(&self) -> u8 {

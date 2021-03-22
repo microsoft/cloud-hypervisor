@@ -29,7 +29,9 @@ use crate::config::{
     VmConfig, VsockConfig,
 };
 use crate::cpu;
-use crate::device_manager::{self, get_win_size, Console, DeviceManager, DeviceManagerError};
+use crate::device_manager::{
+    self, get_win_size, Console, DeviceManager, DeviceManagerError, PtyPair,
+};
 use crate::device_tree::DeviceTree;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::migration::{get_vm_snapshot, url_to_path, VM_SNAPSHOT_FILE};
@@ -69,7 +71,6 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
-use url::Url;
 use vm_device::Bus;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
@@ -243,6 +244,34 @@ pub enum Error {
 
     /// Error triggering power button
     PowerButton(device_manager::DeviceManagerError),
+
+    /// Error doing I/O on TDX firmware file
+    #[cfg(feature = "tdx")]
+    LoadTdvf(std::io::Error),
+
+    /// Error parsing TDVF
+    #[cfg(feature = "tdx")]
+    ParseTdvf(arch::x86_64::tdx::TdvfError),
+
+    /// Error populating HOB
+    #[cfg(feature = "tdx")]
+    PopulateHob(arch::x86_64::tdx::TdvfError),
+
+    /// Error allocating TDVF memory
+    #[cfg(feature = "tdx")]
+    AllocatingTdvfMemory(crate::memory_manager::Error),
+
+    /// Error enabling TDX VM
+    #[cfg(feature = "tdx")]
+    InitializeTDXVM(hypervisor::HypervisorVmError),
+
+    /// Error enabling TDX memory region
+    #[cfg(feature = "tdx")]
+    InitializeTDXMemoryRegion(hypervisor::HypervisorVmError),
+
+    /// Error finalizing TDX setup
+    #[cfg(feature = "tdx")]
+    FinalizeTDX(hypervisor::HypervisorVmError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -464,7 +493,7 @@ pub fn physical_bits(max_phys_bits: Option<u8>) -> u8 {
 }
 
 pub struct Vm {
-    kernel: File,
+    kernel: Option<File>,
     initramfs: Option<File>,
     threads: Vec<thread::JoinHandle<()>>,
     device_manager: Arc<Mutex<DeviceManager>>,
@@ -552,7 +581,13 @@ impl Vm {
         .map_err(Error::CpuManager)?;
 
         let on_tty = unsafe { libc::isatty(libc::STDIN_FILENO as i32) } != 0;
-        let kernel = File::open(&config.lock().unwrap().kernel.as_ref().unwrap().path)
+        let kernel = config
+            .lock()
+            .unwrap()
+            .kernel
+            .as_ref()
+            .map(|k| File::open(&k.path))
+            .transpose()
             .map_err(Error::KernelFile)?;
 
         let initramfs = config
@@ -650,6 +685,7 @@ impl Vm {
         Ok(numa_nodes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<Mutex<VmConfig>>,
         exit_evt: EventFd,
@@ -657,10 +693,24 @@ impl Vm {
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         activate_evt: EventFd,
+        serial_pty: Option<PtyPair>,
+        console_pty: Option<PtyPair>,
     ) -> Result<Self> {
+        #[cfg(feature = "tdx")]
+        let tdx_enabled = config.lock().unwrap().tdx.is_some();
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
+        #[cfg(feature = "tdx")]
+        let vm = hypervisor
+            .create_vm_with_type(if tdx_enabled {
+                2 // KVM_X86_TDX_VM
+            } else {
+                0 // KVM_X86_LEGACY_VM
+            })
+            .unwrap();
+        #[cfg(not(feature = "tdx"))]
         let vm = hypervisor.create_vm().unwrap();
+
         #[cfg(target_arch = "x86_64")]
         vm.enable_split_irq().unwrap();
         let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
@@ -669,6 +719,8 @@ impl Vm {
             &config.lock().unwrap().memory.clone(),
             false,
             phys_bits,
+            #[cfg(feature = "tdx")]
+            tdx_enabled,
         )
         .map_err(Error::MemoryManager)?;
 
@@ -702,7 +754,7 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices()
+            .create_devices(serial_pty, console_pty)
             .map_err(Error::DeviceManager)?;
         Ok(new_vm)
     }
@@ -783,6 +835,8 @@ impl Vm {
             &config.lock().unwrap().memory.clone(),
             false,
             phys_bits,
+            #[cfg(feature = "tdx")]
+            false,
         )
         .map_err(Error::MemoryManager)?;
 
@@ -837,10 +891,11 @@ impl Vm {
     fn load_kernel(&mut self) -> Result<EntryPoint> {
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
+        let mut kernel = self.kernel.as_ref().unwrap();
         let entry_addr = match linux_loader::loader::pe::PE::load(
             mem.deref(),
             Some(GuestAddress(arch::get_kernel_start())),
-            &mut self.kernel,
+            &mut kernel,
             None,
         ) {
             Ok(entry_addr) => entry_addr,
@@ -861,10 +916,11 @@ impl Vm {
         let cmdline_cstring = self.get_cmdline()?;
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
+        let mut kernel = self.kernel.as_ref().unwrap();
         let entry_addr = match linux_loader::loader::elf::Elf::load(
             mem.deref(),
             None,
-            &mut self.kernel,
+            &mut kernel,
             Some(arch::layout::HIGH_RAM_START),
         ) {
             Ok(entry_addr) => entry_addr,
@@ -872,7 +928,7 @@ impl Vm {
                 linux_loader::loader::bzimage::BzImage::load(
                     mem.deref(),
                     None,
-                    &mut self.kernel,
+                    &mut kernel,
                     Some(arch::layout::HIGH_RAM_START),
                 )
                 .map_err(Error::KernelLoad)?
@@ -1068,11 +1124,11 @@ impl Vm {
         Ok(())
     }
 
-    pub fn serial_pty(&self) -> Option<File> {
+    pub fn serial_pty(&self) -> Option<PtyPair> {
         self.device_manager.lock().unwrap().serial_pty()
     }
 
-    pub fn console_pty(&self) -> Option<File> {
+    pub fn console_pty(&self) -> Option<PtyPair> {
         self.device_manager.lock().unwrap().console_pty()
     }
 
@@ -1490,6 +1546,135 @@ impl Vm {
         }
     }
 
+    #[cfg(feature = "tdx")]
+    fn init_tdx(&mut self) -> Result<()> {
+        let cpuid = self.cpu_manager.lock().unwrap().common_cpuid();
+        let max_vcpus = self.cpu_manager.lock().unwrap().max_vcpus() as u32;
+        self.vm
+            .tdx_init(&cpuid, max_vcpus)
+            .map_err(Error::InitializeTDXVM)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "tdx")]
+    fn init_tdx_memory(&mut self) -> Result<Option<u64>> {
+        use arch::x86_64::tdx::*;
+        // Get the memory end *before* we start adding TDVF ram regions
+        let mem_end = {
+            let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+            let mem = guest_memory.memory();
+            mem.last_addr()
+        };
+
+        // The TDVF file contains a table of section as well as code
+        let mut firmware_file =
+            File::open(&self.config.lock().unwrap().tdx.as_ref().unwrap().firmware)
+                .map_err(Error::LoadTdvf)?;
+
+        // For all the sections allocate some RAM backing them
+        let sections = parse_tdvf_sections(&mut firmware_file).map_err(Error::ParseTdvf)?;
+        for section in &sections {
+            info!("Allocating TDVF Section: {:?}", section);
+            self.memory_manager
+                .lock()
+                .unwrap()
+                .add_ram_region(GuestAddress(section.address), section.size as usize)
+                .map_err(Error::AllocatingTdvfMemory)?;
+        }
+
+        // The guest memory at this point now has all the required regions so it
+        // is safe to copy from the TDVF file into it.
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+        let mem = guest_memory.memory();
+        let mut hob_offset = None;
+        for section in &sections {
+            info!("Populating TDVF Section: {:?}", section);
+            match section.r#type {
+                TdvfSectionType::Bfv | TdvfSectionType::Cfv => {
+                    info!("Copying section to guest memory");
+                    firmware_file
+                        .seek(SeekFrom::Start(section.data_offset as u64))
+                        .map_err(Error::LoadTdvf)?;
+                    mem.read_from(
+                        GuestAddress(section.address),
+                        &mut firmware_file,
+                        section.data_size as usize,
+                    )
+                    .unwrap();
+                }
+                TdvfSectionType::TdHob => {
+                    hob_offset = Some(section.address);
+                }
+                _ => {}
+            }
+        }
+
+        // Generate HOB
+        let mut hob = TdHob::start(hob_offset.unwrap());
+
+        // RAM regions (all below 3GiB case)
+        if mem_end < arch::layout::MEM_32BIT_RESERVED_START {
+            hob.add_memory_resource(&mem, 0, mem_end.0 + 1, true)
+                .map_err(Error::PopulateHob)?;
+        } else {
+            // Otherwise split into two
+            hob.add_memory_resource(&mem, 0, arch::layout::MEM_32BIT_RESERVED_START.0, true)
+                .map_err(Error::PopulateHob)?;
+            if mem_end > arch::layout::RAM_64BIT_START {
+                hob.add_memory_resource(
+                    &mem,
+                    arch::layout::RAM_64BIT_START.raw_value(),
+                    mem_end.unchecked_offset_from(arch::layout::RAM_64BIT_START) + 1,
+                    true,
+                )
+                .map_err(Error::PopulateHob)?;
+            }
+        }
+
+        // MMIO regions
+        hob.add_mmio_resource(
+            &mem,
+            arch::layout::MEM_32BIT_DEVICES_START.raw_value(),
+            arch::layout::APIC_START.raw_value()
+                - arch::layout::MEM_32BIT_DEVICES_START.raw_value(),
+        )
+        .map_err(Error::PopulateHob)?;
+        let start_of_device_area = self
+            .memory_manager
+            .lock()
+            .unwrap()
+            .start_of_device_area()
+            .raw_value();
+        let end_of_device_area = self
+            .memory_manager
+            .lock()
+            .unwrap()
+            .end_of_device_area()
+            .raw_value();
+        hob.add_mmio_resource(
+            &mem,
+            start_of_device_area,
+            end_of_device_area - start_of_device_area,
+        )
+        .map_err(Error::PopulateHob)?;
+
+        hob.finish(&mem).map_err(Error::PopulateHob)?;
+
+        for section in &sections {
+            self.vm
+                .tdx_init_memory_region(
+                    mem.get_host_address(GuestAddress(section.address)).unwrap() as u64,
+                    section.address,
+                    section.size,
+                    /* TDVF_SECTION_ATTRIBUTES_EXTENDMR */
+                    section.attributes == 1,
+                )
+                .map_err(Error::InitializeTDXMemoryRegion)?;
+        }
+
+        Ok(hob_offset)
+    }
+
     pub fn boot(&mut self) -> Result<()> {
         event!("vm", "booting");
         let current_state = self.get_state()?;
@@ -1500,16 +1685,52 @@ impl Vm {
         let new_state = VmState::Running;
         current_state.valid_transition(new_state)?;
 
-        let entry_point = self.load_kernel()?;
+        // Load kernel if configured
+        let entry_point = if self.kernel.as_ref().is_some() {
+            Some(self.load_kernel()?)
+        } else {
+            None
+        };
 
-        // create and configure vcpus
+        // The initial TDX configuration must be done before the vCPUs are
+        // created
+        #[cfg(feature = "tdx")]
+        if self.config.lock().unwrap().tdx.is_some() {
+            self.init_tdx()?;
+        }
+
+        // Create and configure vcpus
         self.cpu_manager
             .lock()
             .unwrap()
             .create_boot_vcpus(entry_point)
             .map_err(Error::CpuManager)?;
 
-        self.configure_system(entry_point)?;
+        // Configuring the TDX regions requires that the vCPUs are created
+        #[cfg(feature = "tdx")]
+        let hob_address = if self.config.lock().unwrap().tdx.is_some() {
+            self.init_tdx_memory()?
+        } else {
+            None
+        };
+
+        // Configure shared state based on loaded kernel
+        entry_point
+            .map(|entry_point| self.configure_system(entry_point))
+            .transpose()?;
+
+        #[cfg(feature = "tdx")]
+        if let Some(hob_address) = hob_address {
+            // With the HOB address extracted the vCPUs can have
+            // their TDX state configured.
+            self.cpu_manager
+                .lock()
+                .unwrap()
+                .initialize_tdx(hob_address)
+                .map_err(Error::CpuManager)?;
+            // With TDX memory and CPU state configured TDX setup is complete
+            self.vm.tdx_finalize().map_err(Error::FinalizeTDX)?;
+        }
 
         self.cpu_manager
             .lock()
@@ -1574,7 +1795,7 @@ impl Vm {
         let dm = self.device_manager.lock().unwrap();
         let mut out = [0u8; 64];
         if let Some(mut pty) = dm.serial_pty() {
-            let count = pty.read(&mut out).map_err(Error::PtyConsole)?;
+            let count = pty.main.read(&mut out).map_err(Error::PtyConsole)?;
             let console = dm.console();
             if console.input_enabled() {
                 console
@@ -1583,7 +1804,7 @@ impl Vm {
             }
         };
         let count = match dm.console_pty() {
-            Some(mut pty) => pty.read(&mut out).map_err(Error::PtyConsole)?,
+            Some(mut pty) => pty.main.read(&mut out).map_err(Error::PtyConsole)?,
             None => return Ok(()),
         };
         let console = dm.console();
@@ -1817,6 +2038,7 @@ impl Vm {
             .map_err(Error::ActivateVirtioDevices)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn power_button(&self) -> Result<()> {
         #[cfg(feature = "acpi")]
         return self
@@ -1827,6 +2049,15 @@ impl Vm {
             .map_err(Error::PowerButton);
         #[cfg(not(feature = "acpi"))]
         Err(Error::PowerButtonNotSupported)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn power_button(&self) -> Result<()> {
+        self.device_manager
+            .lock()
+            .unwrap()
+            .notify_power_button()
+            .map_err(Error::PowerButton)
     }
 }
 
@@ -1908,6 +2139,15 @@ impl Snapshottable for Vm {
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
         event!("vm", "snapshotting");
+
+        #[cfg(feature = "tdx")]
+        {
+            if self.config.lock().unwrap().tdx.is_some() {
+                return Err(MigratableError::Snapshot(anyhow!(
+                    "Snapshot not possible with TDX VM"
+                )));
+            }
+        }
 
         let current_state = self.get_state().unwrap();
         if current_state != VmState::Paused {
@@ -2080,52 +2320,37 @@ impl Transportable for Vm {
         snapshot: &Snapshot,
         destination_url: &str,
     ) -> std::result::Result<(), MigratableError> {
-        let url = Url::parse(destination_url).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Could not parse destination URL: {}", e))
-        })?;
+        let mut vm_snapshot_path = url_to_path(destination_url)?;
+        vm_snapshot_path.push(VM_SNAPSHOT_FILE);
 
-        match url.scheme() {
-            "file" => {
-                let mut vm_snapshot_path = url_to_path(&url)?;
-                vm_snapshot_path.push(VM_SNAPSHOT_FILE);
+        // Create the snapshot file
+        let mut vm_snapshot_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(vm_snapshot_path)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-                // Create the snapshot file
-                let mut vm_snapshot_file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .open(vm_snapshot_path)
-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        // Serialize and write the snapshot
+        let vm_snapshot =
+            serde_json::to_vec(snapshot).map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-                // Serialize and write the snapshot
-                let vm_snapshot = serde_json::to_vec(snapshot)
-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        vm_snapshot_file
+            .write(&vm_snapshot)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-                vm_snapshot_file
-                    .write(&vm_snapshot)
-                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
-                // Tell the memory manager to also send/write its own snapshot.
-                if let Some(memory_manager_snapshot) =
-                    snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID)
-                {
-                    self.memory_manager
-                        .lock()
-                        .unwrap()
-                        .send(&*memory_manager_snapshot.clone(), destination_url)?;
-                } else {
-                    return Err(MigratableError::Restore(anyhow!(
-                        "Missing memory manager snapshot"
-                    )));
-                }
-            }
-            _ => {
-                return Err(MigratableError::MigrateSend(anyhow!(
-                    "Unsupported VM transport URL scheme: {}",
-                    url.scheme()
-                )))
-            }
+        // Tell the memory manager to also send/write its own snapshot.
+        if let Some(memory_manager_snapshot) = snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID) {
+            self.memory_manager
+                .lock()
+                .unwrap()
+                .send(&*memory_manager_snapshot.clone(), destination_url)?;
+        } else {
+            return Err(MigratableError::Restore(anyhow!(
+                "Missing memory manager snapshot"
+            )));
         }
+
         Ok(())
     }
 }

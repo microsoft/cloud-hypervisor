@@ -55,6 +55,24 @@ const SYS_IO_URING_ENTER: i64 = 426;
 // See include/uapi/asm-generic/ioctls.h in the kernel code.
 const FIONBIO: u64 = 0x5421;
 
+// See include/uapi/linux/vfio.h in the kernel code.
+const VFIO_IOMMU_MAP_DMA: u64 = 0x3b71;
+const VFIO_IOMMU_UNMAP_DMA: u64 = 0x3b72;
+
+fn create_virtio_iommu_ioctl_seccomp_rule() -> Vec<SeccompRule> {
+    or![
+        and![Cond::new(1, ArgLen::DWORD, Eq, VFIO_IOMMU_MAP_DMA).unwrap()],
+        and![Cond::new(1, ArgLen::DWORD, Eq, VFIO_IOMMU_UNMAP_DMA).unwrap()],
+    ]
+}
+
+fn create_virtio_mem_ioctl_seccomp_rule() -> Vec<SeccompRule> {
+    or![
+        and![Cond::new(1, ArgLen::DWORD, Eq, VFIO_IOMMU_MAP_DMA).unwrap()],
+        and![Cond::new(1, ArgLen::DWORD, Eq, VFIO_IOMMU_UNMAP_DMA).unwrap()],
+    ]
+}
+
 fn virtio_balloon_thread_rules() -> Vec<SyscallRuleSet> {
     vec![
         allow_syscall(libc::SYS_brk),
@@ -114,6 +132,7 @@ fn virtio_block_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_sched_getaffinity),
         allow_syscall(libc::SYS_set_robust_list),
         allow_syscall(libc::SYS_sigaltstack),
+        allow_syscall(libc::SYS_timerfd_settime),
         allow_syscall(libc::SYS_write),
     ]
 }
@@ -156,6 +175,7 @@ fn virtio_iommu_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_epoll_wait),
         allow_syscall(libc::SYS_exit),
         allow_syscall(libc::SYS_futex),
+        allow_syscall_if(libc::SYS_ioctl, create_virtio_iommu_ioctl_seccomp_rule()),
         allow_syscall(libc::SYS_madvise),
         allow_syscall(libc::SYS_mmap),
         allow_syscall(libc::SYS_mprotect),
@@ -179,6 +199,7 @@ fn virtio_mem_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_exit),
         allow_syscall(libc::SYS_fallocate),
         allow_syscall(libc::SYS_futex),
+        allow_syscall_if(libc::SYS_ioctl, create_virtio_mem_ioctl_seccomp_rule()),
         allow_syscall(libc::SYS_madvise),
         allow_syscall(libc::SYS_munmap),
         allow_syscall(libc::SYS_read),
@@ -341,9 +362,7 @@ fn virtio_vhost_net_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_write),
         allow_syscall(libc::SYS_sigaltstack),
         allow_syscall(libc::SYS_munmap),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_madvise),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_exit),
     ]
 }
@@ -360,13 +379,9 @@ fn virtio_vhost_net_ctl_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_epoll_wait),
         allow_syscall(libc::SYS_futex),
         allow_syscall(libc::SYS_read),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_sigaltstack),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_munmap),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_madvise),
-        #[cfg(target_arch = "aarch64")]
         allow_syscall(libc::SYS_exit),
     ]
 }

@@ -51,6 +51,7 @@ pub const MAPPED_IO_START: u64 = 0x0900_0000;
 /// Space 0x0900_0000 ~ 0x1000_0000 is reserved for legacy devices.
 pub const LEGACY_SERIAL_MAPPED_IO_START: u64 = 0x0900_0000;
 pub const LEGACY_RTC_MAPPED_IO_START: u64 = 0x0901_0000;
+pub const LEGACY_GPIO_MAPPED_IO_START: u64 = 0x0902_0000;
 
 /// Legacy space will be allocated at once whiling setting up legacy devices.
 pub const LEGACY_DEVICES_MAPPED_IO_SIZE: u64 = 0x0700_0000;
@@ -78,9 +79,9 @@ pub const FDT_MAX_SIZE: usize = 0x20_0000;
 // * bigger than 32
 // * less than 1023 and
 // * a multiple of 32.
-// We are setting up our interrupt controller to support a maximum of 128 interrupts.
+// We are setting up our interrupt controller to support a maximum of 256 interrupts.
 /// First usable interrupt on aarch64.
-pub const IRQ_BASE: u32 = 32;
+pub const IRQ_BASE: u32 = 0;
 
 /// Last usable interrupt on aarch64.
-pub const IRQ_MAX: u32 = 159;
+pub const IRQ_MAX: u32 = 255;

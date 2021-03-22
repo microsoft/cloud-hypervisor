@@ -17,6 +17,7 @@ extern crate event_monitor;
 use clap::{App, Arg, ArgGroup, ArgMatches};
 use libc::EFD_NONBLOCK;
 use log::LevelFilter;
+use option_parser::OptionParser;
 use seccomp::SeccompAction;
 use signal_hook::{
     consts::SIGSYS,
@@ -120,7 +121,6 @@ fn create_app<'a, 'b>(
     default_vcpus: &'a str,
     default_memory: &'a str,
     default_rng: &'a str,
-    api_server_path: &'a str,
 ) -> App<'a, 'b> {
     #[cfg(target_arch = "x86_64")]
     let mut app: App;
@@ -317,13 +317,12 @@ fn create_app<'a, 'b>(
                 .help("HTTP API socket path (UNIX domain socket).")
                 .takes_value(true)
                 .min_values(1)
-                .default_value(&api_server_path)
                 .group("vmm-config"),
         )
         .arg(
-            Arg::with_name("monitor-fd")
-                .long("monitor-fd")
-                .help("File descriptor to report events on")
+            Arg::with_name("event-monitor")
+                .long("event-monitor")
+                .help("File to report events on: path=</path/to/a/file> or fd=<fd>")
                 .takes_value(true)
                 .min_values(1)
                 .group("vmm-config"),
@@ -356,10 +355,21 @@ fn create_app<'a, 'b>(
         );
     }
 
+    #[cfg(feature = "tdx")]
+    {
+        app = app.arg(
+            Arg::with_name("tdx")
+                .long("tdx")
+                .help("TDX Support: firmware=<tdvf path>")
+                .takes_value(true)
+                .group("vm-config"),
+        );
+    }
+
     app
 }
 
-fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &str) -> Result<(), Error> {
+fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Result<(), Error> {
     let (api_request_sender, api_request_receiver) = channel();
     let api_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateAPIEventFd)?;
 
@@ -418,21 +428,9 @@ fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &str) -> Result<(), Err
 
     // Can't test for "vm-config" group as some have default values. The kernel
     // is the only required option for booting the VM.
-    if cmd_arguments.is_present("kernel") {
+    if cmd_arguments.is_present("kernel") || cmd_arguments.is_present("tdx") {
         let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
         let vm_config = config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
-
-        println!(
-            "Cloud Hypervisor Guest\n\tAPI server: {}\n\tvCPUs: {}\n\tMemory: {} MB\n\tKernel: \
-             {:?}\n\tInitramfs: {:?}\n\tKernel cmdline: {}\n\tDisk(s): {:?}",
-            api_socket_path,
-            vm_config.cpus.boot_vcpus,
-            vm_config.memory.size >> 20,
-            vm_config.kernel,
-            vm_config.initramfs,
-            vm_config.cmdline.args.as_str(),
-            vm_config.disks,
-        );
 
         // Create and boot the VM based off the VM config we just built.
         let sender = api_request_sender.clone();
@@ -462,31 +460,9 @@ fn main() {
     // Ensure all created files (.e.g sockets) are only accessible by this user
     let _ = unsafe { libc::umask(0o077) };
 
-    let pid = unsafe { libc::getpid() };
-    let uid = unsafe { libc::getuid() };
-
-    let mut api_server_path = format! {"/run/user/{}/cloud-hypervisor.{}", uid, pid};
-    if uid == 0 {
-        // If we're running as root, we try to get the real user ID if we've been sudo'ed
-        // or else create our socket directly under /run.
-        let key = "SUDO_UID";
-        match env::var(key) {
-            Ok(sudo_uid) => {
-                api_server_path = format! {"/run/user/{}/cloud-hypervisor.{}", sudo_uid, pid}
-            }
-            Err(_) => api_server_path = format! {"/run/cloud-hypervisor.{}", pid},
-        }
-    }
-
     let (default_vcpus, default_memory, default_rng) = prepare_default_values();
 
-    let cmd_arguments = create_app(
-        &default_vcpus,
-        &default_memory,
-        &default_rng,
-        &api_server_path,
-    )
-    .get_matches();
+    let cmd_arguments = create_app(&default_vcpus, &default_memory, &default_rng).get_matches();
 
     let log_level = match cmd_arguments.occurrences_of("v") {
         0 => LevelFilter::Warn,
@@ -511,25 +487,42 @@ fn main() {
     .map(|()| log::set_max_level(log_level))
     .expect("Expected to be able to setup logger");
 
-    let api_socket_path = cmd_arguments
-        .value_of("api-socket")
-        .expect("Missing argument: api-socket")
-        .to_string();
+    let api_socket_path = cmd_arguments.value_of("api-socket").map(|s| s.to_string());
 
-    if let Some(fd) = cmd_arguments
-        .value_of("monitor-fd")
-        .map(|s| s.parse::<i32>().expect("Expect integral file descriptor"))
-    {
-        let file = unsafe { File::from_raw_fd(fd) };
+    if let Some(monitor_config) = cmd_arguments.value_of("event-monitor") {
+        let mut parser = OptionParser::new();
+        parser.add("path").add("fd");
+        parser
+            .parse(monitor_config)
+            .expect("Error parsing event monitor config");
+
+        let file = if parser.is_set("fd") {
+            let fd = parser
+                .convert("fd")
+                .expect("Integral file descriptor expected")
+                .unwrap();
+            unsafe { File::from_raw_fd(fd) }
+        } else if parser.is_set("path") {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(parser.get("path").unwrap())
+                .expect("Error opening event monitor path")
+        } else {
+            panic!("--event-monitor requires either a fd or path provided")
+        };
         event_monitor::set_monitor(file).expect("Expected setting monitor to succeed");
     }
 
-    if let Err(e) = start_vmm(cmd_arguments, &api_socket_path) {
+    let exit_code = if let Err(e) = start_vmm(cmd_arguments, &api_socket_path) {
         eprintln!("{}", e);
-        std::fs::remove_file(api_socket_path).ok();
-        std::process::exit(1);
-    }
-    std::fs::remove_file(api_socket_path).ok();
+        1
+    } else {
+        0
+    };
+
+    api_socket_path.map(|s| std::fs::remove_file(s).ok());
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]
@@ -548,15 +541,8 @@ mod unit_tests {
 
     fn get_vm_config_from_vec(args: &[&str]) -> VmConfig {
         let (default_vcpus, default_memory, default_rng) = prepare_default_values();
-        let api_server_path = "";
-
-        let cmd_arguments = create_app(
-            &default_vcpus,
-            &default_memory,
-            &default_rng,
-            &api_server_path,
-        )
-        .get_matches_from(args);
+        let cmd_arguments =
+            create_app(&default_vcpus, &default_memory, &default_rng).get_matches_from(args);
 
         let vm_params = VmParams::from_arg_matches(&cmd_arguments);
 
@@ -646,6 +632,8 @@ mod unit_tests {
                 sgx_epc: None,
                 numa: None,
                 watchdog: false,
+                #[cfg(feature = "tdx")]
+                tdx: None,
             };
 
             aver_eq!(tb, expected_vm_config, result_vm_config);

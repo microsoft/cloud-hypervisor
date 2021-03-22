@@ -28,9 +28,13 @@ This document describes the device model supported by `cloud-hypervisor`.
 ### Serial port
 
 Simple emulation of a serial port by reading and writing to specific port I/O
-addresses. Used as the default console for Linux when booting with the option
-`console=ttyS0`, the serial port can be very useful to gather early logs from
-the operating system booted inside the VM.
+addresses. The serial port can be very useful to gather early logs from the
+operating system booted inside the VM.
+
+For x86_64, The default serial port is from an emulated 16550A device. It can
+be used as the default console for Linux when booting with the option
+`console=ttyS0`. For AArch64, the default serial port is from an emulated
+PL011 UART device. The related command line for AArch64 is `console=ttyAMA0`.
 
 This device is always built-in, and it is disabled by default. It can be
 enabled with the `--serial` option, as long as its parameter is not `off`.
@@ -43,6 +47,10 @@ emulation of this legacy device makes the platform usable.
 This device is built-in by default, but it can be compiled out with Rust
 features. When compiled in, it is always enabled, and cannot be disabled
 from the command line.
+
+For AArch64 machines, an ARM PrimeCell Real Time Clock(PL031) is implemented.
+This device is built-in by default for the AArch64 platform, and it is always
+enabled, and cannot be disabled from the command line.
 
 ### I/O APIC
 
@@ -64,6 +72,11 @@ This device is always built-in, but it is disabled by default. Because ACPI is
 enabled by default, the handling of reboot/shutdown goes through the dedicated
 ACPI device. In case ACPI is disabled, this device is enabled to bring to the
 VM some reboot/shutdown support.
+
+### ARM PrimeCell General Purpose Input/Output (PL061)
+
+Simplified ARM PrimeCell GPIO (PL061) implementation. Only supports key 3 to
+trigger a graceful shutdown of the AArch64 guest.
 
 ### ACPI device
 
