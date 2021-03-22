@@ -6,6 +6,7 @@ extern crate hypervisor;
 #[cfg(target_arch = "x86_64")]
 use crate::config::SgxEpcConfig;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
+use crate::migration::url_to_path;
 use crate::MEMORY_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml};
@@ -27,7 +28,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
-use url::Url;
 #[cfg(target_arch = "x86_64")]
 use vm_allocator::GsiApic;
 use vm_allocator::SystemAllocator;
@@ -137,6 +137,7 @@ pub struct MemoryManager {
     user_provided_zones: bool,
     snapshot_memory_regions: Vec<MemoryRegion>,
     memory_zones: MemoryZones,
+    log_dirty: bool, // Enable dirty logging for created RAM regions
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -503,6 +504,7 @@ impl MemoryManager {
         config: &MemoryConfig,
         prefault: bool,
         phys_bits: u8,
+        #[cfg(feature = "tdx")] tdx_enabled: bool,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         let user_provided_zones = config.size == 0;
         let mut allow_mem_hotplug: bool = false;
@@ -741,6 +743,11 @@ impl MemoryManager {
             .allocate_mmio_addresses(None, MEMORY_MANAGER_ACPI_SIZE as u64, None)
             .ok_or(Error::AllocateMMIOAddress)?;
 
+        #[cfg(not(feature = "tdx"))]
+        let log_dirty = true;
+        #[cfg(feature = "tdx")]
+        let log_dirty = !tdx_enabled; // Cannot log dirty pages on a TD
+
         let memory_manager = Arc::new(Mutex::new(MemoryManager {
             boot_guest_memory,
             guest_memory: guest_memory.clone(),
@@ -768,6 +775,7 @@ impl MemoryManager {
             guest_ram_mappings: Vec::new(),
             #[cfg(feature = "acpi")]
             acpi_address,
+            log_dirty,
         }));
 
         guest_memory.memory().with_regions(|_, region| {
@@ -778,7 +786,7 @@ impl MemoryManager {
                 region.as_ptr() as u64,
                 config.mergeable,
                 false,
-                true,
+                log_dirty,
             )?;
             mm.guest_ram_mappings.push(GuestRamMapping {
                 gpa: region.start_addr().raw_value(),
@@ -797,7 +805,7 @@ impl MemoryManager {
                 region.as_ptr() as u64,
                 config.mergeable,
                 false,
-                true,
+                log_dirty,
             )?;
 
             mm.guest_ram_mappings.push(GuestRamMapping {
@@ -833,12 +841,17 @@ impl MemoryManager {
         prefault: bool,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
-        let mm = MemoryManager::new(vm, config, prefault, phys_bits)?;
+        let mm = MemoryManager::new(
+            vm,
+            config,
+            prefault,
+            phys_bits,
+            #[cfg(feature = "tdx")]
+            false,
+        )?;
 
         if let Some(source_url) = source_url {
-            let url = Url::parse(source_url).unwrap();
-            /* url must be valid dir which is verified in recv_vm_snapshot() */
-            let vm_snapshot_path = url.to_file_path().unwrap();
+            let vm_snapshot_path = url_to_path(source_url).map_err(Error::Restore)?;
 
             if let Some(mem_section) = snapshot
                 .snapshot_data
@@ -1118,7 +1131,7 @@ impl MemoryManager {
             region.as_ptr() as u64,
             self.mergeable,
             false,
-            true,
+            self.log_dirty,
         )?;
         self.guest_ram_mappings.push(GuestRamMapping {
             gpa: region.start_addr().raw_value(),
@@ -1151,6 +1164,12 @@ impl MemoryManager {
         }
 
         let region = self.add_ram_region(start_addr, size)?;
+
+        // Add region to the list of regions associated with the default
+        // memory zone.
+        if let Some(memory_zone) = self.memory_zones.get_mut(DEFAULT_MEMORY_ZONE) {
+            memory_zone.regions.push(Arc::clone(&region));
+        }
 
         // Tell the allocator
         self.allocator
@@ -2022,59 +2041,30 @@ impl Transportable for MemoryManager {
         _snapshot: &Snapshot,
         destination_url: &str,
     ) -> result::Result<(), MigratableError> {
-        let url = Url::parse(destination_url).map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Could not parse destination URL: {}", e))
-        })?;
+        let vm_memory_snapshot_path = url_to_path(destination_url)?;
 
-        match url.scheme() {
-            "file" => {
-                let vm_memory_snapshot_path = url
-                    .to_file_path()
-                    .map_err(|_| {
-                        MigratableError::MigrateSend(anyhow!(
-                            "Could not convert file URL to a file path: {}",
-                            destination_url
-                        ))
-                    })
-                    .and_then(|path| {
-                        if !path.is_dir() {
-                            return Err(MigratableError::MigrateSend(anyhow!(
-                                "Destination is not a directory"
-                            )));
-                        }
-                        Ok(path)
-                    })?;
+        if let Some(guest_memory) = &*self.snapshot.lock().unwrap() {
+            for region in self.snapshot_memory_regions.iter() {
+                if let Some(content) = &region.content {
+                    let mut memory_region_path = vm_memory_snapshot_path.clone();
+                    memory_region_path.push(content);
 
-                if let Some(guest_memory) = &*self.snapshot.lock().unwrap() {
-                    for region in self.snapshot_memory_regions.iter() {
-                        if let Some(content) = &region.content {
-                            let mut memory_region_path = vm_memory_snapshot_path.clone();
-                            memory_region_path.push(content);
+                    // Create the snapshot file for the region
+                    let mut memory_region_file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(memory_region_path)
+                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-                            // Create the snapshot file for the region
-                            let mut memory_region_file = OpenOptions::new()
-                                .read(true)
-                                .write(true)
-                                .create_new(true)
-                                .open(memory_region_path)
-                                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-
-                            guest_memory
-                                .write_all_to(
-                                    region.start_addr,
-                                    &mut memory_region_file,
-                                    region.size as usize,
-                                )
-                                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
-                        }
-                    }
+                    guest_memory
+                        .write_all_to(
+                            region.start_addr,
+                            &mut memory_region_file,
+                            region.size as usize,
+                        )
+                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
                 }
-            }
-            _ => {
-                return Err(MigratableError::MigrateSend(anyhow!(
-                    "Unsupported VM transport URL scheme: {}",
-                    url.scheme()
-                )))
             }
         }
         Ok(())
