@@ -1,6 +1,6 @@
 [package]
 name = "cloud-hypervisor"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["The Cloud Hypervisor Authors"]
 edition = "2018"
 default-run = "cloud-hypervisor"
@@ -13,13 +13,13 @@ homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
 lto = true
 
 [dependencies]
-anyhow = "1.0.39"
+anyhow = "1.0.40"
 api_client = { path = "api_client" }
 clap = { version = "2.33.3", features = ["wrap_help"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.90"
+libc = "0.2.92"
 log = { version = "0.4.14", features = ["std"] }
 option_parser = { path = "option_parser" }
 seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.22.0" }
@@ -43,7 +43,7 @@ dirs = "3.0.1"
 lazy_static= "1.4.0"
 net_util = { path = "net_util" }
 serde_json = "1.0.64"
-ssh2 = "0.9.1"
+test_infra = { path = "test_infra" }
 wait-timeout = "0.2.0"
 
 [features]
@@ -76,6 +76,7 @@ members = [
     "option_parser",
     "pci",
     "qcow",
+    "rate_limiter",
     "vhost_user_backend",
     "vhost_user_block",
     "vhost_user_net",
@@ -86,3 +87,4 @@ members = [
     "vm-migration",
     "vm-virtio"
 ]
+exclude = ["test_infra"]

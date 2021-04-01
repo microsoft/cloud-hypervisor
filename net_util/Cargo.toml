@@ -5,10 +5,11 @@ authors = ["The Chromium OS Authors"]
 
 [dependencies]
 epoll = ">=4.0.1"
-libc = "0.2.90"
+libc = "0.2.92"
 log = "0.4.14"
 net_gen = { path = "../net_gen" }
-serde = "1.0.124"
+rate_limiter = { path = "../rate_limiter" }
+serde = "1.0.125"
 virtio-bindings = "0.1.0"
 vm-memory = { version = "0.5.0", features = ["backend-mmap", "backend-atomic"] }
 vm-virtio = { path = "../vm-virtio" }

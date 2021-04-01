@@ -21,7 +21,7 @@ use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::physical_bits;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
-use acpi_tables::{aml, aml::Aml, sdt::SDT};
+use acpi_tables::{aml, aml::Aml, sdt::Sdt};
 use anyhow::anyhow;
 #[cfg(target_arch = "x86_64")]
 use arch::x86_64::SgxEpcSection;
@@ -101,7 +101,7 @@ pub enum Error {
     BusError(vm_device::BusError),
 
     /// Asking for more vCPUs that we can have
-    DesiredVCPUCountExceedsMax,
+    DesiredVCpuCountExceedsMax,
 
     /// Failed to get KVM vcpu lapic.
     VcpuGetLapic(anyhow::Error),
@@ -173,15 +173,15 @@ pub enum Error {
     UnexpectedVmExit,
 
     /// Failed to allocate MMIO address
-    AllocateMMIOAddress,
+    AllocateMmmioAddress,
 
     /// Error populating CPUID with KVM HyperV emulation details
     #[cfg(target_arch = "x86_64")]
-    CpuidKVMHyperV(vmm_sys_util::fam::Error),
+    CpuidKvmHyperV(vmm_sys_util::fam::Error),
 
     /// Error populating CPUID with KVM HyperV emulation details
     #[cfg(target_arch = "x86_64")]
-    CpuidSGX(arch::x86_64::Error),
+    CpuidSgx(arch::x86_64::Error),
 
     /// Error populating CPUID with CPU identification
     #[cfg(target_arch = "x86_64")]
@@ -194,7 +194,7 @@ pub type Result<T> = result::Result<T, Error>;
 
 #[cfg(feature = "acpi")]
 #[repr(packed)]
-struct LocalAPIC {
+struct LocalApic {
     pub r#type: u8,
     pub length: u8,
     pub processor_id: u8,
@@ -204,7 +204,7 @@ struct LocalAPIC {
 
 #[repr(packed)]
 #[derive(Default)]
-struct IOAPIC {
+struct Ioapic {
     pub r#type: u8,
     pub length: u8,
     pub ioapic_id: u8,
@@ -433,12 +433,16 @@ const CPU_SELECTION_OFFSET: u64 = 0;
 
 impl BusDevice for CpuManager {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+        // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
+        data.copy_from_slice(&[0; 8][0..data.len()]);
+
         match offset {
+            CPU_SELECTION_OFFSET => {
+                data[0] = self.selected_cpu;
+            }
             CPU_STATUS_OFFSET => {
                 if self.selected_cpu < self.present_vcpus() {
                     let state = &self.vcpu_states[usize::from(self.selected_cpu)];
-                    // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
-                    data.copy_from_slice(&[0; 8][0..data.len()]);
                     if state.active() {
                         data[0] |= 1 << CPU_ENABLE_FLAG;
                     }
@@ -560,12 +564,12 @@ impl CpuManager {
         vcpu_states.resize_with(usize::from(config.max_vcpus), VcpuState::default);
 
         #[cfg(target_arch = "x86_64")]
-        let sgx_epc_sections =
-            if let Some(sgx_epc_region) = memory_manager.lock().unwrap().sgx_epc_region() {
-                Some(sgx_epc_region.epc_sections().clone())
-            } else {
-                None
-            };
+        let sgx_epc_sections = memory_manager
+            .lock()
+            .unwrap()
+            .sgx_epc_region()
+            .as_ref()
+            .map(|sgx_epc_region| sgx_epc_region.epc_sections().clone());
         #[cfg(target_arch = "x86_64")]
         let cpuid = {
             let phys_bits = physical_bits(config.max_phys_bits);
@@ -585,7 +589,7 @@ impl CpuManager {
             .lock()
             .unwrap()
             .allocate_mmio_addresses(None, CPU_MANAGER_ACPI_SIZE as u64, None)
-            .ok_or(Error::AllocateMMIOAddress)?;
+            .ok_or(Error::AllocateMmmioAddress)?;
         let cpu_manager = Arc::new(Mutex::new(CpuManager {
             config: config.clone(),
             interrupt_controller: device_manager.interrupt_controller().clone(),
@@ -627,40 +631,38 @@ impl CpuManager {
         phys_bits: u8,
         kvm_hyperv: bool,
     ) -> Result<CpuId> {
-        let mut cpuid_patches = Vec::new();
-
-        // Patch tsc deadline timer bit
-        cpuid_patches.push(CpuidPatch {
-            function: 1,
-            index: 0,
-            flags_bit: None,
-            eax_bit: None,
-            ebx_bit: None,
-            ecx_bit: Some(TSC_DEADLINE_TIMER_ECX_BIT),
-            edx_bit: None,
-        });
-
-        // Patch hypervisor bit
-        cpuid_patches.push(CpuidPatch {
-            function: 1,
-            index: 0,
-            flags_bit: None,
-            eax_bit: None,
-            ebx_bit: None,
-            ecx_bit: Some(HYPERVISOR_ECX_BIT),
-            edx_bit: None,
-        });
-
-        // Enable MTRR feature
-        cpuid_patches.push(CpuidPatch {
-            function: 1,
-            index: 0,
-            flags_bit: None,
-            eax_bit: None,
-            ebx_bit: None,
-            ecx_bit: None,
-            edx_bit: Some(MTRR_EDX_BIT),
-        });
+        let cpuid_patches = vec![
+            // Patch tsc deadline timer bit
+            CpuidPatch {
+                function: 1,
+                index: 0,
+                flags_bit: None,
+                eax_bit: None,
+                ebx_bit: None,
+                ecx_bit: Some(TSC_DEADLINE_TIMER_ECX_BIT),
+                edx_bit: None,
+            },
+            // Patch hypervisor bit
+            CpuidPatch {
+                function: 1,
+                index: 0,
+                flags_bit: None,
+                eax_bit: None,
+                ebx_bit: None,
+                ecx_bit: Some(HYPERVISOR_ECX_BIT),
+                edx_bit: None,
+            },
+            // Enable MTRR feature
+            CpuidPatch {
+                function: 1,
+                index: 0,
+                flags_bit: None,
+                eax_bit: None,
+                ebx_bit: None,
+                ecx_bit: None,
+                edx_bit: Some(MTRR_EDX_BIT),
+            },
+        ];
 
         // Supported CPUID
         let mut cpuid = hypervisor
@@ -680,7 +682,7 @@ impl CpuManager {
 
         if let Some(sgx_epc_sections) = sgx_epc_sections {
             arch::x86_64::update_cpuid_sgx(&mut cpuid, sgx_epc_sections)
-                .map_err(Error::CpuidSGX)?;
+                .map_err(Error::CpuidSgx)?;
         }
 
         // Set CPU physical bits
@@ -721,14 +723,14 @@ impl CpuManager {
                     edx: 0x7648204d, // "M Hv"
                     ..Default::default()
                 })
-                .map_err(Error::CpuidKVMHyperV)?;
+                .map_err(Error::CpuidKvmHyperV)?;
             cpuid
                 .push(CpuIdEntry {
                     function: 0x40000001,
                     eax: 0x31237648, // "Hv#1"
                     ..Default::default()
                 })
-                .map_err(Error::CpuidKVMHyperV)?;
+                .map_err(Error::CpuidKvmHyperV)?;
             cpuid
                 .push(CpuIdEntry {
                     function: 0x40000002,
@@ -736,7 +738,7 @@ impl CpuManager {
                     ebx: 0xa0000, // "Version"
                     ..Default::default()
                 })
-                .map_err(Error::CpuidKVMHyperV)?;
+                .map_err(Error::CpuidKvmHyperV)?;
             cpuid
                 .push(CpuIdEntry {
                     function: 0x4000_0003,
@@ -744,16 +746,24 @@ impl CpuManager {
                        | 1 << 2 // AccessSynicRegs
                        | 1 << 3 // AccessSyntheticTimerRegs
                        | 1 << 9, // AccessPartitionReferenceTsc
+                    edx: 1 << 3, // CPU dynamic partitioning
                     ..Default::default()
                 })
-                .map_err(Error::CpuidKVMHyperV)?;
-            for i in 0x4000_0004..=0x4000_000a {
+                .map_err(Error::CpuidKvmHyperV)?;
+            cpuid
+                .push(CpuIdEntry {
+                    function: 0x4000_0004,
+                    eax: 1 << 5, // Recommend relaxed timing
+                    ..Default::default()
+                })
+                .map_err(Error::CpuidKvmHyperV)?;
+            for i in 0x4000_0005..=0x4000_000a {
                 cpuid
                     .push(CpuIdEntry {
                         function: i,
                         ..Default::default()
                     })
-                    .map_err(Error::CpuidKVMHyperV)?;
+                    .map_err(Error::CpuidKvmHyperV)?;
             }
         }
 
@@ -817,7 +827,7 @@ impl CpuManager {
         );
 
         if desired_vcpus > self.config.max_vcpus {
-            return Err(Error::DesiredVCPUCountExceedsMax);
+            return Err(Error::DesiredVCpuCountExceedsMax);
         }
 
         // Only create vCPUs in excess of all the allocated vCPUs.
@@ -852,12 +862,7 @@ impl CpuManager {
             .map_err(Error::CreateSeccompFilter)?;
 
         #[cfg(target_arch = "x86_64")]
-        let interrupt_controller_clone =
-            if let Some(interrupt_controller) = &self.interrupt_controller {
-                Some(interrupt_controller.clone())
-            } else {
-                None
-            };
+        let interrupt_controller_clone = self.interrupt_controller.as_ref().cloned();
 
         let handle = Some(
             thread::Builder::new()
@@ -970,7 +975,7 @@ impl CpuManager {
     /// Start up as many vCPUs threads as needed to reach `desired_vcpus`
     fn activate_vcpus(&mut self, desired_vcpus: u8, inserting: bool) -> Result<()> {
         if desired_vcpus > self.config.max_vcpus {
-            return Err(Error::DesiredVCPUCountExceedsMax);
+            return Err(Error::DesiredVCpuCountExceedsMax);
         }
 
         let vcpu_thread_barrier = Arc::new(Barrier::new(
@@ -1134,17 +1139,17 @@ impl CpuManager {
     }
 
     #[cfg(feature = "acpi")]
-    pub fn create_madt(&self) -> SDT {
+    pub fn create_madt(&self) -> Sdt {
         // This is also checked in the commandline parsing.
         assert!(self.config.boot_vcpus <= self.config.max_vcpus);
 
-        let mut madt = SDT::new(*b"APIC", 44, 5, *b"CLOUDH", *b"CHMADT  ", 1);
+        let mut madt = Sdt::new(*b"APIC", 44, 5, *b"CLOUDH", *b"CHMADT  ", 1);
         #[cfg(target_arch = "x86_64")]
         {
             madt.write(36, arch::layout::APIC_START);
 
             for cpu in 0..self.config.max_vcpus {
-                let lapic = LocalAPIC {
+                let lapic = LocalApic {
                     r#type: 0,
                     length: 8,
                     processor_id: cpu,
@@ -1158,7 +1163,7 @@ impl CpuManager {
                 madt.append(lapic);
             }
 
-            madt.append(IOAPIC {
+            madt.append(Ioapic {
                 r#type: 1,
                 length: 12,
                 ioapic_id: 0,
@@ -1187,7 +1192,7 @@ impl CpuManager {
 }
 
 #[cfg(feature = "acpi")]
-struct CPU {
+struct Cpu {
     cpu_id: u8,
 }
 
@@ -1195,9 +1200,9 @@ struct CPU {
 const MADT_CPU_ENABLE_FLAG: usize = 0;
 
 #[cfg(feature = "acpi")]
-impl Aml for CPU {
+impl Aml for Cpu {
     fn to_aml_bytes(&self) -> Vec<u8> {
-        let lapic = LocalAPIC {
+        let lapic = LocalApic {
             r#type: 0,
             length: 8,
             processor_id: self.cpu_id,
@@ -1207,7 +1212,7 @@ impl Aml for CPU {
 
         let mut mat_data: Vec<u8> = Vec::new();
         mat_data.resize(std::mem::size_of_val(&lapic), 0);
-        unsafe { *(mat_data.as_mut_ptr() as *mut LocalAPIC) = lapic };
+        unsafe { *(mat_data.as_mut_ptr() as *mut LocalApic) = lapic };
 
         aml::Device::new(
             format!("C{:03}", self.cpu_id).as_str().into(),
@@ -1252,12 +1257,12 @@ impl Aml for CPU {
 }
 
 #[cfg(feature = "acpi")]
-struct CPUNotify {
+struct CpuNotify {
     cpu_id: u8,
 }
 
 #[cfg(feature = "acpi")]
-impl Aml for CPUNotify {
+impl Aml for CpuNotify {
     fn to_aml_bytes(&self) -> Vec<u8> {
         let object = aml::Path::new(&format!("C{:03}", self.cpu_id));
         aml::If::new(
@@ -1269,12 +1274,12 @@ impl Aml for CPUNotify {
 }
 
 #[cfg(feature = "acpi")]
-struct CPUMethods {
+struct CpuMethods {
     max_vcpus: u8,
 }
 
 #[cfg(feature = "acpi")]
-impl Aml for CPUMethods {
+impl Aml for CpuMethods {
     fn to_aml_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(
@@ -1305,7 +1310,7 @@ impl Aml for CPUMethods {
 
         let mut cpu_notifies = Vec::new();
         for cpu_id in 0..self.max_vcpus {
-            cpu_notifies.push(CPUNotify { cpu_id });
+            cpu_notifies.push(CpuNotify { cpu_id });
         }
 
         let mut cpu_notifies_refs: Vec<&dyn aml::Aml> = Vec::new();
@@ -1402,7 +1407,7 @@ impl Aml for CpuManager {
             &aml::Device::new(
                 "_SB_.PRES".into(),
                 vec![
-                    &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A06")),
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
                     &aml::Name::new("_UID".into(), &"CPU Hotplug Controller"),
                     // Mutex to protect concurrent access as we write to choose CPU and then read back status
                     &aml::Mutex::new("CPLK".into(), 0),
@@ -1453,16 +1458,16 @@ impl Aml for CpuManager {
 
         // CPU devices
         let hid = aml::Name::new("_HID".into(), &"ACPI0010");
-        let uid = aml::Name::new("_CID".into(), &aml::EISAName::new("PNP0A05"));
+        let uid = aml::Name::new("_CID".into(), &aml::EisaName::new("PNP0A05"));
         // Bundle methods together under a common object
-        let methods = CPUMethods {
+        let methods = CpuMethods {
             max_vcpus: self.config.max_vcpus,
         };
         let mut cpu_data_inner: Vec<&dyn aml::Aml> = vec![&hid, &uid, &methods];
 
         let mut cpu_devices = Vec::new();
         for cpu_id in 0..self.config.max_vcpus {
-            let cpu_device = CPU { cpu_id };
+            let cpu_device = Cpu { cpu_id };
 
             cpu_devices.push(cpu_device);
         }

@@ -10,12 +10,11 @@ extern crate lazy_static;
 
 #[cfg(test)]
 #[cfg(feature = "integration_tests")]
-mod test_infra;
+extern crate test_infra;
 
 #[cfg(test)]
 #[cfg(feature = "integration_tests")]
 mod tests {
-    use crate::test_infra::*;
     use net_util::MacAddr;
     use std::collections::HashMap;
     use std::env;
@@ -31,6 +30,7 @@ mod tests {
     use std::sync::mpsc::Receiver;
     use std::sync::{mpsc, Mutex};
     use std::thread;
+    use test_infra::*;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
     #[cfg_attr(target_arch = "aarch64", allow(unused_imports))]
     use wait_timeout::ChildExt;
@@ -485,50 +485,45 @@ mod tests {
         }
 
         fn get_cpu_count(&self) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command("grep -c processor /proc/cpuinfo")?
+            self.ssh_command("grep -c processor /proc/cpuinfo")?
                 .trim()
                 .parse()
-                .map_err(Error::Parsing)?)
+                .map_err(Error::Parsing)
         }
 
         fn get_initial_apicid(&self) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command("grep \"initial apicid\" /proc/cpuinfo | grep -o \"[0-9]*\"")?
+            self.ssh_command("grep \"initial apicid\" /proc/cpuinfo | grep -o \"[0-9]*\"")?
                 .trim()
                 .parse()
-                .map_err(Error::Parsing)?)
+                .map_err(Error::Parsing)
         }
 
         fn get_total_memory(&self) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"")?
+            self.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"")?
                 .trim()
                 .parse()
-                .map_err(Error::Parsing)?)
+                .map_err(Error::Parsing)
         }
 
         fn get_total_memory_l2(&self) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command_l2_1("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"")?
+            self.ssh_command_l2_1("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"")?
                 .trim()
                 .parse()
-                .map_err(Error::Parsing)?)
+                .map_err(Error::Parsing)
         }
 
         fn get_numa_node_memory(&self, node_id: usize) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command(
-                    format!(
-                        "grep MemTotal /sys/devices/system/node/node{}/meminfo \
+            self.ssh_command(
+                format!(
+                    "grep MemTotal /sys/devices/system/node/node{}/meminfo \
                         | cut -d \":\" -f 2 | grep -o \"[0-9]*\"",
-                        node_id
-                    )
-                    .as_str(),
-                )?
-                .trim()
-                .parse()
-                .map_err(Error::Parsing)?)
+                    node_id
+                )
+                .as_str(),
+            )?
+            .trim()
+            .parse()
+            .map_err(Error::Parsing)
         }
 
         fn wait_vm_boot(&self, custom_timeout: Option<i32>) -> Result<(), Error> {
@@ -600,11 +595,10 @@ mod tests {
         }
 
         fn get_entropy(&self) -> Result<u32, Error> {
-            Ok(self
-                .ssh_command("cat /proc/sys/kernel/random/entropy_avail")?
+            self.ssh_command("cat /proc/sys/kernel/random/entropy_avail")?
                 .trim()
                 .parse()
-                .map_err(Error::Parsing)?)
+                .map_err(Error::Parsing)
         }
 
         fn get_pci_bridge_class(&self) -> Result<String, Error> {
@@ -1837,8 +1831,8 @@ mod tests {
             tx_bytes,
             tx_frames,
             read_bytes,
-            read_ops,
             write_bytes,
+            read_ops,
             write_ops,
         }
     }
@@ -5086,8 +5080,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernels = vec![];
-            kernels.push(direct_kernel_boot_path());
+            let mut kernels = vec![direct_kernel_boot_path()];
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -5675,6 +5668,30 @@ mod tests {
             }
         }
 
+        fn get_cpu_count_windows(auth: &PasswordAuth) -> u8 {
+            return ssh_command_ip_with_auth(
+                "powershell -Command \"(Get-CimInstance win32_computersystem).NumberOfLogicalProcessors\"",
+                &auth,
+                "192.168.249.2",
+                DEFAULT_SSH_RETRIES,
+                DEFAULT_SSH_TIMEOUT,
+            )
+            .unwrap()
+            .trim()
+            .parse::<u8>()
+            .unwrap_or(0);
+        }
+
+        fn get_vcpu_threads_count(pid: u32) -> u8 {
+            // ps -T -p 12345 | grep vcpu | wc -l
+            let out = Command::new("ps")
+                .args(&["-T", "-p", format!("{}", pid).as_str()])
+                .output()
+                .expect("ps command failed")
+                .stdout;
+            return String::from_utf8_lossy(&out).matches("vcpu").count() as u8;
+        }
+
         #[test]
         fn test_windows_guest() {
             let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
@@ -5808,6 +5825,76 @@ mod tests {
                 assert!(remote_command(&api_socket, "resume", None));
 
                 let auth = windows_auth();
+
+                ssh_command_ip_with_auth(
+                    "shutdown /s",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(60));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[ignore]
+        fn test_windows_guest_cpu_hotplug() {
+            let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut windows);
+
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+
+            let mut ovmf_path = workload_path.clone();
+            ovmf_path.push(OVMF_NAME);
+
+            let mut osdisk_path = workload_path;
+            osdisk_path.push(WINDOWS_IMAGE_NAME.to_string());
+
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,max=8,kvm_hyperv=on"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .default_disks()
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .args(&["--net", "tap="])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            // Wait to make sure Windows boots up
+            thread::sleep(std::time::Duration::new(60, 0));
+
+            let r = std::panic::catch_unwind(|| {
+                let auth = windows_auth();
+
+                let vcpu_num = 2;
+                // Check the initial number of CPUs the guest sees
+                assert_eq!(get_cpu_count_windows(&auth), vcpu_num);
+                // Check the initial number of vcpu threads in the CH process
+                assert_eq!(get_vcpu_threads_count(child.id()), vcpu_num);
+
+                let vcpu_num = 6;
+                // Hotplug some CPUs
+                resize_command(&api_socket, Some(vcpu_num), None, None);
+                // Wait to make sure CPUs are added
+                thread::sleep(std::time::Duration::new(10, 0));
+                // Check the guest sees the correct number
+                assert_eq!(get_cpu_count_windows(&auth), vcpu_num);
+                // Check the CH process has the correct number of vcpu threads
+                assert_eq!(get_vcpu_threads_count(child.id()), vcpu_num);
 
                 ssh_command_ip_with_auth(
                     "shutdown /s",

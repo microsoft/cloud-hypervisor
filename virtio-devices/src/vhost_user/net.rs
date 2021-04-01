@@ -151,7 +151,7 @@ impl Net {
         Ok(Net {
             id,
             common: VirtioCommon {
-                device_type: VirtioDeviceType::TYPE_NET as u32,
+                device_type: VirtioDeviceType::Net as u32,
                 queue_sizes: vec![vu_cfg.queue_size; queue_num],
                 avail_features,
                 acked_features,
@@ -288,9 +288,7 @@ impl VirtioDevice for Net {
 
         let mut epoll_threads = Vec::new();
         for i in 0..vu_interrupt_list.len() / 2 {
-            let mut interrupt_list_sub: Vec<(Option<EventFd>, Queue)> = Vec::with_capacity(2);
-            interrupt_list_sub.push(vu_interrupt_list.remove(0));
-            interrupt_list_sub.push(vu_interrupt_list.remove(0));
+            let interrupt_list_sub = vec![vu_interrupt_list.remove(0), vu_interrupt_list.remove(0)];
 
             let kill_evt = self
                 .common

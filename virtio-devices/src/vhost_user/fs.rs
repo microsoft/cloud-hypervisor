@@ -356,7 +356,7 @@ impl Fs {
 
         Ok(Fs {
             common: VirtioCommon {
-                device_type: VirtioDeviceType::TYPE_FS as u32,
+                device_type: VirtioDeviceType::Fs as u32,
                 avail_features,
                 acked_features,
                 queue_sizes: vec![queue_size; num_queues],
@@ -538,11 +538,7 @@ impl VirtioDevice for Fs {
     }
 
     fn get_shm_regions(&self) -> Option<VirtioSharedMemoryList> {
-        if let Some(cache) = self.cache.as_ref() {
-            Some(cache.0.clone())
-        } else {
-            None
-        }
+        self.cache.as_ref().map(|cache| cache.0.clone())
     }
 
     fn set_shm_regions(

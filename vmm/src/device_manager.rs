@@ -29,15 +29,13 @@ use crate::{device_node, DEVICE_MANAGER_SNAPSHOT_ID};
 use acpi_tables::{aml, aml::Aml};
 use anyhow::anyhow;
 #[cfg(target_arch = "aarch64")]
-use arch::aarch64::gic::GICDevice;
-#[cfg(target_arch = "aarch64")]
-use arch::aarch64::DeviceInfoForFDT;
+use arch::aarch64::gic::GicDevice;
 #[cfg(feature = "acpi")]
 use arch::layout;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 #[cfg(target_arch = "aarch64")]
-use arch::DeviceType;
+use arch::{DeviceType, MmioDeviceInfo};
 use block_util::{
     async_io::DiskFile, block_io_uring_is_supported, detect_image_type,
     fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
@@ -47,10 +45,10 @@ use block_util::{
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+#[cfg(target_arch = "aarch64")]
+use devices::legacy::Pl011;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Serial;
-#[cfg(target_arch = "aarch64")]
-use devices::legacy::PL011;
 use devices::{
     interrupt_controller, interrupt_controller::InterruptController, AcpiNotificationFlags,
 };
@@ -278,10 +276,10 @@ pub enum DeviceManagerError {
     BusError(vm_device::BusError),
 
     /// Failed to allocate IO port
-    AllocateIOPort,
+    AllocateIoPort,
 
     /// Failed to allocate MMIO address
-    AllocateMMIOAddress,
+    AllocateMmioAddress,
 
     // Failed to make hotplug notification
     HotPlugNotification(io::Error),
@@ -405,7 +403,7 @@ pub enum DeviceManagerError {
 
     /// Failed to do AArch64 GPIO power button notification
     #[cfg(target_arch = "aarch64")]
-    AArch64PowerButtonNotification(devices::legacy::GPIODeviceError),
+    AArch64PowerButtonNotification(devices::legacy::GpioDeviceError),
 
     /// Failed to set O_DIRECT flag to file descriptor
     SetDirectIo,
@@ -432,13 +430,13 @@ const DEVICE_MANAGER_ACPI_SIZE: usize = 0x10;
 pub fn get_win_size() -> (u16, u16) {
     #[repr(C)]
     #[derive(Default)]
-    struct WS {
+    struct WindowSize {
         rows: u16,
         cols: u16,
         xpixel: u16,
         ypixel: u16,
     }
-    let ws: WS = WS::default();
+    let ws: WindowSize = WindowSize::default();
 
     unsafe {
         libc::ioctl(0, TIOCGWINSZ, &ws);
@@ -507,7 +505,7 @@ pub struct Console {
     // Serial port on 0x3f8
     serial: Option<Arc<Mutex<Serial>>>,
     #[cfg(target_arch = "aarch64")]
-    serial: Option<Arc<Mutex<PL011>>>,
+    serial: Option<Arc<Mutex<Pl011>>>,
     virtio_console_input: Option<Arc<virtio_devices::ConsoleInput>>,
     input: Option<ConsoleInput>,
 }
@@ -582,7 +580,7 @@ impl DeviceRelocation for AddressManager {
         region_type: PciBarRegionType,
     ) -> std::result::Result<(), std::io::Error> {
         match region_type {
-            PciBarRegionType::IORegion => {
+            PciBarRegionType::IoRegion => {
                 #[cfg(target_arch = "x86_64")]
                 {
                     // Update system allocator
@@ -786,28 +784,6 @@ struct DeviceManagerState {
     device_id_cnt: Wrapping<usize>,
 }
 
-/// Private structure for storing information about the MMIO device registered at some address on the bus.
-#[derive(Clone, Debug)]
-#[cfg(target_arch = "aarch64")]
-pub struct MMIODeviceInfo {
-    addr: u64,
-    irq: u32,
-    len: u64,
-}
-
-#[cfg(target_arch = "aarch64")]
-impl DeviceInfoForFDT for MMIODeviceInfo {
-    fn addr(&self) -> u64 {
-        self.addr
-    }
-    fn irq(&self) -> u32 {
-        self.irq
-    }
-    fn length(&self) -> u64 {
-        self.len
-    }
-}
-
 #[derive(Debug)]
 pub struct PtyPair {
     pub main: File,
@@ -852,14 +828,14 @@ pub struct DeviceManager {
     interrupt_controller: Option<Arc<Mutex<gic::Gic>>>,
 
     #[cfg(target_arch = "aarch64")]
-    gic_device_entity: Option<Arc<Mutex<Box<dyn GICDevice>>>>,
+    gic_device_entity: Option<Arc<Mutex<Box<dyn GicDevice>>>>,
 
     // Things to be added to the commandline (i.e. for virtio-mmio)
     cmdline_additions: Vec<String>,
 
     // ACPI GED notification device
     #[cfg(feature = "acpi")]
-    ged_notification_device: Option<Arc<Mutex<devices::AcpiGEDDevice>>>,
+    ged_notification_device: Option<Arc<Mutex<devices::AcpiGedDevice>>>,
 
     // VM configuration
     config: Arc<Mutex<VmConfig>>,
@@ -886,6 +862,7 @@ pub struct DeviceManager {
     // MSI Interrupt Manager
     msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
 
+    #[cfg_attr(feature = "mshv", allow(dead_code))]
     // Legacy Interrupt Manager
     legacy_interrupt_manager: Option<Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>>,
 
@@ -915,7 +892,7 @@ pub struct DeviceManager {
     reset_evt: EventFd,
 
     #[cfg(target_arch = "aarch64")]
-    id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
+    id_to_dev_info: HashMap<(DeviceType, String), MmioDeviceInfo>,
 
     // seccomp action
     seccomp_action: SeccompAction,
@@ -939,7 +916,7 @@ pub struct DeviceManager {
 
     #[cfg(target_arch = "aarch64")]
     // GPIO device for AArch64
-    gpio_device: Option<Arc<Mutex<devices::legacy::GPIO>>>,
+    gpio_device: Option<Arc<Mutex<devices::legacy::Gpio>>>,
 }
 
 impl DeviceManager {
@@ -983,7 +960,7 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .allocate_mmio_addresses(None, DEVICE_MANAGER_ACPI_SIZE as u64, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
+            .ok_or(DeviceManagerError::AllocateIoPort)?;
         let device_manager = DeviceManager {
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),
@@ -1166,7 +1143,7 @@ impl DeviceManager {
 
     #[cfg(target_arch = "aarch64")]
     /// Gets the information of the devices registered up to some point in time.
-    pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
+    pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MmioDeviceInfo> {
         &self.id_to_dev_info
     }
 
@@ -1284,12 +1261,12 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub fn set_gic_device_entity(&mut self, device_entity: Arc<Mutex<Box<dyn GICDevice>>>) {
+    pub fn set_gic_device_entity(&mut self, device_entity: Arc<Mutex<Box<dyn GicDevice>>>) {
         self.gic_device_entity = Some(device_entity);
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub fn get_gic_device_entity(&self) -> Option<&Arc<Mutex<Box<dyn GICDevice>>>> {
+    pub fn get_gic_device_entity(&self) -> Option<&Arc<Mutex<Box<dyn GicDevice>>>> {
         self.gic_device_entity.as_ref()
     }
     #[cfg(target_arch = "aarch64")]
@@ -1379,7 +1356,7 @@ impl DeviceManager {
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
         reset_evt: EventFd,
         exit_evt: EventFd,
-    ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGEDDevice>>>> {
+    ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGedDevice>>>> {
         let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
             exit_evt, reset_evt,
         )));
@@ -1394,7 +1371,7 @@ impl DeviceManager {
                 .lock()
                 .unwrap()
                 .allocate_io_addresses(Some(GuestAddress(0x3c0)), 0x8, None)
-                .ok_or(DeviceManagerError::AllocateIOPort)?;
+                .ok_or(DeviceManagerError::AllocateIoPort)?;
 
             self.address_manager
                 .io_bus
@@ -1420,8 +1397,8 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .allocate_mmio_addresses(None, devices::acpi::GED_DEVICE_ACPI_SIZE as u64, None)
-            .ok_or(DeviceManagerError::AllocateMMIOAddress)?;
-        let ged_device = Arc::new(Mutex::new(devices::AcpiGEDDevice::new(
+            .ok_or(DeviceManagerError::AllocateMmioAddress)?;
+        let ged_device = Arc::new(Mutex::new(devices::AcpiGedDevice::new(
             interrupt_group,
             ged_irq,
             ged_address,
@@ -1437,7 +1414,7 @@ impl DeviceManager {
         self.bus_devices
             .push(Arc::clone(&ged_device) as Arc<Mutex<dyn BusDevice>>);
 
-        let pm_timer_device = Arc::new(Mutex::new(devices::AcpiPMTimerDevice::new()));
+        let pm_timer_device = Arc::new(Mutex::new(devices::AcpiPmTimerDevice::new()));
 
         self.bus_devices
             .push(Arc::clone(&pm_timer_device) as Arc<Mutex<dyn BusDevice>>);
@@ -1449,7 +1426,7 @@ impl DeviceManager {
                 .lock()
                 .unwrap()
                 .allocate_io_addresses(Some(GuestAddress(0xb008)), 0x4, None)
-                .ok_or(DeviceManagerError::AllocateIOPort)?;
+                .ok_or(DeviceManagerError::AllocateIoPort)?;
 
             self.address_manager
                 .io_bus
@@ -1536,7 +1513,7 @@ impl DeviceManager {
             })
             .map_err(DeviceManagerError::CreateInterruptGroup)?;
 
-        let rtc_device = Arc::new(Mutex::new(devices::legacy::RTC::new(interrupt_group)));
+        let rtc_device = Arc::new(Mutex::new(devices::legacy::Rtc::new(interrupt_group)));
 
         self.bus_devices
             .push(Arc::clone(&rtc_device) as Arc<Mutex<dyn BusDevice>>);
@@ -1549,10 +1526,9 @@ impl DeviceManager {
             .map_err(DeviceManagerError::BusError)?;
 
         self.id_to_dev_info.insert(
-            (DeviceType::RTC, "rtc".to_string()),
-            MMIODeviceInfo {
+            (DeviceType::Rtc, "rtc".to_string()),
+            MmioDeviceInfo {
                 addr: addr.0,
-                len: MMIO_LEN,
                 irq: rtc_irq,
             },
         );
@@ -1573,7 +1549,7 @@ impl DeviceManager {
             })
             .map_err(DeviceManagerError::CreateInterruptGroup)?;
 
-        let gpio_device = Arc::new(Mutex::new(devices::legacy::GPIO::new(
+        let gpio_device = Arc::new(Mutex::new(devices::legacy::Gpio::new(
             id.clone(),
             interrupt_group,
         )));
@@ -1591,10 +1567,9 @@ impl DeviceManager {
         self.gpio_device = Some(gpio_device.clone());
 
         self.id_to_dev_info.insert(
-            (DeviceType::GPIO, "gpio".to_string()),
-            MMIODeviceInfo {
+            (DeviceType::Gpio, "gpio".to_string()),
+            MmioDeviceInfo {
                 addr: addr.0,
-                len: MMIO_LEN,
                 irq: gpio_irq,
             },
         );
@@ -1638,7 +1613,7 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .allocate_io_addresses(Some(GuestAddress(0x3f8)), 0x8, None)
-            .ok_or(DeviceManagerError::AllocateIOPort)?;
+            .ok_or(DeviceManagerError::AllocateIoPort)?;
 
         self.address_manager
             .io_bus
@@ -1661,7 +1636,7 @@ impl DeviceManager {
         &mut self,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
         serial_writer: Option<Box<dyn io::Write + Send>>,
-    ) -> DeviceManagerResult<Arc<Mutex<devices::legacy::PL011>>> {
+    ) -> DeviceManagerResult<Arc<Mutex<Pl011>>> {
         let id = String::from(SERIAL_DEVICE_NAME_PREFIX);
 
         let serial_irq = self
@@ -1678,7 +1653,7 @@ impl DeviceManager {
             })
             .map_err(DeviceManagerError::CreateInterruptGroup)?;
 
-        let serial = Arc::new(Mutex::new(devices::legacy::PL011::new(
+        let serial = Arc::new(Mutex::new(devices::legacy::Pl011::new(
             id.clone(),
             interrupt_group,
             serial_writer,
@@ -1696,9 +1671,8 @@ impl DeviceManager {
 
         self.id_to_dev_info.insert(
             (DeviceType::Serial, DeviceType::Serial.to_string()),
-            MMIODeviceInfo {
+            MmioDeviceInfo {
                 addr: addr.0,
-                len: MMIO_LEN,
                 irq: serial_irq,
             },
         );
@@ -2102,6 +2076,7 @@ impl DeviceManager {
                         net_cfg.num_queues,
                         net_cfg.queue_size,
                         self.seccomp_action.clone(),
+                        net_cfg.rate_limiter_config,
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2114,6 +2089,7 @@ impl DeviceManager {
                         net_cfg.iommu,
                         net_cfg.queue_size,
                         self.seccomp_action.clone(),
+                        net_cfg.rate_limiter_config,
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2130,6 +2106,7 @@ impl DeviceManager {
                         net_cfg.num_queues,
                         net_cfg.queue_size,
                         self.seccomp_action.clone(),
+                        net_cfg.rate_limiter_config,
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2304,11 +2281,10 @@ impl DeviceManager {
                     )
                     .map_err(DeviceManagerError::MemoryManager)?;
 
-                let mut region_list = Vec::new();
-                region_list.push(VirtioSharedMemory {
+                let region_list = vec![VirtioSharedMemory {
                     offset: 0,
                     len: cache_size,
-                });
+                }];
 
                 Some((
                     VirtioSharedMemoryList {
@@ -3137,11 +3113,9 @@ impl DeviceManager {
     }
 
     pub fn interrupt_controller(&self) -> Option<Arc<Mutex<dyn InterruptController>>> {
-        if let Some(interrupt_controller) = &self.interrupt_controller {
-            Some(interrupt_controller.clone() as Arc<Mutex<dyn InterruptController>>)
-        } else {
-            None
-        }
+        self.interrupt_controller
+            .as_ref()
+            .map(|ic| ic.clone() as Arc<Mutex<dyn InterruptController>>)
     }
 
     pub fn console(&self) -> &Arc<Console> {
@@ -3283,11 +3257,11 @@ impl DeviceManager {
                     .device_type(),
             );
             match device_type {
-                VirtioDeviceType::TYPE_NET
-                | VirtioDeviceType::TYPE_BLOCK
-                | VirtioDeviceType::TYPE_PMEM
-                | VirtioDeviceType::TYPE_FS
-                | VirtioDeviceType::TYPE_VSOCK => {}
+                VirtioDeviceType::Net
+                | VirtioDeviceType::Block
+                | VirtioDeviceType::Pmem
+                | VirtioDeviceType::Fs
+                | VirtioDeviceType::Vsock => {}
                 _ => return Err(DeviceManagerError::RemovalNotAllowed(device_type)),
             }
         }
@@ -3671,7 +3645,7 @@ impl Aml for DeviceManager {
             &aml::Device::new(
                 "_SB_.PHPR".into(),
                 vec![
-                    &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A06")),
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
                     &aml::Name::new("_STA".into(), &0x0bu8),
                     &aml::Name::new("_UID".into(), &"PCI Hotplug Controller"),
                     &aml::Mutex::new("BLCK".into(), 0),
@@ -3725,9 +3699,9 @@ impl Aml for DeviceManager {
         let end_of_device_area = self.memory_manager.lock().unwrap().end_of_device_area().0;
 
         let mut pci_dsdt_inner_data: Vec<&dyn aml::Aml> = Vec::new();
-        let hid = aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0A08"));
+        let hid = aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A08"));
         pci_dsdt_inner_data.push(&hid);
-        let cid = aml::Name::new("_CID".into(), &aml::EISAName::new("PNP0A03"));
+        let cid = aml::Name::new("_CID".into(), &aml::EisaName::new("PNP0A03"));
         pci_dsdt_inner_data.push(&cid);
         let adr = aml::Name::new("_ADR".into(), &aml::ZERO);
         pci_dsdt_inner_data.push(&adr);
@@ -3741,7 +3715,7 @@ impl Aml for DeviceManager {
             "_CRS".into(),
             &aml::ResourceTemplate::new(vec![
                 &aml::AddressSpace::new_bus_number(0x0u16, 0xffu16),
-                &aml::IO::new(0xcf8, 0xcf8, 1, 0x8),
+                &aml::Io::new(0xcf8, 0xcf8, 1, 0x8),
                 &aml::AddressSpace::new_memory(
                     aml::AddressSpaceCachable::NotCacheable,
                     true,
@@ -3794,7 +3768,7 @@ impl Aml for DeviceManager {
         let mbrd_dsdt_data = aml::Device::new(
             "_SB_.MBRD".into(),
             vec![
-                &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0C02")),
+                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C02")),
                 &aml::Name::new("_UID".into(), &aml::ZERO),
                 &aml::Name::new(
                     "_CRS".into(),
@@ -3811,13 +3785,13 @@ impl Aml for DeviceManager {
         let com1_dsdt_data = aml::Device::new(
             "_SB_.COM1".into(),
             vec![
-                &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0501")),
+                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0501")),
                 &aml::Name::new("_UID".into(), &aml::ZERO),
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![
                         &aml::Interrupt::new(true, true, false, false, 4),
-                        &aml::IO::new(0x3f8, 0x3f8, 0, 0x8),
+                        &aml::Io::new(0x3f8, 0x3f8, 0, 0x8),
                     ]),
                 ),
             ],
@@ -3830,7 +3804,7 @@ impl Aml for DeviceManager {
         let power_button_dsdt_data = aml::Device::new(
             "_SB_.PWRB".into(),
             vec![
-                &aml::Name::new("_HID".into(), &aml::EISAName::new("PNP0C0C")),
+                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C0C")),
                 &aml::Name::new("_UID".into(), &aml::ZERO),
             ],
         )
@@ -4000,7 +3974,7 @@ impl BusDevice for DeviceManager {
             B0EJ_FIELD_OFFSET => {
                 assert!(data.len() == B0EJ_FIELD_SIZE);
                 let mut data_array: [u8; 4] = [0, 0, 0, 0];
-                data_array.copy_from_slice(&data[..]);
+                data_array.copy_from_slice(&data);
                 let device_bitmap = u32::from_le_bytes(data_array);
 
                 for device_id in 0..32 {

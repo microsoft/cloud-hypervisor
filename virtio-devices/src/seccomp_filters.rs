@@ -228,6 +228,7 @@ fn virtio_net_thread_rules() -> Vec<SyscallRuleSet> {
         allow_syscall(libc::SYS_readv),
         allow_syscall(libc::SYS_rt_sigprocmask),
         allow_syscall(libc::SYS_sigaltstack),
+        allow_syscall(libc::SYS_timerfd_settime),
         allow_syscall(libc::SYS_write),
         allow_syscall(libc::SYS_writev),
     ]
@@ -482,10 +483,7 @@ fn get_seccomp_filter_log(thread_type: Thread) -> Result<SeccompFilter, Error> {
         Thread::VirtioWatchdog => virtio_watchdog_thread_rules(),
     };
 
-    Ok(SeccompFilter::new(
-        rules.into_iter().collect(),
-        SeccompAction::Log,
-    )?)
+    SeccompFilter::new(rules.into_iter().collect(), SeccompAction::Log)
 }
 
 /// Generate a BPF program based on the seccomp_action value
