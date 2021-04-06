@@ -43,20 +43,20 @@ const N_GPIOS: u32 = 8;
 #[derive(Debug)]
 pub enum Error {
     BadWriteOffset(u64),
-    GPIOInterruptDisabled,
-    GPIOInterruptFailure(io::Error),
-    GPIOTriggerKeyFailure(u32),
+    GpioInterruptDisabled,
+    GpioInterruptFailure(io::Error),
+    GpioTriggerKeyFailure(u32),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::BadWriteOffset(offset) => write!(f, "Bad Write Offset: {}", offset),
-            Error::GPIOInterruptDisabled => write!(f, "GPIO interrupt disabled by guest driver.",),
-            Error::GPIOInterruptFailure(ref e) => {
+            Error::GpioInterruptDisabled => write!(f, "GPIO interrupt disabled by guest driver.",),
+            Error::GpioInterruptFailure(ref e) => {
                 write!(f, "Could not trigger GPIO interrupt: {}.", e)
             }
-            Error::GPIOTriggerKeyFailure(key) => {
+            Error::GpioTriggerKeyFailure(key) => {
                 write!(f, "Invalid GPIO Input key triggerd: {}.", key)
             }
         }
@@ -66,7 +66,7 @@ impl fmt::Display for Error {
 type Result<T> = result::Result<T, Error>;
 
 /// A GPIO device following the PL061 specification.
-pub struct GPIO {
+pub struct Gpio {
     id: String,
     // Data Register
     data: u32,
@@ -90,7 +90,7 @@ pub struct GPIO {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GPIOState {
+pub struct GpioState {
     data: u32,
     old_in_data: u32,
     dir: u32,
@@ -102,10 +102,10 @@ pub struct GPIOState {
     afsel: u32,
 }
 
-impl GPIO {
+impl Gpio {
     /// Constructs an PL061 GPIO device.
-    pub fn new(id: String, interrupt: Arc<Box<dyn InterruptSourceGroup>>) -> GPIO {
-        GPIO {
+    pub fn new(id: String, interrupt: Arc<Box<dyn InterruptSourceGroup>>) -> Self {
+        Self {
             id,
             data: 0,
             old_in_data: 0,
@@ -120,8 +120,8 @@ impl GPIO {
         }
     }
 
-    fn state(&self) -> GPIOState {
-        GPIOState {
+    fn state(&self) -> GpioState {
+        GpioState {
             data: self.data,
             old_in_data: self.old_in_data,
             dir: self.dir,
@@ -134,7 +134,7 @@ impl GPIO {
         }
     }
 
-    fn set_state(&mut self, state: &GPIOState) {
+    fn set_state(&mut self, state: &GpioState) {
         self.data = state.data;
         self.old_in_data = state.old_in_data;
         self.dir = state.dir;
@@ -233,12 +233,12 @@ impl GPIO {
             self.pl061_internal_update();
 
             match self.trigger_gpio_interrupt() {
-                Ok(_) | Err(Error::GPIOInterruptDisabled) => return Ok(()),
+                Ok(_) | Err(Error::GpioInterruptDisabled) => return Ok(()),
                 Err(e) => return Err(e),
             }
         }
 
-        Err(Error::GPIOTriggerKeyFailure(key))
+        Err(Error::GpioTriggerKeyFailure(key))
     }
 
     fn trigger_gpio_interrupt(&self) -> Result<()> {
@@ -246,16 +246,16 @@ impl GPIO {
         // trigger their individual interrupts and then the combined GPIOINTR line.
         if (self.istate & self.im) == 0 {
             warn!("Failed to trigger GPIO input interrupt (disabled by guest OS)");
-            return Err(Error::GPIOInterruptDisabled);
+            return Err(Error::GpioInterruptDisabled);
         }
         self.interrupt
             .trigger(0)
-            .map_err(Error::GPIOInterruptFailure)?;
+            .map_err(Error::GpioInterruptFailure)?;
         Ok(())
     }
 }
 
-impl BusDevice for GPIO {
+impl BusDevice for Gpio {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         let value;
         let mut read_ok = true;
@@ -295,7 +295,7 @@ impl BusDevice for GPIO {
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         if data.len() <= 4 {
-            let value = read_le_u32(&data[..]);
+            let value = read_le_u32(&data);
             if let Err(e) = self.handle_write(offset, value) {
                 warn!("Failed to write to GPIO PL061 device: {}", e);
             }
@@ -311,7 +311,7 @@ impl BusDevice for GPIO {
     }
 }
 
-impl Snapshottable for GPIO {
+impl Snapshottable for Gpio {
     fn id(&self) -> String {
         self.id.clone()
     }
@@ -352,9 +352,9 @@ impl Snapshottable for GPIO {
     }
 }
 
-impl Pausable for GPIO {}
-impl Transportable for GPIO {}
-impl Migratable for GPIO {}
+impl Pausable for Gpio {}
+impl Transportable for Gpio {}
+impl Migratable for Gpio {}
 
 #[cfg(test)]
 mod tests {
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_gpio_read_write_and_event() {
         let intr_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
-        let mut gpio = GPIO::new(
+        let mut gpio = Gpio::new(
             String::from(GPIO_NAME),
             Arc::new(Box::new(TestInterrupt::new(intr_evt.try_clone().unwrap()))),
         );
@@ -409,7 +409,7 @@ mod tests {
         write_le_u32(&mut data, 1);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIODIR, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIODIR, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 1);
 
         // Read and write to the GPIODATA register.
@@ -418,7 +418,7 @@ mod tests {
         let offset = 0x00000004 as u64;
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, offset, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, offset, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 1);
 
         // Read and write to the GPIOIS register.
@@ -426,7 +426,7 @@ mod tests {
         write_le_u32(&mut data, 1);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIOIS, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOIS, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 1);
 
         // Read and write to the GPIOIBE register.
@@ -434,7 +434,7 @@ mod tests {
         write_le_u32(&mut data, 2);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIOIBE, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOIBE, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 2);
 
         // Read and write to the GPIOIEV register.
@@ -442,7 +442,7 @@ mod tests {
         write_le_u32(&mut data, 4);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIOIEV, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOIEV, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 4);
 
         // Read and write to the GPIOIE register.
@@ -451,7 +451,7 @@ mod tests {
         write_le_u32(&mut data, 7);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIOIE, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOIE, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 7);
 
         let mask = 0x00000002 as u32;
@@ -461,7 +461,7 @@ mod tests {
         // The interrupt line on pin 1 should be on.
         // Read the GPIOMIS register.
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOMIS, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 2);
 
         // Read and Write to the GPIOIC register.
@@ -469,7 +469,7 @@ mod tests {
         write_le_u32(&mut data, 2);
         gpio.write(LEGACY_GPIO_MAPPED_IO_START, GPIOIC, &mut data);
         gpio.read(LEGACY_GPIO_MAPPED_IO_START, GPIOIC, &mut data);
-        let v = read_le_u32(&data[..]);
+        let v = read_le_u32(&data);
         assert_eq!(v, 2);
 
         // Attempts to write beyond the writable space.

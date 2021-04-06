@@ -85,7 +85,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::terminal::Terminal;
 
 #[cfg(target_arch = "aarch64")]
-use arch::aarch64::gic::gicv3::kvm::{KvmGICv3, GIC_V3_SNAPSHOT_ID};
+use arch::aarch64::gic::gicv3::kvm::{KvmGicV3, GIC_V3_SNAPSHOT_ID};
 #[cfg(target_arch = "aarch64")]
 use arch::aarch64::gic::kvm::create_gic;
 
@@ -263,15 +263,15 @@ pub enum Error {
 
     /// Error enabling TDX VM
     #[cfg(feature = "tdx")]
-    InitializeTDXVM(hypervisor::HypervisorVmError),
+    InitializeTdxVm(hypervisor::HypervisorVmError),
 
     /// Error enabling TDX memory region
     #[cfg(feature = "tdx")]
-    InitializeTDXMemoryRegion(hypervisor::HypervisorVmError),
+    InitializeTdxMemoryRegion(hypervisor::HypervisorVmError),
 
     /// Error finalizing TDX setup
     #[cfg(feature = "tdx")]
-    FinalizeTDX(hypervisor::HypervisorVmError),
+    FinalizeTdx(hypervisor::HypervisorVmError),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -884,7 +884,7 @@ impl Vm {
         for entry in self.device_manager.lock().unwrap().cmdline_additions() {
             cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
         }
-        Ok(CString::new(cmdline).map_err(Error::CmdLineCString)?)
+        CString::new(cmdline).map_err(Error::CmdLineCString)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1552,7 +1552,7 @@ impl Vm {
         let max_vcpus = self.cpu_manager.lock().unwrap().max_vcpus() as u32;
         self.vm
             .tdx_init(&cpuid, max_vcpus)
-            .map_err(Error::InitializeTDXVM)?;
+            .map_err(Error::InitializeTdxVm)?;
         Ok(())
     }
 
@@ -1669,7 +1669,7 @@ impl Vm {
                     /* TDVF_SECTION_ATTRIBUTES_EXTENDMR */
                     section.attributes == 1,
                 )
-                .map_err(Error::InitializeTDXMemoryRegion)?;
+                .map_err(Error::InitializeTdxMemoryRegion)?;
         }
 
         Ok(hob_offset)
@@ -1729,7 +1729,7 @@ impl Vm {
                 .initialize_tdx(hob_address)
                 .map_err(Error::CpuManager)?;
             // With TDX memory and CPU state configured TDX setup is complete
-            self.vm.tdx_finalize().map_err(Error::FinalizeTDX)?;
+            self.vm.tdx_finalize().map_err(Error::FinalizeTdx)?;
         }
 
         self.cpu_manager
@@ -1879,7 +1879,7 @@ impl Vm {
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
-                .downcast_mut::<KvmGICv3>()
+                .downcast_mut::<KvmGicV3>()
                 .unwrap()
                 .snapshot()?,
         );
@@ -1925,7 +1925,7 @@ impl Vm {
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
-                .downcast_mut::<KvmGICv3>()
+                .downcast_mut::<KvmGicV3>()
                 .unwrap()
                 .restore(*gic_v3_snapshot.clone())?;
         } else {
@@ -2421,29 +2421,11 @@ mod tests {
     use super::*;
     use arch::aarch64::fdt::create_fdt;
     use arch::aarch64::gic::kvm::create_gic;
-    use arch::aarch64::{layout, DeviceInfoForFDT};
-    use arch::DeviceType;
+    use arch::aarch64::{layout, DeviceInfoForFdt};
+    use arch::{DeviceType, MmioDeviceInfo};
     use vm_memory::{GuestAddress, GuestMemoryMmap};
 
     const LEN: u64 = 4096;
-
-    #[derive(Clone, Debug)]
-    pub struct MMIODeviceInfo {
-        addr: u64,
-        irq: u32,
-    }
-
-    impl DeviceInfoForFDT for MMIODeviceInfo {
-        fn addr(&self) -> u64 {
-            self.addr
-        }
-        fn irq(&self) -> u32 {
-            self.irq
-        }
-        fn length(&self) -> u64 {
-            LEN
-        }
-    }
 
     #[test]
     fn test_create_fdt_with_devices() {
@@ -2454,21 +2436,21 @@ mod tests {
         ));
         let mem = GuestMemoryMmap::from_ranges(&regions).expect("Cannot initialize memory");
 
-        let dev_info: HashMap<(DeviceType, std::string::String), MMIODeviceInfo> = [
+        let dev_info: HashMap<(DeviceType, std::string::String), MmioDeviceInfo> = [
             (
                 (DeviceType::Serial, DeviceType::Serial.to_string()),
-                MMIODeviceInfo { addr: 0x00, irq: 1 },
+                MmioDeviceInfo { addr: 0x00, irq: 1 },
             ),
             (
                 (DeviceType::Virtio(1), "virtio".to_string()),
-                MMIODeviceInfo {
+                MmioDeviceInfo {
                     addr: 0x00 + LEN,
                     irq: 2,
                 },
             ),
             (
-                (DeviceType::RTC, "rtc".to_string()),
-                MMIODeviceInfo {
+                (DeviceType::Rtc, "rtc".to_string()),
+                MmioDeviceInfo {
                     addr: 0x00 + 2 * LEN,
                     irq: 3,
                 },

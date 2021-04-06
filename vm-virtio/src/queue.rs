@@ -265,14 +265,11 @@ impl<'a> DescriptorChain<'a> {
     }
 
     fn is_valid(&self) -> bool {
-        !(self
-            .mem
-            .checked_offset(self.addr, self.len as usize)
-            .is_none()
+        !(!self.mem.check_range(self.addr, self.len as usize)
             || (self.has_next() && self.next >= self.table_size))
     }
 
-    /// Gets if this descriptor chain has another descriptor chain linked after it.
+    /// Gets if this descriptor has another descriptor linked after it.
     pub fn has_next(&self) -> bool {
         self.flags & VIRTQ_DESC_F_NEXT != 0 && self.ttl > 1
     }

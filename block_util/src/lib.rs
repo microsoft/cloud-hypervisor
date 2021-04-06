@@ -32,7 +32,7 @@ use std::io::{self, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 #[cfg(feature = "io_uring")]
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::Path;
 use std::result;
 use std::sync::{Arc, Mutex};
 use virtio_bindings::bindings::virtio_blk::*;
@@ -65,7 +65,7 @@ pub enum Error {
     TooManyDescriptors,
 }
 
-fn build_device_id(disk_path: &PathBuf) -> result::Result<String, Error> {
+fn build_device_id(disk_path: &Path) -> result::Result<String, Error> {
     let blk_metadata = match disk_path.metadata() {
         Err(_) => return Err(Error::GetFileMetadata),
         Ok(m) => m,
@@ -80,7 +80,7 @@ fn build_device_id(disk_path: &PathBuf) -> result::Result<String, Error> {
     Ok(device_id)
 }
 
-pub fn build_disk_image_id(disk_path: &PathBuf) -> Vec<u8> {
+pub fn build_disk_image_id(disk_path: &Path) -> Vec<u8> {
     let mut default_disk_image_id = vec![0; VIRTIO_BLK_ID_BYTES as usize];
     match build_device_id(disk_path) {
         Err(_) => {
@@ -135,7 +135,7 @@ pub enum RequestType {
     In,
     Out,
     Flush,
-    GetDeviceID,
+    GetDeviceId,
     Unsupported(u32),
 }
 
@@ -148,7 +148,7 @@ pub fn request_type(
         VIRTIO_BLK_T_IN => Ok(RequestType::In),
         VIRTIO_BLK_T_OUT => Ok(RequestType::Out),
         VIRTIO_BLK_T_FLUSH => Ok(RequestType::Flush),
-        VIRTIO_BLK_T_GET_ID => Ok(RequestType::GetDeviceID),
+        VIRTIO_BLK_T_GET_ID => Ok(RequestType::GetDeviceId),
         t => Ok(RequestType::Unsupported(t)),
     }
 }
@@ -163,6 +163,7 @@ fn sector(mem: &GuestMemoryMmap, desc_addr: GuestAddress) -> result::Result<u64,
     mem.read_obj(addr).map_err(Error::GuestMemory)
 }
 
+#[derive(Debug)]
 pub struct Request {
     pub request_type: RequestType,
     pub sector: u64,
@@ -192,12 +193,17 @@ impl Request {
         let status_desc;
         let mut desc = avail_desc
             .next_descriptor()
-            .ok_or(Error::DescriptorChainTooShort)?;
+            .ok_or(Error::DescriptorChainTooShort)
+            .map_err(|e| {
+                error!("Only head descriptor present: request = {:?}", req);
+                e
+            })?;
 
         if !desc.has_next() {
             status_desc = desc;
             // Only flush requests are allowed to skip the data descriptor.
             if req.request_type != RequestType::Flush {
+                error!("Need a data descriptor: request = {:?}", req);
                 return Err(Error::DescriptorChainTooShort);
             }
         } else {
@@ -208,13 +214,17 @@ impl Request {
                 if !desc.is_write_only() && req.request_type == RequestType::In {
                     return Err(Error::UnexpectedReadOnlyDescriptor);
                 }
-                if !desc.is_write_only() && req.request_type == RequestType::GetDeviceID {
+                if !desc.is_write_only() && req.request_type == RequestType::GetDeviceId {
                     return Err(Error::UnexpectedReadOnlyDescriptor);
                 }
                 req.data_descriptors.push((desc.addr, desc.len));
                 desc = desc
                     .next_descriptor()
-                    .ok_or(Error::DescriptorChainTooShort)?;
+                    .ok_or(Error::DescriptorChainTooShort)
+                    .map_err(|e| {
+                        error!("DescriptorChain corrupted: request = {:?}", req);
+                        e
+                    })?;
             }
             status_desc = desc;
         }
@@ -270,7 +280,7 @@ impl Request {
                     }
                 }
                 RequestType::Flush => disk.flush().map_err(ExecuteError::Flush)?,
-                RequestType::GetDeviceID => {
+                RequestType::GetDeviceId => {
                     if (*data_len as usize) < disk_id.len() {
                         return Err(ExecuteError::BadRequest(Error::InvalidOffset));
                     }
@@ -336,7 +346,7 @@ impl Request {
                     .fsync(Some(user_data))
                     .map_err(ExecuteError::AsyncFlush)?;
             }
-            RequestType::GetDeviceID => {
+            RequestType::GetDeviceId => {
                 let (data_addr, data_len) = if self.data_descriptors.len() == 1 {
                     (self.data_descriptors[0].0, self.data_descriptors[0].1)
                 } else {

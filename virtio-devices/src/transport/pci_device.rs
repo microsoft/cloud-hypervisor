@@ -22,7 +22,7 @@ use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use pci::{
     BarReprogrammingParams, MsixCap, MsixConfig, PciBarConfiguration, PciBarRegionType,
-    PciCapability, PciCapabilityID, PciClassCode, PciConfiguration, PciDevice, PciDeviceError,
+    PciCapability, PciCapabilityId, PciClassCode, PciConfiguration, PciDevice, PciDeviceError,
     PciHeaderType, PciMassStorageSubclass, PciNetworkControllerSubclass, PciSubclass,
 };
 use std::any::Any;
@@ -89,8 +89,8 @@ impl PciCapability for VirtioPciCap {
         self.as_slice()
     }
 
-    fn id(&self) -> PciCapabilityID {
-        PciCapabilityID::VendorSpecific
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::VendorSpecific
     }
 }
 
@@ -125,8 +125,8 @@ impl PciCapability for VirtioPciNotifyCap {
         self.as_slice()
     }
 
-    fn id(&self) -> PciCapabilityID {
-        PciCapabilityID::VendorSpecific
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::VendorSpecific
     }
 }
 
@@ -170,8 +170,8 @@ impl PciCapability for VirtioPciCap64 {
         self.as_slice()
     }
 
-    fn id(&self) -> PciCapabilityID {
-        PciCapabilityID::VendorSpecific
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::VendorSpecific
     }
 }
 
@@ -208,8 +208,8 @@ impl PciCapability for VirtioPciCfgCap {
         self.as_slice()
     }
 
-    fn id(&self) -> PciCapabilityID {
-        PciCapabilityID::VendorSpecific
+    fn id(&self) -> PciCapabilityId {
+        PciCapabilityId::VendorSpecific
     }
 }
 
@@ -384,11 +384,11 @@ impl VirtioPciDevice {
         // to firmware without requiring excessive identity mapping.
         let mut use_64bit_bar = true;
         let (class, subclass) = match VirtioDeviceType::from(locked_device.device_type()) {
-            VirtioDeviceType::TYPE_NET => (
+            VirtioDeviceType::Net => (
                 PciClassCode::NetworkController,
                 &PciNetworkControllerSubclass::EthernetController as &dyn PciSubclass,
             ),
-            VirtioDeviceType::TYPE_BLOCK => {
+            VirtioDeviceType::Block => {
                 use_64bit_bar = false;
                 (
                     PciClassCode::MassStorage,
@@ -631,7 +631,7 @@ impl VirtioPciDevice {
 
         if offset < std::mem::size_of::<VirtioPciCap>() {
             let (_, right) = cap_slice.split_at_mut(offset);
-            right[..data_len].copy_from_slice(&data[..]);
+            right[..data_len].copy_from_slice(&data);
             None
         } else {
             // Safe since we know self.cap_pci_cfg_info.cap.cap.offset is 32bits long.
