@@ -59,6 +59,10 @@ const HYPERVISOR_ECX_BIT: u8 = 31; // Hypervisor ecx bit.
 #[cfg(target_arch = "x86_64")]
 const MTRR_EDX_BIT: u8 = 12; // Hypervisor ecx bit.
 
+// KVM feature bits
+#[cfg(target_arch = "x86_64")]
+const KVM_FEATURE_ASYNC_PF_INT_BIT: u8 = 14;
+
 #[cfg(feature = "acpi")]
 pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
 
@@ -361,41 +365,18 @@ impl Snapshottable for Vcpu {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        let snapshot = serde_json::to_vec(&self.saved_state)
-            .map_err(|e| MigratableError::Snapshot(e.into()))?;
-
         let mut vcpu_snapshot = Snapshot::new(&format!("{}", self.id));
-        vcpu_snapshot.add_data_section(SnapshotDataSection {
-            id: format!("{}-section", VCPU_SNAPSHOT_ID),
-            snapshot,
-        });
+        vcpu_snapshot.add_data_section(SnapshotDataSection::new_from_state(
+            VCPU_SNAPSHOT_ID,
+            &self.saved_state,
+        )?);
 
         Ok(vcpu_snapshot)
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        if let Some(vcpu_section) = snapshot
-            .snapshot_data
-            .get(&format!("{}-section", VCPU_SNAPSHOT_ID))
-        {
-            let vcpu_state = match serde_json::from_slice(&vcpu_section.snapshot) {
-                Ok(state) => state,
-                Err(error) => {
-                    return Err(MigratableError::Restore(anyhow!(
-                        "Could not deserialize the vCPU snapshot {}",
-                        error
-                    )))
-                }
-            };
-
-            self.saved_state = Some(vcpu_state);
-
-            Ok(())
-        } else {
-            Err(MigratableError::Restore(anyhow!(
-                "Could not find the vCPU snapshot section"
-            )))
-        }
+        self.saved_state = Some(snapshot.to_state(VCPU_SNAPSHOT_ID)?);
+        Ok(())
     }
 }
 
@@ -685,10 +666,22 @@ impl CpuManager {
                 .map_err(Error::CpuidSgx)?;
         }
 
-        // Set CPU physical bits
+        // Update some existing CPUID
         for entry in cpuid.as_mut_slice().iter_mut() {
-            if entry.function == 0x8000_0008 {
-                entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
+            match entry.function {
+                // Set CPU physical bits
+                0x8000_0008 => {
+                    entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
+                }
+                // Disable KVM_FEATURE_ASYNC_PF_INT
+                // This is required until we find out why the asynchronous page
+                // fault is generating unexpected behavior when using interrupt
+                // mechanism.
+                // TODO: Re-enable KVM_FEATURE_ASYNC_PF_INT (#2277)
+                0x4000_0001 => {
+                    entry.eax &= !(1 << KVM_FEATURE_ASYNC_PF_INT_BIT);
+                }
+                _ => {}
             }
         }
 

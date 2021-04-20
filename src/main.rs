@@ -62,6 +62,16 @@ enum Error {
     ThreadJoin(std::boxed::Box<dyn std::any::Any + std::marker::Send>),
     #[error("VMM thread exited with error: {0}")]
     VmmThread(#[source] vmm::Error),
+    #[error("Error parsing --event-monitor: {0}")]
+    ParsingEventMonitor(option_parser::OptionParserError),
+    #[error("Error parsing --event-monitor: path or fd required")]
+    BareEventMonitor,
+    #[error("Error doing event monitor I/O: {0}")]
+    EventMonitorIo(std::io::Error),
+    #[error("Error creating log file: {0}")]
+    LogFileCreation(std::io::Error),
+    #[error("Error setting up logger: {0}")]
+    LoggerSetup(log::SetLoggerError),
 }
 
 struct Logger {
@@ -370,6 +380,53 @@ fn create_app<'a, 'b>(
 }
 
 fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Result<(), Error> {
+    let log_level = match cmd_arguments.occurrences_of("v") {
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    };
+
+    let log_file: Box<dyn std::io::Write + Send> = if let Some(file) =
+        cmd_arguments.value_of("log-file")
+    {
+        Box::new(std::fs::File::create(std::path::Path::new(file)).map_err(Error::LogFileCreation)?)
+    } else {
+        Box::new(std::io::stderr())
+    };
+
+    log::set_boxed_logger(Box::new(Logger {
+        output: Mutex::new(log_file),
+        start: std::time::Instant::now(),
+    }))
+    .map(|()| log::set_max_level(log_level))
+    .map_err(Error::LoggerSetup)?;
+
+    if let Some(monitor_config) = cmd_arguments.value_of("event-monitor") {
+        let mut parser = OptionParser::new();
+        parser.add("path").add("fd");
+        parser
+            .parse(monitor_config)
+            .map_err(Error::ParsingEventMonitor)?;
+
+        let file = if parser.is_set("fd") {
+            let fd = parser
+                .convert("fd")
+                .map_err(Error::ParsingEventMonitor)?
+                .unwrap();
+            unsafe { File::from_raw_fd(fd) }
+        } else if parser.is_set("path") {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(parser.get("path").unwrap())
+                .map_err(Error::EventMonitorIo)?
+        } else {
+            return Err(Error::BareEventMonitor);
+        };
+        event_monitor::set_monitor(file).map_err(Error::EventMonitorIo)?;
+    }
+
     let (api_request_sender, api_request_receiver) = channel();
     let api_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateApiEventFd)?;
 
@@ -461,58 +518,8 @@ fn main() {
     let _ = unsafe { libc::umask(0o077) };
 
     let (default_vcpus, default_memory, default_rng) = prepare_default_values();
-
     let cmd_arguments = create_app(&default_vcpus, &default_memory, &default_rng).get_matches();
-
-    let log_level = match cmd_arguments.occurrences_of("v") {
-        0 => LevelFilter::Warn,
-        1 => LevelFilter::Info,
-        2 => LevelFilter::Debug,
-        _ => LevelFilter::Trace,
-    };
-
-    let log_file: Box<dyn std::io::Write + Send> =
-        if let Some(file) = cmd_arguments.value_of("log-file") {
-            Box::new(
-                std::fs::File::create(std::path::Path::new(file)).expect("Error creating log file"),
-            )
-        } else {
-            Box::new(std::io::stderr())
-        };
-
-    log::set_boxed_logger(Box::new(Logger {
-        output: Mutex::new(log_file),
-        start: std::time::Instant::now(),
-    }))
-    .map(|()| log::set_max_level(log_level))
-    .expect("Expected to be able to setup logger");
-
     let api_socket_path = cmd_arguments.value_of("api-socket").map(|s| s.to_string());
-
-    if let Some(monitor_config) = cmd_arguments.value_of("event-monitor") {
-        let mut parser = OptionParser::new();
-        parser.add("path").add("fd");
-        parser
-            .parse(monitor_config)
-            .expect("Error parsing event monitor config");
-
-        let file = if parser.is_set("fd") {
-            let fd = parser
-                .convert("fd")
-                .expect("Integral file descriptor expected")
-                .unwrap();
-            unsafe { File::from_raw_fd(fd) }
-        } else if parser.is_set("path") {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(parser.get("path").unwrap())
-                .expect("Error opening event monitor path")
-        } else {
-            panic!("--event-monitor requires either a fd or path provided")
-        };
-        event_monitor::set_monitor(file).expect("Expected setting monitor to succeed");
-    }
 
     let exit_code = if let Err(e) = start_vmm(cmd_arguments, &api_socket_path) {
         eprintln!("{}", e);

@@ -52,7 +52,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-amd64.raw";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210106-1.raw";
+    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210407-0.raw";
     #[cfg(target_arch = "x86_64")]
     const FOCAL_SGX_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-sgx.raw";
     #[cfg(target_arch = "x86_64")]
@@ -64,11 +64,11 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-arm64-custom.qcow2";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210106-1.qcow2";
+    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210407-0.qcow2";
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-arm64-custom.vhd";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210106-1.vhd";
+    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210407-0.vhd";
     #[cfg(target_arch = "x86_64")]
     const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
     #[cfg(target_arch = "x86_64")]
@@ -1649,21 +1649,12 @@ mod tests {
         handle_child_output(r, &output);
     }
 
-    fn get_pss(pid: u32) -> u32 {
-        let smaps = fs::File::open(format!("/proc/{}/smaps", pid)).unwrap();
-        let reader = io::BufReader::new(smaps);
-
-        let mut total = 0;
-        for line in reader.lines() {
-            let l = line.unwrap();
-            // Lines look like this:
-            // Pss:                 176 kB
-            if l.contains("Pss") {
-                let values: Vec<&str> = l.rsplit(' ').collect();
-                total += values[1].trim().parse::<u32>().unwrap()
-            }
-        }
-        total
+    fn get_ksm_pages_shared() -> u32 {
+        fs::read_to_string("/sys/kernel/mm/ksm/pages_shared")
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
     }
 
     fn test_memory_mergeable(mergeable: bool) {
@@ -1673,15 +1664,17 @@ mod tests {
             "mergeable=off"
         };
 
+        // We are assuming the rest of the system in our CI is not using mergeable memeory
+        let ksm_ps_init = get_ksm_pages_shared();
+        assert!(ksm_ps_init == 0);
+
         let mut focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-        let mut focal2 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-
         let guest1 = Guest::new(&mut focal1 as &mut dyn DiskConfig);
-
         let mut child1 = GuestCommand::new(&guest1)
             .args(&["--cpus", "boot=1"])
             .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
-            .args(&["--kernel", guest1.fw_path.as_str()])
+            .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(&["--net", guest1.default_net_string().as_str()])
             .args(&["--serial", "tty", "--console", "off"])
@@ -1689,19 +1682,25 @@ mod tests {
             .spawn()
             .unwrap();
 
-        // Let enough time for the first VM to be spawned, and to make
-        // sure the PSS measurement is accurate.
-        thread::sleep(std::time::Duration::new(120, 0));
+        let r = std::panic::catch_unwind(|| {
+            guest1.wait_vm_boot(None).unwrap();
+        });
+        if r.is_err() {
+            let _ = child1.kill();
+            let output = child1.wait_with_output().unwrap();
+            handle_child_output(r, &output);
+            panic!("Test should already be failed/panicked"); // To explicitly mark this block never return
+        }
 
-        // Get initial PSS
-        let old_pss = get_pss(child1.id());
+        let ksm_ps_guest1 = get_ksm_pages_shared();
 
+        let mut focal2 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest2 = Guest::new(&mut focal2 as &mut dyn DiskConfig);
-
         let mut child2 = GuestCommand::new(&guest2)
             .args(&["--cpus", "boot=1"])
             .args(&["--memory", format!("size=512M,{}", memory_param).as_str()])
-            .args(&["--kernel", guest2.fw_path.as_str()])
+            .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(&["--net", guest2.default_net_string().as_str()])
             .args(&["--serial", "tty", "--console", "off"])
@@ -1709,24 +1708,20 @@ mod tests {
             .spawn()
             .unwrap();
 
-        // Let enough time for the second VM to be spawned, and to make
-        // sure KSM has enough time to merge identical pages between the
-        // 2 VMs.
-        thread::sleep(std::time::Duration::new(60, 0));
         let r = std::panic::catch_unwind(|| {
-            // Get new PSS
-            let new_pss = get_pss(child1.id());
-
-            // Convert PSS from u32 into float.
-            let old_pss = old_pss as f32;
-            let new_pss = new_pss as f32;
-
-            println!("old PSS {}, new PSS {}", old_pss, new_pss);
+            guest2.wait_vm_boot(None).unwrap();
+            let ksm_ps_guest2 = get_ksm_pages_shared();
 
             if mergeable {
-                assert!(new_pss < (old_pss * 0.95));
+                println!(
+                    "ksm pages_shared after vm1 booted '{}', ksm pages_shared after vm2 booted '{}'",
+                    ksm_ps_guest1, ksm_ps_guest2
+                );
+                // We are expecting the number of shared pages to increase as the number of VM increases
+                assert!(ksm_ps_guest1 < ksm_ps_guest2);
             } else {
-                assert!((old_pss * 0.95) < new_pss && new_pss < (old_pss * 1.05));
+                assert!(ksm_ps_guest1 == 0);
+                assert!(ksm_ps_guest2 == 0);
             }
         });
 
@@ -2238,8 +2233,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernel_path = workload_path;
-            kernel_path.push("bzImage");
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -2324,8 +2318,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernel_path = workload_path;
-            kernel_path.push("bzImage");
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=6"])
@@ -3497,8 +3490,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernel_path = workload_path.clone();
-            kernel_path.push("bzImage");
+            let kernel_path = direct_kernel_boot_path();
 
             let mut vfio_path = workload_path.clone();
             vfio_path.push("vfio");
@@ -4058,8 +4050,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernel_path = workload_path;
-            kernel_path.push("bzImage");
+            let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -5132,8 +5123,7 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
-            let mut kernel_path = workload_path;
-            kernel_path.push("bzImage");
+            let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5682,6 +5672,20 @@ mod tests {
             .unwrap_or(0);
         }
 
+        fn get_ram_size_windows(auth: &PasswordAuth) -> usize {
+            return ssh_command_ip_with_auth(
+                "powershell -Command \"(Get-CimInstance win32_computersystem).TotalPhysicalMemory\"",
+                &auth,
+                "192.168.249.2",
+                DEFAULT_SSH_RETRIES,
+                DEFAULT_SSH_TIMEOUT,
+            )
+            .unwrap()
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+        }
+
         fn get_vcpu_threads_count(pid: u32) -> u8 {
             // ps -T -p 12345 | grep vcpu | wc -l
             let out = Command::new("ps")
@@ -5896,6 +5900,118 @@ mod tests {
                 // Check the CH process has the correct number of vcpu threads
                 assert_eq!(get_vcpu_threads_count(child.id()), vcpu_num);
 
+                let vcpu_num = 4;
+                // Remove some CPUs. Note that Windows doesn't support hot-remove.
+                resize_command(&api_socket, Some(vcpu_num), None, None);
+                // Wait to make sure CPUs are removed
+                thread::sleep(std::time::Duration::new(10, 0));
+                // Reboot to let Windows catch up
+                ssh_command_ip_with_auth(
+                    "shutdown /r /t 0",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+                // Wait to make sure Windows completely rebooted
+                thread::sleep(std::time::Duration::new(60, 0));
+                // Check the guest sees the correct number
+                assert_eq!(get_cpu_count_windows(&auth), vcpu_num);
+                // Check the CH process has the correct number of vcpu threads
+                assert_eq!(get_vcpu_threads_count(child.id()), vcpu_num);
+
+                ssh_command_ip_with_auth(
+                    "shutdown /s",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(60));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[ignore]
+        fn test_windows_guest_ram_hotplug() {
+            let mut windows = WindowsDiskConfig::new(WINDOWS_IMAGE_NAME.to_string());
+            let guest = Guest::new(&mut windows);
+
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+
+            let mut ovmf_path = workload_path.clone();
+            ovmf_path.push(OVMF_NAME);
+
+            let mut osdisk_path = workload_path;
+            osdisk_path.push(WINDOWS_IMAGE_NAME.to_string());
+
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
+                .args(&["--memory", "size=2G,hotplug_size=5G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .default_disks()
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .args(&["--net", "tap="])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            // Wait to make sure Windows boots up
+            thread::sleep(std::time::Duration::new(60, 0));
+
+            let r = std::panic::catch_unwind(|| {
+                let auth = windows_auth();
+
+                let ram_size = 2 * 1024 * 1024 * 1024;
+                // Check the initial number of RAM the guest sees
+                let current_ram_size = get_ram_size_windows(&auth);
+                // This size seems to be reserved by the system and thus the
+                // reported amount differs by this constant value.
+                let reserved_ram_size = ram_size - current_ram_size;
+                // Verify that there's not more than 4mb constant diff wasted
+                // by the reserved ram.
+                assert!(reserved_ram_size < 4 * 1024 * 1024);
+
+                let ram_size = 4 * 1024 * 1024 * 1024;
+                // Hotplug some RAM
+                resize_command(&api_socket, None, Some(ram_size), None);
+                // Wait to make sure RAM has been added
+                thread::sleep(std::time::Duration::new(10, 0));
+                // Check the guest sees the correct number
+                assert_eq!(get_ram_size_windows(&auth), ram_size - reserved_ram_size);
+
+                let ram_size = 3 * 1024 * 1024 * 1024;
+                // Unplug some RAM. Note that hot-remove most likely won't work.
+                resize_command(&api_socket, None, Some(ram_size), None);
+                // Wait to make sure RAM has been added
+                thread::sleep(std::time::Duration::new(10, 0));
+                // Reboot to let Windows catch up
+                ssh_command_ip_with_auth(
+                    "shutdown /r /t 0",
+                    &auth,
+                    "192.168.249.2",
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap();
+                // Wait to make sure guest completely rebooted
+                thread::sleep(std::time::Duration::new(60, 0));
+                // Check the guest sees the correct number
+                assert_eq!(get_ram_size_windows(&auth), ram_size - reserved_ram_size);
+
                 ssh_command_ip_with_auth(
                     "shutdown /s",
                     &auth,
@@ -5926,7 +6042,7 @@ mod tests {
             workload_path.push("workloads");
 
             let mut kernel_path = workload_path;
-            kernel_path.push("bzImage_w_sgx");
+            kernel_path.push("vmlinux_w_sgx");
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
