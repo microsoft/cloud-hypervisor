@@ -171,7 +171,7 @@ Multiple arguments can be given to the `--disk` parameter.
 
 #### Building your kernel
 
-Cloud Hypervisor also supports direct kernel boot into a `vmlinux` ELF kernel or `bzImage`. In order to support virtio-fs and virtio-iommu we have our own development branch. You are of course able to use your own kernel but these instructions will continue with the version that we develop and test against.
+Cloud Hypervisor also supports direct kernel boot into a `vmlinux` ELF kernel. In order to support virtio-iommu we have our own development branch. You are of course able to use your own kernel but these instructions will continue with the version that we develop and test against.
 
 To build the kernel:
 
@@ -252,12 +252,12 @@ Direct kernel boot to userspace should work with a rootfs from most distribution
 
 ## Hot Plug
 
-Cloud Hypervisor supports hotplug of CPUs, passthrough devices (VFIO), `virtio-{net,block,pmem,fs,vsock}` and memory resizing. This [document](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/hotplug.md) details how to add devices to
+Cloud Hypervisor supports hotplug of CPUs, passthrough devices (VFIO), `virtio-{net,block,pmem,fs,vsock}` and memory resizing. This [document](docs/hotplug.md) details how to add devices to
 a running VM.
 
 ## Device Model
 
-Details of the device model can be found in this [documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/master/docs/device_model.md).
+Details of the device model can be found in this [documentation](docs/device_model.md).
 
 ## TODO
 
@@ -317,3 +317,7 @@ etc, are all equal and welcome means of contribution. See the [CONTRIBUTING](CON
 
 Get an [invite to our Slack channel](https://join.slack.com/t/cloud-hypervisor/shared_invite/enQtNjY3MTE3MDkwNDQ4LWQ1MTA1ZDVmODkwMWQ1MTRhYzk4ZGNlN2UwNTI3ZmFlODU0OTcwOWZjMTkwZDExYWE3YjFmNzgzY2FmNDAyMjI)
 and [join us on Slack](https://cloud-hypervisor.slack.com/).
+
+## Security issues
+
+Please use the GitHub security advisories feature for reporting issues: https://github.com/cloud-hypervisor/cloud-hypervisor/security/advisories/new

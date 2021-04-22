@@ -853,47 +853,30 @@ impl MemoryManager {
         if let Some(source_url) = source_url {
             let vm_snapshot_path = url_to_path(source_url).map_err(Error::Restore)?;
 
-            if let Some(mem_section) = snapshot
-                .snapshot_data
-                .get(&format!("{}-section", MEMORY_MANAGER_SNAPSHOT_ID))
-            {
-                let mem_snapshot: MemoryManagerSnapshotData =
-                    match serde_json::from_slice(&mem_section.snapshot) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            return Err(Error::Restore(MigratableError::Restore(anyhow!(
-                                "Could not deserialize MemoryManager {}",
-                                error
-                            ))))
-                        }
-                    };
+            let mem_snapshot: MemoryManagerSnapshotData = snapshot
+                .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
+                .map_err(Error::Restore)?;
 
-                // Here we turn the content file name into a content file path as
-                // this will be needed to copy the content of the saved memory
-                // region into the newly created memory region.
-                // We simply ignore the content files that are None, as they
-                // represent regions that have been directly saved by the user, with
-                // no need for saving into a dedicated external file. For these
-                // files, the VmConfig already contains the information on where to
-                // find them.
-                let mut saved_regions = mem_snapshot.memory_regions;
-                for region in saved_regions.iter_mut() {
-                    if let Some(content) = &mut region.content {
-                        let mut memory_region_path = vm_snapshot_path.clone();
-                        memory_region_path.push(content.clone());
-                        *content = memory_region_path;
-                    }
+            // Here we turn the content file name into a content file path as
+            // this will be needed to copy the content of the saved memory
+            // region into the newly created memory region.
+            // We simply ignore the content files that are None, as they
+            // represent regions that have been directly saved by the user, with
+            // no need for saving into a dedicated external file. For these
+            // files, the VmConfig already contains the information on where to
+            // find them.
+            let mut saved_regions = mem_snapshot.memory_regions;
+            for region in saved_regions.iter_mut() {
+                if let Some(content) = &mut region.content {
+                    let mut memory_region_path = vm_snapshot_path.clone();
+                    memory_region_path.push(content.clone());
+                    *content = memory_region_path;
                 }
-
-                mm.lock().unwrap().fill_saved_regions(saved_regions)?;
-
-                Ok(mm)
-            } else {
-                Err(Error::Restore(MigratableError::Restore(anyhow!(
-                    "Could not find {}-section from snapshot",
-                    MEMORY_MANAGER_SNAPSHOT_ID
-                ))))
             }
+
+            mm.lock().unwrap().fill_saved_regions(saved_regions)?;
+
+            Ok(mm)
         } else {
             Ok(mm)
         }
@@ -1493,25 +1476,13 @@ impl MemoryManager {
         &self.memory_zones
     }
 
-    // Generate a table for the pages that are dirty. The algorithm is currently
-    // very simple. If any page in a "block" of 64 pages is dirty then that whole
-    // "block" is added to the table. These "blocks" are also collapsed together if
-    // they are contiguous:
-    //
-    // For every block of 64 pages we check to see if there are any dirty pages in it
-    // if there are we increase the size of the current range if there is one, otherwise
-    // create a new range. If there are no dirty pages in the current "block" the range is
-    // closed if there is one and added to the table. After iterating through the dirty
-    // page bitmaps an open range will be closed and added to the table.
-    //
-    // This algorithm is very simple and could be refined to count the number of pages
-    // in the block and instead create smaller ranges covering those pages.
+    // Generate a table for the pages that are dirty. The dirty pages are collapsed
+    // together in the table if they are contiguous.
     pub fn dirty_memory_range_table(
         &self,
     ) -> std::result::Result<MemoryRangeTable, MigratableError> {
         let page_size = 4096; // TODO: Does this need to vary?
         let mut table = MemoryRangeTable::default();
-        let mut total_pages = 0;
         for r in &self.guest_ram_mappings {
             let dirty_bitmap = self.vm.get_dirty_log(r.slot, r.size).map_err(|e| {
                 MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
@@ -1519,18 +1490,21 @@ impl MemoryManager {
 
             let mut entry: Option<MemoryRange> = None;
             for (i, block) in dirty_bitmap.iter().enumerate() {
-                if *block > 0 {
-                    if let Some(entry) = &mut entry {
-                        entry.length += 64 * page_size;
-                    } else {
-                        entry = Some(MemoryRange {
-                            gpa: r.gpa + (64 * i as u64 * page_size),
-                            length: 64 * page_size,
-                        });
+                for j in 0..64 {
+                    let is_page_dirty = ((block >> j) & 1u64) != 0u64;
+                    let page_offset = ((i * 64) + j) as u64 * page_size;
+                    if is_page_dirty {
+                        if let Some(entry) = &mut entry {
+                            entry.length += page_size;
+                        } else {
+                            entry = Some(MemoryRange {
+                                gpa: r.gpa + page_offset,
+                                length: page_size,
+                            });
+                        }
+                    } else if let Some(entry) = entry.take() {
+                        table.push(entry);
                     }
-                    total_pages += block.count_ones() as u64;
-                } else if let Some(entry) = entry.take() {
-                    table.push(entry);
                 }
             }
             if let Some(entry) = entry.take() {
@@ -1541,18 +1515,9 @@ impl MemoryManager {
                 info!("Dirty Memory Range Table is empty");
             } else {
                 info!("Dirty Memory Range Table:");
-                let mut total_size = 0;
                 for range in table.regions() {
                     info!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
-                    total_size += range.length;
                 }
-                info!(
-                    "Total pages: {} ({} KiB). Total size: {} KiB. Efficiency: {}%",
-                    total_pages,
-                    total_pages * page_size / 1024,
-                    total_size / 1024,
-                    (total_pages * page_size * 100) / total_size
-                );
             }
         }
         Ok(table)
@@ -1810,9 +1775,17 @@ impl Aml for MemoryMethods {
                         &aml::Path::new("MINH"),
                         &aml::Path::new("LENH"),
                     ),
+                    &aml::If::new(
+                        &aml::LessThan::new(&aml::Path::new("MAXL"), &aml::Path::new("MINL")),
+                        vec![&aml::Add::new(
+                            &aml::Path::new("MAXH"),
+                            &aml::ONE,
+                            &aml::Path::new("MAXH"),
+                        )],
+                    ),
                     &aml::Subtract::new(
-                        &aml::Path::new("MAXH"),
-                        &aml::Path::new("MAXH"),
+                        &aml::Path::new("MAXL"),
+                        &aml::Path::new("MAXL"),
                         &aml::ONE,
                     ),
                     // Release lock
@@ -2019,14 +1992,10 @@ impl Snapshottable for MemoryManager {
         // memory region content for the regions requiring it.
         self.snapshot_memory_regions = memory_regions.clone();
 
-        let snapshot_data_section =
-            serde_json::to_vec(&MemoryManagerSnapshotData { memory_regions })
-                .map_err(|e| MigratableError::Snapshot(e.into()))?;
-
-        memory_manager_snapshot.add_data_section(SnapshotDataSection {
-            id: format!("{}-section", MEMORY_MANAGER_SNAPSHOT_ID),
-            snapshot: snapshot_data_section,
-        });
+        memory_manager_snapshot.add_data_section(SnapshotDataSection::new_from_state(
+            MEMORY_MANAGER_SNAPSHOT_ID,
+            &MemoryManagerSnapshotData { memory_regions },
+        )?);
 
         let mut memory_snapshot = self.snapshot.lock().unwrap();
         *memory_snapshot = Some(guest_memory);

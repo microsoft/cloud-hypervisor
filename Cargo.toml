@@ -19,12 +19,12 @@ clap = { version = "2.33.3", features = ["wrap_help"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.92"
+libc = "0.2.93"
 log = { version = "0.4.14", features = ["std"] }
 option_parser = { path = "option_parser" }
-seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.22.0" }
+seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.2" }
 serde_json = "1.0.64"
-signal-hook = "0.3.7"
+signal-hook = "0.3.8"
 thiserror = "1.0.24"
 vmm = { path = "vmm" }
 vmm-sys-util = "0.8.0"
