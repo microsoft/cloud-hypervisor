@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::net_util::{
-    build_net_config_space, CtrlVirtio, NetCtrlEpollHandler, VirtioNetConfig,
+    build_net_config_space, NetCtrl, NetCtrlEpollHandler, VirtioNetConfig,
 };
 use super::super::{
     ActivateError, ActivateResult, Queue, VirtioCommon, VirtioDevice, VirtioDeviceType,
@@ -16,6 +16,7 @@ use net_util::MacAddr;
 use seccomp::{SeccompAction, SeccompFilter};
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixListener;
 use std::result;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -46,19 +47,33 @@ pub struct Net {
     seccomp_action: SeccompAction,
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     acked_protocol_features: u64,
+    socket_path: Option<String>,
 }
 
 impl Net {
-    /// Create a new vhost-user-net device
     /// Create a new vhost-user-net device
     pub fn new(
         id: String,
         mac_addr: MacAddr,
         vu_cfg: VhostUserConfig,
         seccomp_action: SeccompAction,
+        server: bool,
     ) -> Result<Net> {
-        let mut vhost_user_net = Master::connect(&vu_cfg.socket, vu_cfg.num_queues as u64)
-            .map_err(Error::VhostUserCreateMaster)?;
+        let mut socket_path: Option<String> = None;
+
+        let mut vhost_user_net = if server {
+            info!("Binding vhost-user-net listener...");
+            let listener = UnixListener::bind(&vu_cfg.socket).map_err(Error::BindSocket)?;
+            info!("Waiting for incoming vhost-user-net connection...");
+            let (stream, _) = listener.accept().map_err(Error::AcceptConnection)?;
+
+            socket_path = Some(vu_cfg.socket.clone());
+
+            Master::from_stream(stream, vu_cfg.num_queues as u64)
+        } else {
+            Master::connect(&vu_cfg.socket, vu_cfg.num_queues as u64)
+                .map_err(Error::VhostUserCreateMaster)?
+        };
 
         // Filling device and vring features VMM supports.
         let mut avail_features = 1 << virtio_net::VIRTIO_NET_F_GUEST_CSUM
@@ -166,6 +181,7 @@ impl Net {
             seccomp_action,
             guest_memory: None,
             acked_protocol_features,
+            socket_path,
         })
     }
 }
@@ -247,8 +263,7 @@ impl VirtioDevice for Net {
                 mem: mem.clone(),
                 kill_evt,
                 pause_evt,
-                ctrl_q: CtrlVirtio::new(cvq_queue, cvq_queue_evt),
-                epoll_fd: 0,
+                ctrl_q: NetCtrl::new(cvq_queue, cvq_queue_evt, None),
             };
 
             let paused = self.common.paused.clone();
@@ -369,6 +384,11 @@ impl VirtioDevice for Net {
 
     fn shutdown(&mut self) {
         let _ = unsafe { libc::close(self.vhost_user_net.as_raw_fd()) };
+
+        // Remove socket path if needed
+        if let Some(socket_path) = &self.socket_path {
+            let _ = std::fs::remove_file(socket_path);
+        }
     }
 
     fn add_memory_region(

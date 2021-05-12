@@ -1,6 +1,6 @@
 [package]
 name = "cloud-hypervisor"
-version = "0.14.0"
+version = "15.0.0"
 authors = ["The Cloud Hypervisor Authors"]
 edition = "2018"
 default-run = "cloud-hypervisor"
@@ -19,10 +19,10 @@ clap = { version = "2.33.3", features = ["wrap_help"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.93"
+libc = "0.2.94"
 log = { version = "0.4.14", features = ["std"] }
 option_parser = { path = "option_parser" }
-seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.2" }
+seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.3" }
 serde_json = "1.0.64"
 signal-hook = "0.3.8"
 thiserror = "1.0.24"
@@ -36,10 +36,11 @@ clap = { version = "2.33.3", features = ["wrap_help"] }
 # List of patched crates
 [patch.crates-io]
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.4.0", features = ["with-serde", "fam-wrappers"] }
+versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
 [dev-dependencies]
 credibility = "0.1.3"
-dirs = "3.0.1"
+dirs = "3.0.2"
 lazy_static= "1.4.0"
 net_util = { path = "net_util" }
 serde_json = "1.0.64"
@@ -66,7 +67,6 @@ members = [
     "acpi_tables",
     "api_client",
     "arch",
-    "arch_gen",
     "block_util",
     "devices",
     "event_monitor",

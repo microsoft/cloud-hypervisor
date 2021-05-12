@@ -1,12 +1,6 @@
 // Copyright 2019 Intel Corporation. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-extern crate epoll;
-extern crate net_util;
-extern crate vhost;
-extern crate virtio_bindings;
-extern crate vm_memory;
-
 use std::io;
 use vhost::Error as VhostError;
 use vm_memory::Error as MmapError;
@@ -24,10 +18,14 @@ pub use self::vu_common_ctrl::VhostUserConfig;
 
 #[derive(Debug)]
 pub enum Error {
+    /// Failed accepting connection.
+    AcceptConnection(io::Error),
     /// Invalid available address.
     AvailAddress,
     /// Queue number  is not correct
     BadQueueNum,
+    /// Failed binding vhost-user socket.
+    BindSocket(io::Error),
     /// Creating kill eventfd failed.
     CreateKillEventFd(io::Error),
     /// Cloning kill eventfd failed.

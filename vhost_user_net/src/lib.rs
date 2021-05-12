@@ -6,16 +6,12 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-extern crate log;
-extern crate net_util;
-extern crate vhost;
-extern crate vhost_user_backend;
-
 use libc::{self, EFD_NONBLOCK};
 use log::*;
 use net_util::{
     open_tap, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TxVirtio,
 };
+use option_parser::Toggle;
 use option_parser::{OptionParser, OptionParserError};
 use std::fmt;
 use std::io::{self};
@@ -25,31 +21,20 @@ use std::process;
 use std::sync::{Arc, Mutex, RwLock};
 use std::vec::Vec;
 use vhost::vhost_user::message::*;
-use vhost::vhost_user::{Error as VhostUserError, Listener};
+use vhost::vhost_user::Listener;
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring, VringWorker};
 use virtio_bindings::bindings::virtio_net::*;
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::eventfd::EventFd;
 
-pub type VhostUserResult<T> = std::result::Result<T, VhostUserError>;
 pub type Result<T> = std::result::Result<T, Error>;
-pub type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
+type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Failed to activate device.
-    BadActivate,
     /// Failed to create kill eventfd
     CreateKillEventFd(io::Error),
-    /// Failed to add event.
-    EpollCtl(io::Error),
-    /// Fail to wait event.
-    EpollWait(io::Error),
-    /// Failed to create EventFd.
-    EpollCreateFd,
-    /// Failed to read Tap.
-    FailedReadTap,
     /// Failed to parse configuration string
     FailedConfigParse(OptionParserError),
     /// Failed to signal used queue.
@@ -58,12 +43,6 @@ pub enum Error {
     HandleEventNotEpollIn,
     /// Failed to handle unknown event.
     HandleEventUnknownEvent,
-    /// Invalid vring address.
-    InvalidVringAddr,
-    /// No vring call fd to notify.
-    NoVringCallFdNotify,
-    /// No memory configured.
-    NoMemoryConfigured,
     /// Open tap device failed.
     OpenTap(OpenTapError),
     /// No socket provided
@@ -75,7 +54,7 @@ pub enum Error {
 }
 
 pub const SYNTAX: &str = "vhost-user-net backend parameters \
-\"ip=<ip_addr>,mask=<net_mask>,socket=<socket_path>,\
+\"ip=<ip_addr>,mask=<net_mask>,socket=<socket_path>,client=on|off,\
 num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,tap=<if_name>\"";
 
 impl fmt::Display for Error {
@@ -176,13 +155,7 @@ impl VhostUserBackend for VhostUserNetBackend {
     }
 
     fn features(&self) -> u64 {
-        1 << VIRTIO_NET_F_GUEST_CSUM
-            | 1 << VIRTIO_NET_F_CSUM
-            | 1 << VIRTIO_NET_F_GUEST_TSO4
-            | 1 << VIRTIO_NET_F_GUEST_UFO
-            | 1 << VIRTIO_NET_F_HOST_TSO4
-            | 1 << VIRTIO_NET_F_HOST_UFO
-            | 1 << VIRTIO_F_VERSION_1
+        1 << VIRTIO_F_VERSION_1
             | 1 << VIRTIO_RING_F_EVENT_IDX
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
@@ -284,6 +257,7 @@ pub struct VhostUserNetBackendConfig {
     pub num_queues: usize,
     pub queue_size: u16,
     pub tap: Option<String>,
+    pub client: bool,
 }
 
 impl VhostUserNetBackendConfig {
@@ -297,7 +271,8 @@ impl VhostUserNetBackendConfig {
             .add("mask")
             .add("queue_size")
             .add("num_queues")
-            .add("socket");
+            .add("socket")
+            .add("client");
 
         parser.parse(backend).map_err(Error::FailedConfigParse)?;
 
@@ -323,6 +298,11 @@ impl VhostUserNetBackendConfig {
             .map_err(Error::FailedConfigParse)?
             .unwrap_or(2);
         let socket = parser.get("socket").ok_or(Error::SocketParameterMissing)?;
+        let client = parser
+            .convert::<Toggle>("client")
+            .map_err(Error::FailedConfigParse)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         Ok(VhostUserNetBackendConfig {
             ip,
@@ -332,6 +312,7 @@ impl VhostUserNetBackendConfig {
             num_queues,
             queue_size,
             tap,
+            client,
         })
     }
 }
@@ -359,8 +340,6 @@ pub fn start_net_backend(backend_command: &str) {
         .unwrap(),
     ));
 
-    let listener = Listener::new(&backend_config.socket, true).unwrap();
-
     let mut net_daemon =
         VhostUserDaemon::new("vhost-user-net-backend".to_string(), net_backend.clone()).unwrap();
 
@@ -378,7 +357,11 @@ pub fn start_net_backend(backend_command: &str) {
             .set_vring_worker(Some(vring_workers.remove(0)));
     }
 
-    if let Err(e) = net_daemon.start(listener) {
+    if let Err(e) = if backend_config.client {
+        net_daemon.start_client(&backend_config.socket)
+    } else {
+        net_daemon.start_server(Listener::new(&backend_config.socket, true).unwrap())
+    } {
         error!(
             "failed to start daemon for vhost-user-net with error: {:?}",
             e

@@ -11,9 +11,13 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Barrier};
 use std::{io, result};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 
 /* Registers */
 const UARTDR: u64 = 0;
@@ -86,7 +90,7 @@ pub struct Pl011 {
     out: Option<Box<dyn io::Write + Send>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct Pl011State {
     flags: u32,
     lcr: u32,
@@ -95,7 +99,7 @@ pub struct Pl011State {
     dmacr: u32,
     int_enabled: u32,
     int_level: u32,
-    read_fifo: VecDeque<u8>,
+    read_fifo: Vec<u8>,
     ilpr: u32,
     ibrd: u32,
     fbrd: u32,
@@ -103,6 +107,8 @@ pub struct Pl011State {
     read_count: u32,
     read_trigger: u32,
 }
+
+impl VersionMapped for Pl011State {}
 
 impl Pl011 {
     /// Constructs an AMBA PL011 UART device.
@@ -141,7 +147,7 @@ impl Pl011 {
             dmacr: self.dmacr,
             int_enabled: self.int_enabled,
             int_level: self.int_level,
-            read_fifo: self.read_fifo.clone(),
+            read_fifo: self.read_fifo.clone().into(),
             ilpr: self.ilpr,
             ibrd: self.ibrd,
             fbrd: self.fbrd,
@@ -159,7 +165,7 @@ impl Pl011 {
         self.dmacr = state.dmacr;
         self.int_enabled = state.int_enabled;
         self.int_level = state.int_level;
-        self.read_fifo = state.read_fifo.clone();
+        self.read_fifo = state.read_fifo.clone().into();
         self.ilpr = state.ilpr;
         self.ibrd = state.ibrd;
         self.fbrd = state.fbrd;
@@ -357,11 +363,11 @@ impl Snapshottable for Pl011 {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id, &self.state())
+        Snapshot::new_from_versioned_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

@@ -31,8 +31,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::{collections::HashMap, convert::TryInto};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use virtio_bindings::bindings::virtio_blk::*;
 use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -363,14 +366,16 @@ pub struct Block {
     rate_limiter_config: Option<RateLimiterConfig>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct BlockState {
-    pub disk_path: PathBuf,
+    pub disk_path: String,
     pub disk_nsectors: u64,
     pub avail_features: u64,
     pub acked_features: u64,
     pub config: VirtioBlockConfig,
 }
+
+impl VersionMapped for BlockState {}
 
 impl Block {
     /// Create a new virtio block device that operates on the given file.
@@ -447,7 +452,7 @@ impl Block {
 
     fn state(&self) -> BlockState {
         BlockState {
-            disk_path: self.disk_path.clone(),
+            disk_path: self.disk_path.to_str().unwrap().to_owned(),
             disk_nsectors: self.disk_nsectors,
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
@@ -456,7 +461,7 @@ impl Block {
     }
 
     fn set_state(&mut self, state: &BlockState) {
-        self.disk_path = state.disk_path.clone();
+        self.disk_path = state.disk_path.clone().into();
         self.disk_nsectors = state.disk_nsectors;
         self.common.avail_features = state.avail_features;
         self.common.acked_features = state.acked_features;
@@ -674,11 +679,11 @@ impl Snapshottable for Block {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id(), &self.state())
+        Snapshot::new_from_versioned_state(&self.id(), &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

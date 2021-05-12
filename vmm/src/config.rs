@@ -126,6 +126,11 @@ pub enum ValidationError {
     // CPU Hotplug not permitted with TDX
     #[cfg(feature = "tdx")]
     TdxNoCpuHotplug,
+    // Specifying kernel not permitted with TDX
+    #[cfg(feature = "tdx")]
+    TdxKernelSpecified,
+    // Insuffient vCPUs for queues
+    TooManyQueues,
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -165,6 +170,13 @@ impl fmt::Display for ValidationError {
             #[cfg(feature = "tdx")]
             TdxNoCpuHotplug => {
                 write!(f, "CPU hotplug not possible with TDX")
+            }
+            #[cfg(feature = "tdx")]
+            TdxKernelSpecified => {
+                write!(f, "Direct kernel boot not possible with TDX")
+            }
+            TooManyQueues => {
+                write!(f, "Number of vCPUs is insufficient for number of queues")
             }
         }
     }
@@ -863,6 +875,43 @@ impl DiskConfig {
             disable_io_uring,
         })
     }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub enum VhostMode {
+    Client,
+    Server,
+}
+
+impl Default for VhostMode {
+    fn default() -> Self {
+        VhostMode::Client
+    }
+}
+
+#[derive(Debug)]
+pub enum ParseVhostModeError {
+    InvalidValue(String),
+}
+
+impl FromStr for VhostMode {
+    type Err = ParseVhostModeError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "client" => Ok(VhostMode::Client),
+            "server" => Ok(VhostMode::Server),
+            _ => Err(ParseVhostModeError::InvalidValue(s.to_owned())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -886,6 +935,8 @@ pub struct NetConfig {
     #[serde(default)]
     pub vhost_user: bool,
     pub vhost_socket: Option<String>,
+    #[serde(default)]
+    pub vhost_mode: VhostMode,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -931,6 +982,7 @@ impl Default for NetConfig {
             queue_size: default_netconfig_queue_size(),
             vhost_user: false,
             vhost_socket: None,
+            vhost_mode: VhostMode::Client,
             id: None,
             fds: None,
             rate_limiter_config: None,
@@ -941,8 +993,8 @@ impl Default for NetConfig {
 impl NetConfig {
     pub const SYNTAX: &'static str = "Network parameters \
     \"tap=<if_name>,ip=<ip_addr>,mask=<net_mask>,mac=<mac_addr>,fd=<fd1:fd2...>,iommu=on|off,\
-    num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
-    vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,id=<device_id>,\
+    num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,\
+    vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,\
     bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
     ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>\"";
 
@@ -960,6 +1012,7 @@ impl NetConfig {
             .add("num_queues")
             .add("vhost_user")
             .add("socket")
+            .add("vhost_mode")
             .add("id")
             .add("fd")
             .add("bw_size")
@@ -1003,6 +1056,10 @@ impl NetConfig {
             .unwrap_or(Toggle(false))
             .0;
         let vhost_socket = parser.get("socket");
+        let vhost_mode = parser
+            .convert("vhost_mode")
+            .map_err(Error::ParseNetwork)?
+            .unwrap_or_default();
         let id = parser.get("id");
         let fds = parser
             .convert::<IntegerList>("fd")
@@ -1071,15 +1128,15 @@ impl NetConfig {
             queue_size,
             vhost_user,
             vhost_socket,
+            vhost_mode,
             id,
             fds,
             rate_limiter_config,
         };
-        config.validate().map_err(Error::Validation)?;
         Ok(config)
     }
 
-    pub fn validate(&self) -> ValidationResult<()> {
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if self.num_queues < 2 {
             return Err(ValidationError::VnetQueueLowerThan2);
         }
@@ -1094,6 +1151,10 @@ impl NetConfig {
                     return Err(ValidationError::VnetReservedFd);
                 }
             }
+        }
+
+        if (self.num_queues / 2) > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
         }
 
         Ok(())
@@ -1263,6 +1324,14 @@ impl FsConfig {
             cache_size,
             id,
         })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
+        }
+
+        Ok(())
     }
 }
 
@@ -1689,6 +1758,9 @@ impl VmConfig {
             if tdx_enabled && (self.cpus.max_vcpus != self.cpus.boot_vcpus) {
                 return Err(ValidationError::TdxNoCpuHotplug);
             }
+            if tdx_enabled && self.kernel.is_some() {
+                return Err(ValidationError::TdxKernelSpecified);
+            }
         }
 
         if self.console.mode == ConsoleOutputMode::Tty && self.serial.mode == ConsoleOutputMode::Tty
@@ -1719,6 +1791,7 @@ impl VmConfig {
                 if disk.vhost_user && disk.vhost_socket.is_none() {
                     return Err(ValidationError::VhostUserMissingSocket);
                 }
+                disk.validate(self)?;
             }
         }
 
@@ -1727,13 +1800,16 @@ impl VmConfig {
                 if net.vhost_user && !self.memory.shared {
                     return Err(ValidationError::VhostUserRequiresSharedMemory);
                 }
-                net.validate()?;
+                net.validate(self)?;
             }
         }
 
         if let Some(fses) = &self.fs {
             if !fses.is_empty() && !self.memory.shared {
                 return Err(ValidationError::VhostUserRequiresSharedMemory);
+            }
+            for fs in fses {
+                fs.validate(self)?;
             }
         }
 

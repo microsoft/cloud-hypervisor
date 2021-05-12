@@ -14,7 +14,7 @@ pub mod regs;
 pub use self::fdt::DeviceInfoForFdt;
 use crate::DeviceType;
 use crate::RegionType;
-use aarch64::gic::GicDevice;
+use gic::GicDevice;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
@@ -28,7 +28,10 @@ use vm_memory::{
 #[derive(Debug)]
 pub enum Error {
     /// Failed to create a FDT.
-    SetupFdt(fdt::Error),
+    SetupFdt,
+
+    /// Failed to write FDT to memory.
+    WriteFdtToMemory(fdt::Error),
 
     /// Failed to create a GIC.
     SetupGic(gic::Error),
@@ -125,7 +128,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
 ) -> super::Result<Box<dyn GicDevice>> {
     let gic_device = gic::kvm::create_gic(vm, vcpu_count).map_err(Error::SetupGic)?;
 
-    fdt::create_fdt(
+    let fdt_final = fdt::create_fdt(
         guest_mem,
         cmdline_cstring,
         vcpu_mpidr,
@@ -134,7 +137,9 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
         initrd,
         pci_space_address,
     )
-    .map_err(Error::SetupFdt)?;
+    .map_err(|_| Error::SetupFdt)?;
+
+    fdt::write_fdt_to_memory(fdt_final, guest_mem).map_err(Error::WriteFdtToMemory)?;
 
     Ok(gic_device)
 }

@@ -11,17 +11,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-extern crate arch;
-extern crate devices;
-extern crate epoll;
-extern crate hypervisor;
-extern crate libc;
-extern crate linux_loader;
-extern crate net_util;
-extern crate signal_hook;
-extern crate vm_allocator;
-extern crate vm_memory;
-
 #[cfg(feature = "acpi")]
 use crate::config::NumaConfig;
 use crate::config::{
@@ -41,14 +30,10 @@ use crate::{
 };
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
-#[cfg(target_arch = "x86_64")]
-use arch::BootProtocol;
 use arch::EntryPoint;
 use devices::AcpiNotificationFlags;
 use hypervisor::vm::{HypervisorVmError, VmmOps};
 use linux_loader::cmdline::Cmdline;
-#[cfg(target_arch = "x86_64")]
-use linux_loader::loader::elf::Error::InvalidElfMagicNumber;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 use linux_loader::loader::KernelLoader;
@@ -88,10 +73,6 @@ use vmm_sys_util::terminal::Terminal;
 use arch::aarch64::gic::gicv3::kvm::{KvmGicV3, GIC_V3_SNAPSHOT_ID};
 #[cfg(target_arch = "aarch64")]
 use arch::aarch64::gic::kvm::create_gic;
-
-// 64 bit direct boot entry offset for bzImage
-#[cfg(target_arch = "x86_64")]
-const KERNEL_64BIT_ENTRY_OFFSET: u64 = 0x200;
 
 /// Errors associated with VM management
 #[derive(Debug)]
@@ -140,14 +121,8 @@ pub enum Error {
     /// Cannot setup terminal in canonical mode.
     SetTerminalCanon(vmm_sys_util::errno::Error),
 
-    /// Failed parsing network parameters
-    ParseNetworkParameters,
-
     /// Memory is overflow
     MemOverflow,
-
-    /// Failed to allocate the IOAPIC memory range.
-    IoapicRangeAllocation,
 
     /// Cannot spawn a signal handler thread
     SignalHandlerSpawn(io::Error),
@@ -194,9 +169,6 @@ pub enum Error {
     /// Memory manager error
     MemoryManager(MemoryManagerError),
 
-    /// No PCI support
-    NoPciSupport,
-
     /// Eventfd write error
     EventfdError(std::io::Error),
 
@@ -233,9 +205,6 @@ pub enum Error {
     /// Failed resizing a memory zone.
     ResizeZone,
 
-    /// Failed setting the VmmOps interface.
-    SetVmmOpsInterface(hypervisor::HypervisorVmError),
-
     /// Cannot activate virtio devices
     ActivateVirtioDevices(device_manager::DeviceManagerError),
 
@@ -244,6 +213,9 @@ pub enum Error {
 
     /// Error triggering power button
     PowerButton(device_manager::DeviceManagerError),
+
+    /// Kernel lacks PVH header
+    KernelMissingPvhHeader,
 
     /// Error doing I/O on TDX firmware file
     #[cfg(feature = "tdx")]
@@ -532,6 +504,8 @@ impl Vm {
             .unwrap()
             .validate()
             .map_err(Error::ConfigValidation)?;
+
+        info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
         #[cfg(feature = "acpi")]
@@ -924,15 +898,6 @@ impl Vm {
             Some(arch::layout::HIGH_RAM_START),
         ) {
             Ok(entry_addr) => entry_addr,
-            Err(linux_loader::loader::Error::Elf(InvalidElfMagicNumber)) => {
-                linux_loader::loader::bzimage::BzImage::load(
-                    mem.deref(),
-                    None,
-                    &mut kernel,
-                    Some(arch::layout::HIGH_RAM_START),
-                )
-                .map_err(Error::KernelLoad)?
-            }
             Err(e) => {
                 return Err(Error::KernelLoad(e));
             }
@@ -945,43 +910,20 @@ impl Vm {
         )
         .map_err(Error::LoadCmdLine)?;
 
-        if entry_addr.setup_header.is_some() {
-            let load_addr = entry_addr
-                .kernel_load
-                .raw_value()
-                .checked_add(KERNEL_64BIT_ENTRY_OFFSET)
-                .ok_or(Error::MemOverflow)?;
-
-            Ok(EntryPoint {
-                entry_addr: GuestAddress(load_addr),
-                protocol: BootProtocol::LinuxBoot,
-                setup_header: entry_addr.setup_header,
-            })
-        } else {
+        if let PvhEntryPresent(pvh_entry_addr) = entry_addr.pvh_boot_cap {
+            // Use the PVH kernel entry point to boot the guest
             let entry_point_addr: GuestAddress;
-            let boot_prot: BootProtocol;
-
-            if let PvhEntryPresent(pvh_entry_addr) = entry_addr.pvh_boot_cap {
-                // Use the PVH kernel entry point to boot the guest
-                entry_point_addr = pvh_entry_addr;
-                boot_prot = BootProtocol::PvhBoot;
-            } else {
-                // Use the Linux 64-bit boot protocol
-                entry_point_addr = entry_addr.kernel_load;
-                boot_prot = BootProtocol::LinuxBoot;
-            }
-
+            entry_point_addr = pvh_entry_addr;
             Ok(EntryPoint {
                 entry_addr: entry_point_addr,
-                protocol: boot_prot,
-                setup_header: None,
             })
+        } else {
+            Err(Error::KernelMissingPvhHeader)
         }
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(&mut self, entry_addr: EntryPoint) -> Result<()> {
-        let cmdline_cstring = self.get_cmdline()?;
+    fn configure_system(&mut self) -> Result<()> {
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
         let initramfs_config = match self.initramfs {
@@ -1013,41 +955,20 @@ impl Vm {
             .as_ref()
             .cloned();
 
-        match entry_addr.setup_header {
-            Some(hdr) => {
-                arch::configure_system(
-                    &mem,
-                    arch::layout::CMDLINE_START,
-                    cmdline_cstring.to_bytes().len() + 1,
-                    &initramfs_config,
-                    boot_vcpus,
-                    Some(hdr),
-                    rsdp_addr,
-                    BootProtocol::LinuxBoot,
-                    sgx_epc_region,
-                )
-                .map_err(Error::ConfigureSystem)?;
-            }
-            None => {
-                arch::configure_system(
-                    &mem,
-                    arch::layout::CMDLINE_START,
-                    cmdline_cstring.to_bytes().len() + 1,
-                    &initramfs_config,
-                    boot_vcpus,
-                    None,
-                    rsdp_addr,
-                    entry_addr.protocol,
-                    sgx_epc_region,
-                )
-                .map_err(Error::ConfigureSystem)?;
-            }
-        }
+        arch::configure_system(
+            &mem,
+            arch::layout::CMDLINE_START,
+            &initramfs_config,
+            boot_vcpus,
+            rsdp_addr,
+            sgx_epc_region,
+        )
+        .map_err(Error::ConfigureSystem)?;
         Ok(())
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn configure_system(&mut self, _entry_addr: EntryPoint) -> Result<()> {
+    fn configure_system(&mut self) -> Result<()> {
         let cmdline_cstring = self.get_cmdline()?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
@@ -1300,7 +1221,22 @@ impl Vm {
         Err(Error::ResizeZone)
     }
 
+    fn add_to_config<T>(devices: &mut Option<Vec<T>>, device: T) {
+        if let Some(devices) = devices {
+            devices.push(device);
+        } else {
+            *devices = Some(vec![device]);
+        }
+    }
+
     pub fn add_device(&mut self, mut _device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.devices, _device_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
         let pci_device_info = self
             .device_manager
             .lock()
@@ -1312,11 +1248,7 @@ impl Vm {
         // ensure the device would be created in case of a reboot.
         {
             let mut config = self.config.lock().unwrap();
-            if let Some(devices) = config.devices.as_mut() {
-                devices.push(_device_cfg);
-            } else {
-                config.devices = Some(vec![_device_cfg]);
-            }
+            Self::add_to_config(&mut config.devices, _device_cfg);
         }
 
         self.device_manager
@@ -1375,6 +1307,13 @@ impl Vm {
     }
 
     pub fn add_disk(&mut self, mut _disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.disks, _disk_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
         let pci_device_info = self
             .device_manager
             .lock()
@@ -1386,11 +1325,7 @@ impl Vm {
         // ensure the device would be created in case of a reboot.
         {
             let mut config = self.config.lock().unwrap();
-            if let Some(disks) = config.disks.as_mut() {
-                disks.push(_disk_cfg);
-            } else {
-                config.disks = Some(vec![_disk_cfg]);
-            }
+            Self::add_to_config(&mut config.disks, _disk_cfg);
         }
 
         self.device_manager
@@ -1403,6 +1338,13 @@ impl Vm {
     }
 
     pub fn add_fs(&mut self, mut _fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.fs, _fs_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
         let pci_device_info = self
             .device_manager
             .lock()
@@ -1414,11 +1356,7 @@ impl Vm {
         // ensure the device would be created in case of a reboot.
         {
             let mut config = self.config.lock().unwrap();
-            if let Some(fs_config) = config.fs.as_mut() {
-                fs_config.push(_fs_cfg);
-            } else {
-                config.fs = Some(vec![_fs_cfg]);
-            }
+            Self::add_to_config(&mut config.fs, _fs_cfg);
         }
 
         self.device_manager
@@ -1431,6 +1369,13 @@ impl Vm {
     }
 
     pub fn add_pmem(&mut self, mut _pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.pmem, _pmem_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
         let pci_device_info = self
             .device_manager
             .lock()
@@ -1442,11 +1387,7 @@ impl Vm {
         // ensure the device would be created in case of a reboot.
         {
             let mut config = self.config.lock().unwrap();
-            if let Some(pmem) = config.pmem.as_mut() {
-                pmem.push(_pmem_cfg);
-            } else {
-                config.pmem = Some(vec![_pmem_cfg]);
-            }
+            Self::add_to_config(&mut config.pmem, _pmem_cfg);
         }
 
         self.device_manager
@@ -1459,6 +1400,13 @@ impl Vm {
     }
 
     pub fn add_net(&mut self, mut _net_cfg: NetConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.net, _net_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
         let pci_device_info = self
             .device_manager
             .lock()
@@ -1470,11 +1418,7 @@ impl Vm {
         // ensure the device would be created in case of a reboot.
         {
             let mut config = self.config.lock().unwrap();
-            if let Some(net) = config.net.as_mut() {
-                net.push(_net_cfg);
-            } else {
-                config.net = Some(vec![_net_cfg]);
-            }
+            Self::add_to_config(&mut config.net, _net_cfg);
         }
 
         self.device_manager
@@ -1489,6 +1433,13 @@ impl Vm {
     pub fn add_vsock(&mut self, mut _vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
         if self.config.lock().unwrap().vsock.is_some() {
             return Err(Error::TooManyVsockDevices);
+        }
+
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            config.vsock = Some(_vsock_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
         }
 
         let pci_device_info = self
@@ -1715,9 +1666,7 @@ impl Vm {
         };
 
         // Configure shared state based on loaded kernel
-        entry_point
-            .map(|entry_point| self.configure_system(entry_point))
-            .transpose()?;
+        entry_point.map(|_| self.configure_system()).transpose()?;
 
         #[cfg(feature = "tdx")]
         if let Some(hob_address) = hob_address {

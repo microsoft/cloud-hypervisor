@@ -80,13 +80,6 @@ pub enum Error {
     /// Cannot patch the CPU ID
     PatchCpuId(anyhow::Error),
 
-    /// The call to KVM_SET_CPUID2 failed.
-    SetSupportedCpusFailed(anyhow::Error),
-
-    #[cfg(target_arch = "x86_64")]
-    /// Cannot set the local interruption due to bad configuration.
-    LocalIntConfiguration(anyhow::Error),
-
     /// Error configuring VCPU
     VcpuConfiguration(arch::Error),
 
@@ -106,63 +99,6 @@ pub enum Error {
 
     /// Asking for more vCPUs that we can have
     DesiredVCpuCountExceedsMax,
-
-    /// Failed to get KVM vcpu lapic.
-    VcpuGetLapic(anyhow::Error),
-
-    /// Failed to set KVM vcpu lapic.
-    VcpuSetLapic(anyhow::Error),
-
-    /// Failed to get KVM vcpu MP state.
-    VcpuGetMpState(anyhow::Error),
-
-    /// Failed to set KVM vcpu MP state.
-    VcpuSetMpState(anyhow::Error),
-
-    /// Failed to get KVM vcpu msrs.
-    VcpuGetMsrs(anyhow::Error),
-
-    /// Failed to set KVM vcpu msrs.
-    VcpuSetMsrs(anyhow::Error),
-
-    /// Failed to get KVM vcpu regs.
-    VcpuGetRegs(anyhow::Error),
-
-    /// Failed to set KVM vcpu regs.
-    VcpuSetRegs(anyhow::Error),
-
-    /// Failed to get KVM vcpu sregs.
-    VcpuGetSregs(anyhow::Error),
-
-    /// Failed to set KVM vcpu sregs.
-    VcpuSetSregs(anyhow::Error),
-
-    /// Failed to get KVM vcpu events.
-    VcpuGetVcpuEvents(anyhow::Error),
-
-    /// Failed to set KVM vcpu events.
-    VcpuSetVcpuEvents(anyhow::Error),
-
-    /// Failed to get KVM vcpu FPU.
-    VcpuGetFpu(anyhow::Error),
-
-    /// Failed to set KVM vcpu FPU.
-    VcpuSetFpu(anyhow::Error),
-
-    /// Failed to get KVM vcpu XSAVE.
-    VcpuGetXsave(anyhow::Error),
-
-    /// Failed to set KVM vcpu XSAVE.
-    VcpuSetXsave(anyhow::Error),
-
-    /// Failed to get KVM vcpu XCRS.
-    VcpuGetXcrs(anyhow::Error),
-
-    /// Failed to set KVM vcpu XCRS.
-    VcpuSetXcrs(anyhow::Error),
-
-    /// Error resuming vCPU on shutdown
-    ResumeOnShutdown(MigratableError),
 
     /// Cannot create seccomp filter
     CreateSeccompFilter(seccomp::SeccompError),
@@ -1558,13 +1494,9 @@ impl Migratable for CpuManager {}
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
 mod tests {
-
-    use super::*;
     use arch::x86_64::interrupts::*;
     use arch::x86_64::regs::*;
-    use arch::x86_64::BootProtocol;
-    use hypervisor::x86_64::{FpuState, LapicState, SpecialRegisters, StandardRegisters};
-    use vm_memory::GuestAddress;
+    use hypervisor::x86_64::{FpuState, LapicState, StandardRegisters};
 
     #[test]
     fn test_setlint() {
@@ -1652,40 +1584,15 @@ mod tests {
 
         let expected_regs: StandardRegisters = StandardRegisters {
             rflags: 0x0000000000000002u64,
+            rbx: arch::layout::PVH_INFO_START.0,
             rip: 1,
-            rsp: 2,
-            rbp: 2,
-            rsi: 3,
             ..Default::default()
         };
 
-        setup_regs(
-            &vcpu,
-            expected_regs.rip,
-            expected_regs.rsp,
-            expected_regs.rsi,
-            BootProtocol::LinuxBoot,
-        )
-        .unwrap();
+        setup_regs(&vcpu, expected_regs.rip).unwrap();
 
         let actual_regs: StandardRegisters = vcpu.get_regs().unwrap();
         assert_eq!(actual_regs, expected_regs);
-    }
-
-    #[test]
-    fn test_setup_sregs() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().expect("new VM fd creation failed");
-        let vcpu = vm.create_vcpu(0, None).unwrap();
-
-        let mut expected_sregs: SpecialRegisters = vcpu.get_sregs().unwrap();
-        let gm = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        configure_segments_and_sregs(&gm, &mut expected_sregs, BootProtocol::LinuxBoot).unwrap();
-        setup_page_tables(&gm, &mut expected_sregs).unwrap();
-
-        setup_sregs(&gm, &vcpu, BootProtocol::LinuxBoot).unwrap();
-        let actual_sregs: SpecialRegisters = vcpu.get_sregs().unwrap();
-        assert_eq!(expected_sregs, actual_sregs);
     }
 }
 

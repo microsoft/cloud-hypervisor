@@ -8,24 +8,11 @@
 //! Supported platforms: x86_64, aarch64.
 #![allow(clippy::transmute_ptr_to_ptr, clippy::redundant_static_lifetimes)]
 
-extern crate anyhow;
-extern crate byteorder;
-extern crate hypervisor;
-extern crate libc;
 #[macro_use]
 extern crate log;
-#[cfg(feature = "acpi")]
-extern crate acpi_tables;
-extern crate arch_gen;
-extern crate linux_loader;
-extern crate serde;
-extern crate vm_memory;
-extern crate vm_migration;
 #[cfg(target_arch = "aarch64")]
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
-extern crate thiserror;
 
 use std::fmt;
 use std::result;
@@ -98,8 +85,8 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
     arch_memory_regions, configure_system, configure_vcpu, get_host_cpu_phys_bits,
-    initramfs_load_addr, layout, layout::CMDLINE_MAX_SIZE, layout::CMDLINE_START, regs,
-    BootProtocol, CpuidPatch, CpuidReg, EntryPoint,
+    initramfs_load_addr, layout, layout::CMDLINE_MAX_SIZE, layout::CMDLINE_START, regs, CpuidPatch,
+    CpuidReg, EntryPoint,
 };
 
 /// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
