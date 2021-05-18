@@ -373,7 +373,7 @@ mod tests {
                 l2_guest_ip1: format!("{}.{}.3", class, id),
                 l2_guest_ip2: format!("{}.{}.4", class, id),
                 l2_guest_ip3: format!("{}.{}.5", class, id),
-                host_ip: format!("{}.{}.1", class, id),
+                host_ip: format!("{}.{}.232", class, id),
                 guest_mac: format!("12:34:56:78:90:{:02x}", id),
                 l2_guest_mac1: format!("de:ad:be:ef:12:{:02x}", id),
                 l2_guest_mac2: format!("de:ad:be:ef:34:{:02x}", id),
@@ -396,7 +396,7 @@ mod tests {
             let id = *guard;
             *guard = id + 1;
 
-            Self::new_from_ip_range(disk_config, "192.168", id)
+            Self::new_from_ip_range(disk_config, "192.168", id + 32)
         }
 
         fn default_net_string(&self) -> String {
