@@ -8,9 +8,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Barrier};
 use std::{io, result};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 use vmm_sys_util::errno::Result;
 
 const LOOP_SIZE: usize = 0x40;
@@ -70,7 +74,7 @@ pub struct Serial {
     out: Option<Box<dyn io::Write + Send>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct SerialState {
     interrupt_enable: u8,
     interrupt_identification: u8,
@@ -80,8 +84,9 @@ pub struct SerialState {
     modem_status: u8,
     scratch: u8,
     baud_divisor: u16,
-    in_buffer: VecDeque<u8>,
+    in_buffer: Vec<u8>,
 }
+impl VersionMapped for SerialState {}
 
 impl Serial {
     pub fn new(
@@ -223,7 +228,7 @@ impl Serial {
             modem_status: self.modem_status,
             scratch: self.scratch,
             baud_divisor: self.baud_divisor,
-            in_buffer: self.in_buffer.clone(),
+            in_buffer: self.in_buffer.clone().into(),
         }
     }
 
@@ -236,7 +241,7 @@ impl Serial {
         self.modem_status = state.modem_status;
         self.scratch = state.scratch;
         self.baud_divisor = state.baud_divisor;
-        self.in_buffer = state.in_buffer.clone();
+        self.in_buffer = state.in_buffer.clone().into();
     }
 }
 
@@ -288,11 +293,11 @@ impl Snapshottable for Serial {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id, &self.state())
+        Snapshot::new_from_versioned_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

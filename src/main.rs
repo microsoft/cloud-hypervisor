@@ -3,14 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-extern crate anyhow;
-extern crate signal_hook;
-extern crate vmm;
-extern crate vmm_sys_util;
-
 #[macro_use(crate_authors)]
 extern crate clap;
-
 #[macro_use]
 extern crate event_monitor;
 
@@ -25,7 +19,7 @@ use signal_hook::{
 };
 use std::env;
 use std::fs::File;
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -62,6 +56,8 @@ enum Error {
     ThreadJoin(std::boxed::Box<dyn std::any::Any + std::marker::Send>),
     #[error("VMM thread exited with error: {0}")]
     VmmThread(#[source] vmm::Error),
+    #[error("Error parsing --api-socket: {0}")]
+    ParsingApiSocket(std::num::ParseIntError),
     #[error("Error parsing --event-monitor: {0}")]
     ParsingEventMonitor(option_parser::OptionParserError),
     #[error("Error parsing --event-monitor: path or fd required")]
@@ -192,7 +188,7 @@ fn create_app<'a, 'b>(
                 .long("kernel")
                 .help(
                     "Path to loaded kernel. This may be a kernel or firmware that supports a PVH \
-                entry point, a vmlinux ELF file or a Linux bzImage or achitecture equivalent",
+                entry point (e.g. vmlinux) or architecture equivalent",
                 )
                 .takes_value(true)
                 .group("vm-config"),
@@ -324,7 +320,7 @@ fn create_app<'a, 'b>(
         .arg(
             Arg::with_name("api-socket")
                 .long("api-socket")
-                .help("HTTP API socket path (UNIX domain socket).")
+                .help("HTTP API socket (UNIX domain socket): path=</path/to/a/file> or fd=<fd>.")
                 .takes_value(true)
                 .min_values(1)
                 .group("vmm-config"),
@@ -379,7 +375,7 @@ fn create_app<'a, 'b>(
     app
 }
 
-fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Result<(), Error> {
+fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     let log_level = match cmd_arguments.occurrences_of("v") {
         0 => LevelFilter::Warn,
         1 => LevelFilter::Info,
@@ -401,6 +397,29 @@ fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Res
     }))
     .map(|()| log::set_max_level(log_level))
     .map_err(Error::LoggerSetup)?;
+
+    let (api_socket_path, api_socket_fd) =
+        if let Some(socket_config) = cmd_arguments.value_of("api-socket") {
+            let mut parser = OptionParser::new();
+            parser.add("path").add("fd");
+            parser.parse(socket_config).unwrap_or_default();
+
+            if let Some(fd) = parser.get("fd") {
+                (
+                    None,
+                    Some(fd.parse::<RawFd>().map_err(Error::ParsingApiSocket)?),
+                )
+            } else if let Some(path) = parser.get("path") {
+                (Some(path), None)
+            } else {
+                (
+                    cmd_arguments.value_of("api-socket").map(|s| s.to_string()),
+                    None,
+                )
+            }
+        } else {
+            (None, None)
+        };
 
     if let Some(monitor_config) = cmd_arguments.value_of("event-monitor") {
         let mut parser = OptionParser::new();
@@ -474,7 +493,8 @@ fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Res
     let hypervisor = hypervisor::new().map_err(Error::CreateHypervisor)?;
     let vmm_thread = vmm::start_vmm_thread(
         env!("CARGO_PKG_VERSION").to_string(),
-        api_socket_path,
+        &api_socket_path,
+        api_socket_fd,
         api_evt.try_clone().unwrap(),
         http_sender,
         api_request_receiver,
@@ -510,7 +530,9 @@ fn start_vmm(cmd_arguments: ArgMatches, api_socket_path: &Option<String>) -> Res
     vmm_thread
         .join()
         .map_err(Error::ThreadJoin)?
-        .map_err(Error::VmmThread)
+        .map_err(Error::VmmThread)?;
+
+    Ok(api_socket_path)
 }
 
 fn main() {
@@ -519,16 +541,17 @@ fn main() {
 
     let (default_vcpus, default_memory, default_rng) = prepare_default_values();
     let cmd_arguments = create_app(&default_vcpus, &default_memory, &default_rng).get_matches();
-    let api_socket_path = cmd_arguments.value_of("api-socket").map(|s| s.to_string());
-
-    let exit_code = if let Err(e) = start_vmm(cmd_arguments, &api_socket_path) {
-        eprintln!("{}", e);
-        1
-    } else {
-        0
+    let exit_code = match start_vmm(cmd_arguments) {
+        Ok(path) => {
+            path.map(|s| std::fs::remove_file(s).ok());
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
     };
 
-    api_socket_path.map(|s| std::fs::remove_file(s).ok());
     std::process::exit(exit_code);
 }
 
@@ -955,11 +978,13 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
+                    "--cpus", "boot=2",
                     "--net",
                     "mac=12:34:56:78:90:ab,host_mac=34:56:78:90:ab:cd,tap=tap0,ip=1.2.3.4,mask=5.6.7.8,num_queues=4",
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
+                    "cpus": {"boot_vcpus": 2, "max_vcpus": 2},
                     "net": [
                         {"mac": "12:34:56:78:90:ab", "host_mac": "34:56:78:90:ab:cd", "tap": "tap0", "ip": "1.2.3.4", "mask": "5.6.7.8", "num_queues": 4}
                     ]
@@ -969,11 +994,13 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
+                    "--cpus", "boot=2",
                     "--net",
                     "mac=12:34:56:78:90:ab,host_mac=34:56:78:90:ab:cd,tap=tap0,ip=1.2.3.4,mask=5.6.7.8,num_queues=4,queue_size=128",
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
+                    "cpus": {"boot_vcpus": 2, "max_vcpus": 2},
                     "net": [
                         {"mac": "12:34:56:78:90:ab", "host_mac": "34:56:78:90:ab:cd", "tap": "tap0", "ip": "1.2.3.4", "mask": "5.6.7.8", "num_queues": 4, "queue_size": 128}
                     ]
@@ -1134,13 +1161,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4",
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4}
                     ]
@@ -1150,13 +1178,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
                     ]
@@ -1166,13 +1195,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,dax=on"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
                     ]
@@ -1182,13 +1212,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,dax=on"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "dax": true}
                     ]
@@ -1198,13 +1229,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "dax": true}
                     ]
@@ -1214,13 +1246,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=8589934592"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
                     ]
@@ -1230,13 +1263,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true", "--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "cache_size": 8589934592}
                     ]
@@ -1246,13 +1280,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true","--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=4294967296"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "cache_size": 4294967296}
                     ]
@@ -1262,13 +1297,14 @@ mod unit_tests {
             (
                 vec![
                     "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true",
+                    "--memory", "shared=true","--cpus", "boot=4",
                     "--fs",
                     "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=4294967296"
                 ],
                 r#"{
                     "kernel": {"path": "/path/to/kernel"},
                     "memory" : { "shared": true, "size": 536870912 },
+                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
                     "fs": [
                         {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
                     ]

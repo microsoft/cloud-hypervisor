@@ -18,7 +18,6 @@ use super::{
     EpollHelperHandler, Queue, VirtioCommon, VirtioDevice, VirtioDeviceType,
     EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
-
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use anyhow::anyhow;
@@ -505,8 +504,8 @@ impl MemEpollHandler {
             .unwrap()
             .set_range(first_block_index, nb_blocks, plug);
 
+        let handlers = self.dma_mapping_handlers.lock().unwrap();
         if plug {
-            let handlers = self.dma_mapping_handlers.lock().unwrap();
             let mut gpa = addr;
             for _ in 0..nb_blocks {
                 for (_, handler) in handlers.iter() {
@@ -524,7 +523,6 @@ impl MemEpollHandler {
 
             config.plugged_size += size;
         } else {
-            let handlers = self.dma_mapping_handlers.lock().unwrap();
             for (_, handler) in handlers.iter() {
                 if let Err(e) = handler.unmap(addr, size) {
                     error!(

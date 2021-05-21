@@ -16,16 +16,18 @@ byteorder = "1.4.3"
 epoll = ">=4.0.1"
 event_monitor = { path = "../event_monitor" }
 io-uring = ">=0.4.0"
-libc = "0.2.93"
+libc = "0.2.94"
 log = "0.4.14"
 net_gen = { path = "../net_gen" }
 net_util = { path = "../net_util" }
 pci = { path = "../pci" }
 rate_limiter = { path = "../rate_limiter" }
-seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.2" }
+seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.3" }
 serde = ">=1.0.27"
 serde_derive = ">=1.0.27"
 serde_json = ">=1.0.9"
+versionize = "0.1.6"
+versionize_derive = "0.1.4"
 vhost = { git = "https://github.com/rust-vmm/vhost", branch = "master", package = "vhost", features = ["vhost-user-master", "vhost-user-slave"] }
 virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"]}
 vm-allocator = { path = "../vm-allocator" }

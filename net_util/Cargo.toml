@@ -2,10 +2,11 @@
 name = "net_util"
 version = "0.1.0"
 authors = ["The Chromium OS Authors"]
+edition = "2018"
 
 [dependencies]
 epoll = ">=4.0.1"
-libc = "0.2.93"
+libc = "0.2.94"
 log = "0.4.14"
 net_gen = { path = "../net_gen" }
 rate_limiter = { path = "../rate_limiter" }

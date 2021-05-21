@@ -21,11 +21,14 @@ use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
     GuestMemoryError, GuestMemoryMmap,
 };
+use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -436,9 +439,7 @@ impl Request {
 
                 // Add new domain with no mapping if the entry didn't exist yet
                 let mut mappings = mapping.mappings.write().unwrap();
-                if !mappings.contains_key(&domain) {
-                    mappings.insert(domain, BTreeMap::new());
-                }
+                mappings.entry(domain).or_insert_with(BTreeMap::new);
 
                 0
             }
@@ -692,7 +693,7 @@ impl EpollHelperHandler for IommuEpollHandler {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Versionize)]
 struct Mapping {
     gpa: u64,
     size: u64,
@@ -740,13 +741,15 @@ pub struct Iommu {
     seccomp_action: SeccompAction,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 struct IommuState {
     avail_features: u64,
     acked_features: u64,
-    endpoints: BTreeMap<u32, u32>,
-    mappings: BTreeMap<u32, BTreeMap<u64, Mapping>>,
+    endpoints: Vec<(u32, u32)>,
+    mappings: Vec<(u32, Vec<(u64, Mapping)>)>,
 }
+
+impl VersionMapped for IommuState {}
 
 impl Iommu {
     pub fn new(id: String, seccomp_action: SeccompAction) -> io::Result<(Self, Arc<IommuMapping>)> {
@@ -787,16 +790,36 @@ impl Iommu {
         IommuState {
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
-            endpoints: self.mapping.endpoints.read().unwrap().clone(),
-            mappings: self.mapping.mappings.read().unwrap().clone(),
+            endpoints: self
+                .mapping
+                .endpoints
+                .read()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect(),
+            mappings: self
+                .mapping
+                .mappings
+                .read()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().collect()))
+                .collect(),
         }
     }
 
     fn set_state(&mut self, state: &IommuState) {
         self.common.avail_features = state.avail_features;
         self.common.acked_features = state.acked_features;
-        *(self.mapping.endpoints.write().unwrap()) = state.endpoints.clone();
-        *(self.mapping.mappings.write().unwrap()) = state.mappings.clone();
+        *(self.mapping.endpoints.write().unwrap()) = state.endpoints.clone().into_iter().collect();
+        *(self.mapping.mappings.write().unwrap()) = state
+            .mappings
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
     }
 
     // This function lets the caller specify a list of devices attached to the
@@ -971,11 +994,11 @@ impl Snapshottable for Iommu {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id, &self.state())
+        Snapshot::new_from_versioned_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

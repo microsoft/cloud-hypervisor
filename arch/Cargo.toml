@@ -2,6 +2,7 @@
 name = "arch"
 version = "0.1.0"
 authors = ["The Chromium OS Authors"]
+edition = "2018"
 
 [features]
 default = []
@@ -11,16 +12,16 @@ tdx = []
 [dependencies]
 acpi_tables = { path = "../acpi_tables", optional = true }
 anyhow = "1.0"
-arch_gen = { path = "../arch_gen" }
 byteorder = "1.4.3"
 hypervisor = { path = "../hypervisor" }
-libc = "0.2.93"
+libc = "0.2.94"
 linux-loader = { version = "0.3.0", features = ["elf", "bzimage", "pe"] }
 log = "0.4.14"
 serde = {version = ">=1.0.27", features = ["rc"] }
 serde_derive = ">=1.0.27"
 serde_json = ">=1.0.9"
 thiserror = "1.0"
+vm-fdt = { git = "https://github.com/rust-vmm/vm-fdt", branch = "master" }
 vm-memory = { version = "0.5.0", features = ["backend-mmap"] }
 vm-migration = { path = "../vm-migration" }
 

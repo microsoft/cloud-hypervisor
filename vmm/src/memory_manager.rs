@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-extern crate hypervisor;
 #[cfg(target_arch = "x86_64")]
 use crate::config::SgxEpcConfig;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
@@ -162,9 +161,6 @@ pub enum Error {
     /// Failed to allocate a memory range.
     MemoryRangeAllocation,
 
-    /// Failed to create map region
-    MmapRegion(),
-
     /// Error from region creation
     GuestMemoryRegion(MmapRegionError),
 
@@ -194,10 +190,6 @@ pub enum Error {
 
     /// Cannot create the system allocator
     CreateSystemAllocator,
-
-    /// The number of external backing files doesn't match the number of
-    /// memory regions.
-    InvalidAmountExternalBackingFiles,
 
     /// Invalid SGX EPC section size
     #[cfg(target_arch = "x86_64")]
@@ -488,7 +480,7 @@ impl MemoryManager {
                 self.guest_memory
                     .memory()
                     .read_exact_from(
-                        region.start_addr,
+                        GuestAddress(region.start_addr),
                         &mut memory_region_file,
                         region.size as usize,
                     )
@@ -870,7 +862,7 @@ impl MemoryManager {
                 if let Some(content) = &mut region.content {
                     let mut memory_region_path = vm_snapshot_path.clone();
                     memory_region_path.push(content.clone());
-                    *content = memory_region_path;
+                    *content = memory_region_path.to_str().unwrap().to_owned();
                 }
             }
 
@@ -1408,7 +1400,7 @@ impl MemoryManager {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open("/dev/sgx_virt_epc")
+                .open("/dev/sgx_vepc")
                 .map_err(Error::SgxVirtEpcOpen)?;
 
             let prot = PROT_READ | PROT_WRITE;
@@ -1419,7 +1411,7 @@ impl MemoryManager {
 
             // We can't use the vm-memory crate to perform the memory mapping
             // here as it would try to ensure the size of the backing file is
-            // matching the size of the expected mapping. The /dev/sgx_virt_epc
+            // matching the size of the expected mapping. The /dev/sgx_vepc
             // device does not work that way, it provides a file descriptor
             // which is not matching the mapping size, as it's a just a way to
             // let KVM know that an EPC section is being created for the guest.
@@ -1928,10 +1920,9 @@ pub struct GuestAddressDef(pub u64);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MemoryRegion {
-    content: Option<PathBuf>,
-    #[serde(with = "GuestAddressDef")]
-    start_addr: GuestAddress,
-    size: GuestUsize,
+    content: Option<String>,
+    start_addr: u64,
+    size: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1974,8 +1965,8 @@ impl Snapshottable for MemoryManager {
             }
 
             memory_regions.push(MemoryRegion {
-                content,
-                start_addr: region.start_addr(),
+                content: content.map(|p| p.to_str().unwrap().to_owned()),
+                start_addr: region.start_addr().0,
                 size: region.len(),
             });
 
@@ -2028,7 +2019,7 @@ impl Transportable for MemoryManager {
 
                     guest_memory
                         .write_all_to(
-                            region.start_addr,
+                            GuestAddress(region.start_addr),
                             &mut memory_region_file,
                             region.size as usize,
                         )

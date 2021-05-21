@@ -21,7 +21,10 @@ use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -40,7 +43,7 @@ const CONFIG_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 4;
 //Console size feature bit
 const VIRTIO_CONSOLE_F_SIZE: u64 = 0;
 
-#[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Default, Versionize)]
 #[repr(C, packed)]
 pub struct VirtioConsoleConfig {
     cols: u16,
@@ -70,7 +73,7 @@ impl ConsoleEpollHandler {
     /*
      * Each port of virtio console device has one receive
      * queue. One or more empty buffers are placed by the
-     * dirver in the receive queue for incoming data. Here,
+     * driver in the receive queue for incoming data. Here,
      * we place the input data to these empty buffers.
      */
     fn process_input_queue(&mut self) -> bool {
@@ -277,13 +280,15 @@ pub struct Console {
     seccomp_action: SeccompAction,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct ConsoleState {
     avail_features: u64,
     acked_features: u64,
     config: VirtioConsoleConfig,
-    in_buffer: VecDeque<u8>,
+    in_buffer: Vec<u8>,
 }
+
+impl VersionMapped for ConsoleState {}
 
 impl Console {
     /// Create a new virtio console device that gets random data from /dev/urandom.
@@ -337,7 +342,7 @@ impl Console {
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
             config: *(self.config.lock().unwrap()),
-            in_buffer: self.input.in_buffer.lock().unwrap().clone(),
+            in_buffer: self.input.in_buffer.lock().unwrap().clone().into(),
         }
     }
 
@@ -345,7 +350,7 @@ impl Console {
         self.common.avail_features = state.avail_features;
         self.common.acked_features = state.acked_features;
         *(self.config.lock().unwrap()) = state.config;
-        *(self.input.in_buffer.lock().unwrap()) = state.in_buffer.clone();
+        *(self.input.in_buffer.lock().unwrap()) = state.in_buffer.clone().into();
     }
 }
 
@@ -483,11 +488,11 @@ impl Snapshottable for Console {
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id, &self.state())
+        Snapshot::new_from_versioned_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

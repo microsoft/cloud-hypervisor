@@ -3,21 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-extern crate anyhow;
-extern crate arc_swap;
 #[macro_use]
 extern crate event_monitor;
-extern crate hypervisor;
-extern crate option_parser;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
-extern crate vmm_sys_util;
 #[cfg(test)]
 #[macro_use]
 extern crate credibility;
@@ -113,10 +106,6 @@ pub enum Error {
     #[error("Error rebooting VM: {0:?}")]
     VmReboot(VmError),
 
-    /// Cannot shut a VM down
-    #[error("Error shutting down VM: {0:?}")]
-    VmShutdown(VmError),
-
     /// Cannot create VMM thread
     #[error("Error spawning VMM thread {0:?}")]
     VmmThreadSpawn(#[source] io::Error),
@@ -124,10 +113,6 @@ pub enum Error {
     /// Cannot shut the VMM down
     #[error("Error shutting down VMM: {0:?}")]
     VmmShutdown(VmError),
-
-    // Error following "exe" link
-    #[error("Error following \"exe\" link: {0}")]
-    ExePathReadLink(#[source] io::Error),
 
     /// Cannot create seccomp filter
     #[error("Error creating seccomp filter: {0}")]
@@ -144,6 +129,10 @@ pub enum Error {
     /// Error creating API server
     #[error("Error creating API server {0:?}")]
     CreateApiServer(micro_http::ServerError),
+
+    /// Error binding API server socket
+    #[error("Error creation API server's socket {0:?}")]
+    CreateApiServerSocket(#[source] io::Error),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -247,9 +236,11 @@ impl Serialize for PciDeviceInfo {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_vmm_thread(
     vmm_version: String,
     http_path: &Option<String>,
+    http_fd: Option<RawFd>,
     api_event: EventFd,
     api_sender: Sender<ApiRequest>,
     api_receiver: Receiver<ApiRequest>,
@@ -280,9 +271,11 @@ pub fn start_vmm_thread(
         })
         .map_err(Error::VmmThreadSpawn)?;
 
+    // The VMM thread is started, we can start serving HTTP requests
     if let Some(http_path) = http_path {
-        // The VMM thread is started, we can start serving HTTP requests
-        api::start_http_thread(http_path, http_api_event, api_sender, seccomp_action)?;
+        api::start_http_path_thread(http_path, http_api_event, api_sender, seccomp_action)?;
+    } else if let Some(http_fd) = http_fd {
+        api::start_http_fd_thread(http_fd, http_api_event, api_sender, seccomp_action)?;
     }
     Ok(thread)
 }

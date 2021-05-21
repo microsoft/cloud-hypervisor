@@ -27,8 +27,6 @@ pub enum Error {
     TapSetMac(TapError),
     /// Getting MAC address failed
     TapGetMac(TapError),
-    /// Setting tap interface offload flags failed.
-    TapSetOffload(TapError),
     /// Setting vnet header size failed.
     TapSetVnetHdrSize(TapError),
     /// Enabling tap interface failed.
@@ -70,7 +68,6 @@ pub fn open_tap(
     let mut taps: Vec<Tap> = Vec::new();
     let mut ifname: String = String::new();
     let vnet_hdr_size = vnet_hdr_len() as i32;
-    let flag = net_gen::TUN_F_CSUM | net_gen::TUN_F_UFO | net_gen::TUN_F_TSO4 | net_gen::TUN_F_TSO6;
 
     // In case the tap interface already exists, check if the number of
     // queues is appropriate. The tap might not support multiqueue while
@@ -98,7 +95,6 @@ pub fn open_tap(
                 *host_mac = Some(tap.get_mac_addr().map_err(Error::TapGetMac)?)
             }
             tap.enable().map_err(Error::TapEnable)?;
-            tap.set_offload(flag).map_err(Error::TapSetOffload)?;
 
             tap.set_vnet_hdr_size(vnet_hdr_size)
                 .map_err(Error::TapSetVnetHdrSize)?;
@@ -106,7 +102,6 @@ pub fn open_tap(
             ifname = String::from_utf8(tap.get_if_name()).unwrap();
         } else {
             tap = Tap::open_named(ifname.as_str(), num_rx_q, flags).map_err(Error::TapOpen)?;
-            tap.set_offload(flag).map_err(Error::TapSetOffload)?;
 
             tap.set_vnet_hdr_size(vnet_hdr_size)
                 .map_err(Error::TapSetVnetHdrSize)?;
