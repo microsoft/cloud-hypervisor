@@ -8,6 +8,7 @@ use super::{
     VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_VERSION_1,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::GuestMemoryMmap;
 use crate::VirtioInterrupt;
 use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
@@ -23,7 +24,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
@@ -402,26 +403,7 @@ impl VirtioDevice for Console {
             }
         }
 
-        let kill_evt = self
-            .common
-            .kill_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone kill_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
-        let pause_evt = self
-            .common
-            .pause_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone pause_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
+        let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
         let mut handler = ConsoleEpollHandler {
             queues,

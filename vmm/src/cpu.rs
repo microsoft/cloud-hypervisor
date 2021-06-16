@@ -19,6 +19,7 @@ use crate::memory_manager::MemoryManager;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 #[cfg(target_arch = "x86_64")]
 use crate::vm::physical_bits;
+use crate::GuestMemoryMmap;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml, sdt::Sdt};
@@ -43,7 +44,7 @@ use std::{cmp, io, result, thread};
 use vm_device::BusDevice;
 #[cfg(feature = "acpi")]
 use vm_memory::GuestAddress;
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::GuestMemoryAtomic;
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
     Transportable,
@@ -62,6 +63,16 @@ const MTRR_EDX_BIT: u8 = 12; // Hypervisor ecx bit.
 // KVM feature bits
 #[cfg(target_arch = "x86_64")]
 const KVM_FEATURE_ASYNC_PF_INT_BIT: u8 = 14;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_CLOCKSOURCE_BIT: u8 = 0;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_CLOCKSOURCE2_BIT: u8 = 3;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_CLOCKSOURCE_STABLE_BIT: u8 = 24;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_ASYNC_PF_BIT: u8 = 4;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_ASYNC_PF_VMEXIT_BIT: u8 = 10;
 
 #[cfg(feature = "acpi")]
 pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
@@ -132,7 +143,7 @@ pub enum Error {
 }
 pub type Result<T> = result::Result<T, Error>;
 
-#[cfg(feature = "acpi")]
+#[cfg(all(target_arch = "x86_64", feature = "acpi"))]
 #[repr(packed)]
 struct LocalApic {
     pub r#type: u8,
@@ -151,6 +162,63 @@ struct Ioapic {
     _reserved: u8,
     pub apic_address: u32,
     pub gsi_base: u32,
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[repr(packed)]
+struct GicC {
+    pub r#type: u8,
+    pub length: u8,
+    pub reserved0: u16,
+    pub cpu_interface_number: u32,
+    pub uid: u32,
+    pub flags: u32,
+    pub parking_version: u32,
+    pub performance_interrupt: u32,
+    pub parked_address: u64,
+    pub base_address: u64,
+    pub gicv_base_address: u64,
+    pub gich_base_address: u64,
+    pub vgic_interrupt: u32,
+    pub gicr_base_address: u64,
+    pub mpidr: u64,
+    pub proc_power_effi_class: u8,
+    pub reserved1: u8,
+    pub spe_overflow_interrupt: u16,
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[repr(packed)]
+struct GicD {
+    pub r#type: u8,
+    pub length: u8,
+    pub reserved0: u16,
+    pub gic_id: u32,
+    pub base_address: u64,
+    pub global_irq_base: u32,
+    pub version: u8,
+    pub reserved1: [u8; 3],
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[repr(packed)]
+struct GicR {
+    pub r#type: u8,
+    pub length: u8,
+    pub reserved: u16,
+    pub base_address: u64,
+    pub range_length: u32,
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[repr(packed)]
+struct GicIts {
+    pub r#type: u8,
+    pub length: u8,
+    pub reserved0: u16,
+    pub translation_id: u32,
+    pub base_address: u64,
+    pub reserved1: u32,
 }
 
 #[repr(packed)]
@@ -221,7 +289,7 @@ impl Vcpu {
             self.mpidr = arch::configure_vcpu(&self.vcpu, self.id, kernel_entry_point, vm_memory)
                 .map_err(Error::VcpuConfiguration)?;
         }
-
+        info!("Configuring vCPU: cpu_id = {}", self.id);
         #[cfg(target_arch = "x86_64")]
         arch::configure_vcpu(
             &self.vcpu,
@@ -337,6 +405,7 @@ pub struct CpuManager {
     seccomp_action: SeccompAction,
     vmmops: Arc<Box<dyn VmmOps>>,
     #[cfg(feature = "acpi")]
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     acpi_address: GuestAddress,
 }
 
@@ -475,6 +544,7 @@ impl CpuManager {
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         seccomp_action: SeccompAction,
         vmmops: Arc<Box<dyn VmmOps>>,
+        #[cfg(feature = "tdx")] tdx_enabled: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let guest_memory = memory_manager.lock().unwrap().guest_memory();
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
@@ -496,6 +566,8 @@ impl CpuManager {
                 sgx_epc_sections,
                 phys_bits,
                 config.kvm_hyperv,
+                #[cfg(feature = "tdx")]
+                tdx_enabled,
             )?
         };
 
@@ -547,6 +619,7 @@ impl CpuManager {
         sgx_epc_sections: Option<Vec<SgxEpcSection>>,
         phys_bits: u8,
         kvm_hyperv: bool,
+        #[cfg(feature = "tdx")] tdx_enabled: bool,
     ) -> Result<CpuId> {
         let cpuid_patches = vec![
             // Patch tsc deadline timer bit
@@ -616,6 +689,16 @@ impl CpuManager {
                 // TODO: Re-enable KVM_FEATURE_ASYNC_PF_INT (#2277)
                 0x4000_0001 => {
                     entry.eax &= !(1 << KVM_FEATURE_ASYNC_PF_INT_BIT);
+
+                    // These features are not supported by TDX
+                    #[cfg(feature = "tdx")]
+                    if tdx_enabled {
+                        entry.eax &= !(1 << KVM_FEATURE_CLOCKSOURCE_BIT
+                            | 1 << KVM_FEATURE_CLOCKSOURCE2_BIT
+                            | 1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT
+                            | 1 << KVM_FEATURE_ASYNC_PF_BIT
+                            | 1 << KVM_FEATURE_ASYNC_PF_VMEXIT_BIT)
+                    }
                 }
                 _ => {}
             }
@@ -1069,6 +1152,7 @@ impl CpuManager {
 
     #[cfg(feature = "acpi")]
     pub fn create_madt(&self) -> Sdt {
+        use crate::acpi;
         // This is also checked in the commandline parsing.
         assert!(self.config.boot_vcpus <= self.config.max_vcpus);
 
@@ -1079,7 +1163,7 @@ impl CpuManager {
 
             for cpu in 0..self.config.max_vcpus {
                 let lapic = LocalApic {
-                    r#type: 0,
+                    r#type: acpi::ACPI_APIC_PROCESSOR,
                     length: 8,
                     processor_id: cpu,
                     apic_id: cpu,
@@ -1093,7 +1177,7 @@ impl CpuManager {
             }
 
             madt.append(Ioapic {
-                r#type: 1,
+                r#type: acpi::ACPI_APIC_IO,
                 length: 12,
                 ioapic_id: 0,
                 apic_address: arch::layout::IOAPIC_START.0 as u32,
@@ -1102,7 +1186,7 @@ impl CpuManager {
             });
 
             madt.append(InterruptSourceOverride {
-                r#type: 2,
+                r#type: acpi::ACPI_APIC_XRUPT_OVERRIDE,
                 length: 10,
                 bus: 0,
                 source: 4,
@@ -1113,6 +1197,83 @@ impl CpuManager {
 
         #[cfg(target_arch = "aarch64")]
         {
+            /* Notes:
+             * Ignore Local Interrupt Controller Address at byte offset 36 of MADT table.
+             */
+
+            // See section 5.2.12.14 GIC CPU Interface (GICC) Structure in ACPI spec.
+            for cpu in 0..self.config.boot_vcpus {
+                let vcpu = &self.vcpus[cpu as usize];
+                let mpidr = vcpu.lock().unwrap().get_mpidr();
+                /* ARMv8 MPIDR format:
+                     Bits [63:40] Must be zero
+                     Bits [39:32] Aff3 : Match Aff3 of target processor MPIDR
+                     Bits [31:24] Must be zero
+                     Bits [23:16] Aff2 : Match Aff2 of target processor MPIDR
+                     Bits [15:8] Aff1 : Match Aff1 of target processor MPIDR
+                     Bits [7:0] Aff0 : Match Aff0 of target processor MPIDR
+                */
+                let mpidr_mask = 0xff_00ff_ffff;
+                let gicc = GicC {
+                    r#type: acpi::ACPI_APIC_GENERIC_CPU_INTERFACE,
+                    length: 80,
+                    reserved0: 0,
+                    cpu_interface_number: cpu as u32,
+                    uid: cpu as u32,
+                    flags: 1,
+                    parking_version: 0,
+                    performance_interrupt: 0,
+                    parked_address: 0,
+                    base_address: 0,
+                    gicv_base_address: 0,
+                    gich_base_address: 0,
+                    vgic_interrupt: 0,
+                    gicr_base_address: 0,
+                    mpidr: mpidr & mpidr_mask,
+                    proc_power_effi_class: 0,
+                    reserved1: 0,
+                    spe_overflow_interrupt: 0,
+                };
+
+                madt.append(gicc);
+            }
+
+            // GIC Distributor structure. See section 5.2.12.15 in ACPI spec.
+            let gicd = GicD {
+                r#type: acpi::ACPI_APIC_GENERIC_DISTRIBUTOR,
+                length: 24,
+                reserved0: 0,
+                gic_id: 0,
+                base_address: arch::layout::MAPPED_IO_START - 0x0001_0000,
+                global_irq_base: 0,
+                version: 3,
+                reserved1: [0; 3],
+            };
+            madt.append(gicd);
+
+            // See 5.2.12.17 GIC Redistributor (GICR) Structure in ACPI spec.
+            let gicr_size: u32 = 0x0001_0000 * 2 * (self.config.boot_vcpus as u32);
+            let gicr_base: u64 = arch::layout::MAPPED_IO_START - 0x0001_0000 - gicr_size as u64;
+            let gicr = GicR {
+                r#type: acpi::ACPI_APIC_GENERIC_REDISTRIBUTOR,
+                length: 16,
+                reserved: 0,
+                base_address: gicr_base,
+                range_length: gicr_size,
+            };
+            madt.append(gicr);
+
+            // See 5.2.12.18 GIC Interrupt Translation Service (ITS) Structure in ACPI spec.
+            let gicits = GicIts {
+                r#type: acpi::ACPI_APIC_GENERIC_TRANSLATOR,
+                length: 20,
+                reserved0: 0,
+                translation_id: 0,
+                base_address: gicr_base - 2 * 0x0001_0000,
+                reserved1: 0,
+            };
+            madt.append(gicits);
+
             madt.update_checksum();
         }
 
@@ -1125,12 +1286,13 @@ struct Cpu {
     cpu_id: u8,
 }
 
-#[cfg(feature = "acpi")]
+#[cfg(all(target_arch = "x86_64", feature = "acpi"))]
 const MADT_CPU_ENABLE_FLAG: usize = 0;
 
 #[cfg(feature = "acpi")]
-impl Aml for Cpu {
-    fn to_aml_bytes(&self) -> Vec<u8> {
+impl Cpu {
+    #[cfg(target_arch = "x86_64")]
+    fn generate_mat(&self) -> Vec<u8> {
         let lapic = LocalApic {
             r#type: 0,
             length: 8,
@@ -1143,11 +1305,22 @@ impl Aml for Cpu {
         mat_data.resize(std::mem::size_of_val(&lapic), 0);
         unsafe { *(mat_data.as_mut_ptr() as *mut LocalApic) = lapic };
 
+        mat_data
+    }
+}
+
+#[cfg(feature = "acpi")]
+impl Aml for Cpu {
+    fn to_aml_bytes(&self) -> Vec<u8> {
+        #[cfg(target_arch = "x86_64")]
+        let mat_data: Vec<u8> = self.generate_mat();
+
         aml::Device::new(
             format!("C{:03}", self.cpu_id).as_str().into(),
             vec![
                 &aml::Name::new("_HID".into(), &"ACPI0007"),
                 &aml::Name::new("_UID".into(), &self.cpu_id),
+                // Currently, AArch64 cannot support following fields.
                 /*
                 _STA return value:
                 Bit [0] – Set if the device is present.
@@ -1157,6 +1330,7 @@ impl Aml for Cpu {
                 Bit [4] – Set if the battery is present.
                 Bits [31:5] – Reserved (must be cleared).
                 */
+                #[cfg(target_arch = "x86_64")]
                 &aml::Method::new(
                     "_STA".into(),
                     0,
@@ -1170,8 +1344,10 @@ impl Aml for Cpu {
                 // The Linux kernel expects every CPU device to have a _MAT entry
                 // containing the LAPIC for this processor with the enabled bit set
                 // even it if is disabled in the MADT (non-boot CPU)
+                #[cfg(target_arch = "x86_64")]
                 &aml::Name::new("_MAT".into(), &aml::Buffer::new(mat_data)),
                 // Trigger CPU ejection
+                #[cfg(target_arch = "x86_64")]
                 &aml::Method::new(
                     "_EJ0".into(),
                     1,
@@ -1332,6 +1508,7 @@ impl Aml for CpuManager {
     fn to_aml_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         // CPU hotplug controller
+        #[cfg(target_arch = "x86_64")]
         bytes.extend_from_slice(
             &aml::Device::new(
                 "_SB_.PRES".into(),
@@ -1502,7 +1679,7 @@ mod tests {
     fn test_setlint() {
         let hv = hypervisor::new().unwrap();
         let vm = hv.create_vm().expect("new VM fd creation failed");
-        assert!(hv.check_capability(hypervisor::kvm::Cap::Irqchip));
+        assert!(hv.check_required_extensions().is_ok());
         // Calling get_lapic will fail if there is no irqchip before hand.
         assert!(vm.create_irq_chip().is_ok());
         let vcpu = vm.create_vcpu(0, None).unwrap();
@@ -1599,6 +1776,7 @@ mod tests {
 #[cfg(target_arch = "aarch64")]
 #[cfg(test)]
 mod tests {
+    use crate::GuestMemoryMmap;
     use arch::aarch64::layout;
     use arch::aarch64::regs::*;
     use hypervisor::kvm::aarch64::{is_system_register, MPIDR_EL1};
@@ -1608,7 +1786,7 @@ mod tests {
     };
     use hypervisor::{arm64_core_reg_id, offset__of};
     use std::mem;
-    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    use vm_memory::GuestAddress;
 
     #[test]
     fn test_setup_regs() {

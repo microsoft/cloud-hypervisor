@@ -3,17 +3,22 @@
 
 use super::super::{Descriptor, Queue};
 use super::{Error, Result};
+use crate::vhost_user::Inflight;
 use crate::{get_host_address_range, VirtioInterrupt, VirtioInterruptType};
-use libc::EFD_NONBLOCK;
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 use std::convert::TryInto;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixListener;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 use std::vec::Vec;
-use vhost::vhost_user::{Master, VhostUserMaster};
-use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
-use vm_memory::{
-    Address, Error as MmapError, GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
+use vhost::vhost_user::message::{
+    VhostUserHeaderFlag, VhostUserInflight, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
 };
+use vhost::vhost_user::{Master, MasterReqHandler, VhostUserMaster, VhostUserMasterReqHandler};
+use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
+use vm_memory::{Address, Error as MmapError, GuestMemory, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd;
 
 #[derive(Debug, Clone)]
@@ -25,10 +30,10 @@ pub struct VhostUserConfig {
 
 pub fn update_mem_table(vu: &mut Master, mem: &GuestMemoryMmap) -> Result<()> {
     let mut regions: Vec<VhostUserMemoryRegionInfo> = Vec::new();
-    mem.with_regions_mut(|_, region| {
+    for region in mem.iter() {
         let (mmap_handle, mmap_offset) = match region.file_offset() {
             Some(_file_offset) => (_file_offset.file().as_raw_fd(), _file_offset.start()),
-            None => return Err(MmapError::NoMemoryRegion),
+            None => return Err(Error::VhostUserMemoryRegion(MmapError::NoMemoryRegion)),
         };
 
         let vhost_user_net_reg = VhostUserMemoryRegionInfo {
@@ -40,10 +45,7 @@ pub fn update_mem_table(vu: &mut Master, mem: &GuestMemoryMmap) -> Result<()> {
         };
 
         regions.push(vhost_user_net_reg);
-
-        Ok(())
-    })
-    .map_err(Error::VhostUserMemoryRegion)?;
+    }
 
     vu.set_mem_table(regions.as_slice())
         .map_err(Error::VhostUserSetMemTable)?;
@@ -69,17 +71,80 @@ pub fn add_memory_region(vu: &mut Master, region: &Arc<GuestRegionMmap>) -> Resu
         .map_err(Error::VhostUserAddMemReg)
 }
 
-pub fn setup_vhost_user_vring(
+pub fn negotiate_features_vhost_user(
+    vu: &mut Master,
+    avail_features: u64,
+    avail_protocol_features: VhostUserProtocolFeatures,
+) -> Result<(u64, u64)> {
+    // Set vhost-user owner.
+    vu.set_owner().map_err(Error::VhostUserSetOwner)?;
+
+    // Get features from backend, do negotiation to get a feature collection which
+    // both VMM and backend support.
+    let backend_features = vu.get_features().map_err(Error::VhostUserGetFeatures)?;
+    let acked_features = avail_features & backend_features;
+
+    let acked_protocol_features =
+        if acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0 {
+            let backend_protocol_features = vu
+                .get_protocol_features()
+                .map_err(Error::VhostUserGetProtocolFeatures)?;
+
+            let acked_protocol_features = avail_protocol_features & backend_protocol_features;
+
+            vu.set_protocol_features(acked_protocol_features)
+                .map_err(Error::VhostUserSetProtocolFeatures)?;
+
+            acked_protocol_features
+        } else {
+            VhostUserProtocolFeatures::empty()
+        };
+
+    if avail_protocol_features.contains(VhostUserProtocolFeatures::REPLY_ACK)
+        && acked_protocol_features.contains(VhostUserProtocolFeatures::REPLY_ACK)
+    {
+        vu.set_hdr_flags(VhostUserHeaderFlag::NEED_REPLY);
+    }
+
+    Ok((acked_features, acked_protocol_features.bits()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn setup_vhost_user<S: VhostUserMasterReqHandler>(
     vu: &mut Master,
     mem: &GuestMemoryMmap,
     queues: Vec<Queue>,
     queue_evts: Vec<EventFd>,
     virtio_interrupt: &Arc<dyn VirtioInterrupt>,
-) -> Result<Vec<(Option<EventFd>, Queue)>> {
+    acked_features: u64,
+    slave_req_handler: &Option<MasterReqHandler<S>>,
+    inflight: Option<&mut Inflight>,
+) -> Result<()> {
+    vu.set_features(acked_features)
+        .map_err(Error::VhostUserSetFeatures)?;
+
     // Let's first provide the memory table to the backend.
     update_mem_table(vu, mem)?;
 
-    let mut vu_interrupt_list = Vec::new();
+    // Setup for inflight I/O tracking shared memory.
+    if let Some(inflight) = inflight {
+        if inflight.fd.is_none() {
+            let inflight_req_info = VhostUserInflight {
+                mmap_size: 0,
+                mmap_offset: 0,
+                num_queues: queues.len() as u16,
+                queue_size: queues[0].actual_size(),
+            };
+            let (info, fd) = vu
+                .get_inflight_fd(&inflight_req_info)
+                .map_err(Error::VhostUserGetInflight)?;
+            inflight.info = info;
+            inflight.fd = Some(fd);
+        }
+        // Unwrapping the inflight fd is safe here since we know it can't be None.
+        vu.set_inflight_fd(&inflight.info, inflight.fd.as_ref().unwrap().as_raw_fd())
+            .map_err(Error::VhostUserSetInflight)?;
+    }
 
     for (queue_index, queue) in queues.into_iter().enumerate() {
         let actual_size: usize = queue.actual_size().try_into().unwrap();
@@ -110,19 +175,18 @@ pub fn setup_vhost_user_vring(
 
         vu.set_vring_addr(queue_index, &config_data)
             .map_err(Error::VhostUserSetVringAddr)?;
-        vu.set_vring_base(queue_index, 0u16)
-            .map_err(Error::VhostUserSetVringBase)?;
+        vu.set_vring_base(
+            queue_index,
+            queue
+                .avail_index_from_memory(mem)
+                .map_err(Error::GetAvailableIndex)?,
+        )
+        .map_err(Error::VhostUserSetVringBase)?;
 
         if let Some(eventfd) = virtio_interrupt.notifier(&VirtioInterruptType::Queue, Some(&queue))
         {
             vu.set_vring_call(queue_index, &eventfd)
                 .map_err(Error::VhostUserSetVringCall)?;
-            vu_interrupt_list.push((None, queue));
-        } else {
-            let eventfd = EventFd::new(EFD_NONBLOCK).map_err(Error::VhostIrqCreate)?;
-            vu.set_vring_call(queue_index, &eventfd)
-                .map_err(Error::VhostUserSetVringCall)?;
-            vu_interrupt_list.push((Some(eventfd), queue));
         }
 
         vu.set_vring_kick(queue_index, &queue_evts[queue_index])
@@ -132,22 +196,12 @@ pub fn setup_vhost_user_vring(
             .map_err(Error::VhostUserSetVringEnable)?;
     }
 
-    Ok(vu_interrupt_list)
-}
-
-pub fn setup_vhost_user(
-    vu: &mut Master,
-    mem: &GuestMemoryMmap,
-    queues: Vec<Queue>,
-    queue_evts: Vec<EventFd>,
-    virtio_interrupt: &Arc<dyn VirtioInterrupt>,
-    acked_features: u64,
-) -> Result<Vec<(Option<EventFd>, Queue)>> {
-    // Set features based on the acked features from the guest driver.
-    vu.set_features(acked_features)
-        .map_err(Error::VhostUserSetFeatures)?;
-
-    setup_vhost_user_vring(vu, mem, queues, queue_evts, virtio_interrupt)
+    if let Some(slave_req_handler) = slave_req_handler {
+        vu.set_slave_request_fd(slave_req_handler.get_tx_raw_fd())
+            .map_err(Error::VhostUserSetSlaveRequestFd)
+    } else {
+        Ok(())
+    }
 }
 
 pub fn reset_vhost_user(vu: &mut Master, num_queues: usize) -> Result<()> {
@@ -159,4 +213,85 @@ pub fn reset_vhost_user(vu: &mut Master, num_queues: usize) -> Result<()> {
 
     // Reset the owner.
     vu.reset_owner().map_err(Error::VhostUserResetOwner)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn reinitialize_vhost_user<S: VhostUserMasterReqHandler>(
+    vu: &mut Master,
+    mem: &GuestMemoryMmap,
+    queues: Vec<Queue>,
+    queue_evts: Vec<EventFd>,
+    virtio_interrupt: &Arc<dyn VirtioInterrupt>,
+    acked_features: u64,
+    acked_protocol_features: u64,
+    slave_req_handler: &Option<MasterReqHandler<S>>,
+    inflight: Option<&mut Inflight>,
+) -> Result<()> {
+    vu.set_owner().map_err(Error::VhostUserSetOwner)?;
+    vu.get_features().map_err(Error::VhostUserGetFeatures)?;
+
+    if acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0 {
+        if let Some(acked_protocol_features) =
+            VhostUserProtocolFeatures::from_bits(acked_protocol_features)
+        {
+            vu.set_protocol_features(acked_protocol_features)
+                .map_err(Error::VhostUserSetProtocolFeatures)?;
+
+            if acked_protocol_features.contains(VhostUserProtocolFeatures::REPLY_ACK) {
+                vu.set_hdr_flags(VhostUserHeaderFlag::NEED_REPLY);
+            }
+        }
+    }
+
+    setup_vhost_user(
+        vu,
+        mem,
+        queues,
+        queue_evts,
+        virtio_interrupt,
+        acked_features,
+        slave_req_handler,
+        inflight,
+    )
+}
+
+pub fn connect_vhost_user(
+    server: bool,
+    socket_path: &str,
+    num_queues: u64,
+    unlink_socket: bool,
+) -> Result<Master> {
+    if server {
+        if unlink_socket {
+            std::fs::remove_file(socket_path).map_err(Error::RemoveSocketPath)?;
+        }
+
+        info!("Binding vhost-user listener...");
+        let listener = UnixListener::bind(socket_path).map_err(Error::BindSocket)?;
+        info!("Waiting for incoming vhost-user connection...");
+        let (stream, _) = listener.accept().map_err(Error::AcceptConnection)?;
+
+        Ok(Master::from_stream(stream, num_queues))
+    } else {
+        let now = Instant::now();
+
+        // Retry connecting for a full minute
+        let err = loop {
+            let err = match Master::connect(socket_path, num_queues) {
+                Ok(m) => return Ok(m),
+                Err(e) => e,
+            };
+            sleep(Duration::from_millis(100));
+
+            if now.elapsed().as_secs() >= 60 {
+                break err;
+            }
+        };
+
+        error!(
+            "Failed connecting the backend after trying for 1 minute: {:?}",
+            err
+        );
+        Err(Error::VhostUserConnect)
+    }
 }

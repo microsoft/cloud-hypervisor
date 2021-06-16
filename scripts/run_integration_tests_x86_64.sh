@@ -31,7 +31,7 @@ if [ ! -f "$FW" ]; then
 fi
 
 BIONIC_OS_IMAGE_NAME="bionic-server-cloudimg-amd64.qcow2"
-BIONIC_OS_IMAGE_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$BIONIC_OS_IMAGE_NAME"
+BIONIC_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$BIONIC_OS_IMAGE_NAME"
 BIONIC_OS_IMAGE="$WORKLOADS_DIR/$BIONIC_OS_IMAGE_NAME"
 if [ ! -f "$BIONIC_OS_IMAGE" ]; then
     pushd $WORKLOADS_DIR
@@ -48,8 +48,8 @@ if [ ! -f "$BIONIC_OS_RAW_IMAGE" ]; then
 fi
 
 
-FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210407-0.qcow2"
-FOCAL_OS_IMAGE_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_IMAGE_NAME"
+FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0.qcow2"
+FOCAL_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_IMAGE_NAME"
 FOCAL_OS_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_IMAGE" ]; then
     pushd $WORKLOADS_DIR
@@ -57,7 +57,7 @@ if [ ! -f "$FOCAL_OS_IMAGE" ]; then
     popd
 fi
 
-FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210407-0.raw"
+FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0.raw"
 FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
     pushd $WORKLOADS_DIR
@@ -107,7 +107,7 @@ LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
 if [ ! -f "$VMLINUX_IMAGE" ]; then
     SRCDIR=$PWD
     pushd $WORKLOADS_DIR
-    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.12" $LINUX_CUSTOM_DIR
+    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.13-rc5" $LINUX_CUSTOM_DIR
     cp $SRCDIR/resources/linux-config-x86_64 $LINUX_CUSTOM_DIR/.config
     popd
 fi
@@ -203,12 +203,18 @@ sudo bash -c "echo 1000000 > /sys/kernel/mm/ksm/pages_to_scan"
 sudo bash -c "echo 10 > /sys/kernel/mm/ksm/sleep_millisecs"
 sudo bash -c "echo 1 > /sys/kernel/mm/ksm/run"
 
-# test_vfio relies on hugepages
-echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
+# Both test_vfio and ovs-dpdk rely on hugepages
+echo 6144 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
+# Setup ovs-dpdk
+service openvswitch-switch start
+ovs-vsctl init
+ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+service openvswitch-switch restart
+
 export RUST_BACKTRACE=1
-time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=4
+time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=2
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests

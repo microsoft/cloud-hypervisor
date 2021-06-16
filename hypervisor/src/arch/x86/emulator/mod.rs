@@ -524,7 +524,9 @@ impl<'a, T: CpuStateManager> Emulator<'a, T> {
             (mov, Movzx_r32_rm16),
             (mov, Movzx_r64_rm16),
             // MOVS
-            (movs, Movsd_m32_m32)
+            (movs, Movsd_m32_m32),
+            // OR
+            (or, Or_rm8_r8)
         );
 
         handler
@@ -714,7 +716,7 @@ mod mock_vmm {
                 "Memory read {} bytes from [{:#x} -> {:#x}]",
                 data.len(),
                 gva,
-                gva
+                gva + data.len() as u64 - 1
             );
             data.copy_from_slice(&self.memory[gva as usize..gva as usize + data.len()]);
             Ok(())
@@ -725,7 +727,7 @@ mod mock_vmm {
                 "Memory write {} bytes at [{:#x} -> {:#x}]",
                 data.len(),
                 gva,
-                gva
+                gva + data.len() as u64 - 1
             );
             self.memory[gva as usize..gva as usize + data.len()].copy_from_slice(data);
 

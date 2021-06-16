@@ -10,12 +10,11 @@
 
 #[macro_use]
 extern crate log;
-#[cfg(target_arch = "aarch64")]
-#[macro_use]
-extern crate serde_derive;
 
 use std::fmt;
 use std::result;
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vm_memory::bitmap::AtomicBitmap>;
 
 /// Type for returning error code.
 #[derive(Debug)]
@@ -75,8 +74,8 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
     arch_memory_regions, configure_system, configure_vcpu, fdt::DeviceInfoForFdt,
-    get_host_cpu_phys_bits, get_kernel_start, initramfs_load_addr, layout,
-    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, layout::IRQ_MAX, EntryPoint,
+    get_host_cpu_phys_bits, get_kernel_start, get_uefi_start, initramfs_load_addr, layout,
+    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi, EntryPoint,
 };
 
 #[cfg(target_arch = "x86_64")]

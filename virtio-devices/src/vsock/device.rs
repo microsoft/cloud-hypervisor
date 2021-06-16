@@ -8,15 +8,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use super::{VsockBackend, VsockPacket};
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::Error as DeviceError;
-use crate::VirtioInterrupt;
-use crate::{
-    ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
-    VirtioCommon, VirtioDevice, VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
-    VIRTIO_F_IN_ORDER, VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_VERSION_1,
-};
 /// This is the `VirtioDevice` implementation for our vsock device. It handles the virtio-level
 /// device logic: feature negotiation, device configuration, and device activation.
 /// The run-time device logic (i.e. event-driven data handling) is implemented by
@@ -36,6 +27,16 @@ use crate::{
 /// - an event queue FD; and
 /// - a backend FD.
 ///
+use super::{VsockBackend, VsockPacket};
+use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::Error as DeviceError;
+use crate::GuestMemoryMmap;
+use crate::VirtioInterrupt;
+use crate::{
+    ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
+    VirtioCommon, VirtioDevice, VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
+    VIRTIO_F_IN_ORDER, VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_VERSION_1,
+};
 use byteorder::{ByteOrder, LittleEndian};
 use seccomp::{SeccompAction, SeccompFilter};
 use std::io;
@@ -45,8 +46,12 @@ use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
-use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
@@ -301,11 +306,13 @@ pub struct Vsock<B: VsockBackend> {
     seccomp_action: SeccompAction,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct VsockState {
     pub avail_features: u64,
     pub acked_features: u64,
 }
+
+impl VersionMapped for VsockState {}
 
 impl<B> Vsock<B>
 where
@@ -412,26 +419,7 @@ where
         queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
-        let kill_evt = self
-            .common
-            .kill_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone kill_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
-        let pause_evt = self
-            .common
-            .pause_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone pause_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
+        let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
         let mut handler = VsockEpollHandler {
             mem,
@@ -504,11 +492,11 @@ where
     }
 
     fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        Snapshot::new_from_state(&self.id, &self.state())
+        Snapshot::new_from_versioned_state(&self.id, &self.state())
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        self.set_state(&snapshot.to_state(&self.id)?);
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
         Ok(())
     }
 }

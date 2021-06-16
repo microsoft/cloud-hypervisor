@@ -5,17 +5,23 @@ pub mod kvm {
     use crate::aarch64::gic::dist_regs::{get_dist_regs, read_ctlr, set_dist_regs, write_ctlr};
     use crate::aarch64::gic::icc_regs::{get_icc_regs, set_icc_regs};
     use crate::aarch64::gic::kvm::{save_pending_tables, KvmGicDevice};
-    use crate::aarch64::gic::redist_regs::{get_redist_regs, set_redist_regs};
+    use crate::aarch64::gic::redist_regs::{
+        construct_gicr_typers, get_redist_regs, set_redist_regs,
+    };
     use crate::aarch64::gic::GicDevice;
     use crate::layout;
     use anyhow::anyhow;
     use hypervisor::kvm::kvm_bindings;
+    use hypervisor::CpuState;
     use std::any::Any;
     use std::convert::TryInto;
     use std::sync::Arc;
     use std::{boxed::Box, result};
+    use versionize::{VersionMap, Versionize, VersionizeResult};
+    use versionize_derive::Versionize;
     use vm_migration::{
         Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable,
+        VersionMapped,
     };
 
     /// Errors thrown while saving/restoring the GICv3.
@@ -57,7 +63,7 @@ pub mod kvm {
         vcpu_count: u64,
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Versionize)]
     pub struct Gicv3State {
         dist: Vec<u32>,
         rdist: Vec<u32>,
@@ -65,6 +71,8 @@ pub mod kvm {
         // special register that enables interrupts and affinity routing
         gicd_ctlr: u32,
     }
+
+    impl VersionMapped for Gicv3State {}
 
     impl KvmGicV3 {
         // Unfortunately bindgen omits defines that are based on other defines.
@@ -160,7 +168,8 @@ pub mod kvm {
             self.vcpu_count
         }
 
-        fn set_gicr_typers(&mut self, gicr_typers: Vec<u64>) {
+        fn set_gicr_typers(&mut self, vcpu_states: &[CpuState]) {
+            let gicr_typers = construct_gicr_typers(vcpu_states);
             self.gicr_typers = gicr_typers;
         }
 
@@ -229,12 +238,12 @@ pub mod kvm {
 
         fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
             let gicr_typers = self.gicr_typers.clone();
-            Snapshot::new_from_state(&self.id(), &self.state(&gicr_typers).unwrap())
+            Snapshot::new_from_versioned_state(&self.id(), &self.state(&gicr_typers).unwrap())
         }
 
         fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
             let gicr_typers = self.gicr_typers.clone();
-            self.set_state(&gicr_typers, &snapshot.to_state(&self.id())?)
+            self.set_state(&gicr_typers, &snapshot.to_versioned_state(&self.id())?)
                 .map_err(|e| {
                     MigratableError::Restore(anyhow!("Could not restore GICv3 state {:?}", e))
                 })

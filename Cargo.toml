@@ -1,6 +1,6 @@
 [package]
 name = "cloud-hypervisor"
-version = "15.0.0"
+version = "16.0.0"
 authors = ["The Cloud Hypervisor Authors"]
 edition = "2018"
 default-run = "cloud-hypervisor"
@@ -13,19 +13,19 @@ homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
 lto = true
 
 [dependencies]
-anyhow = "1.0.40"
+anyhow = "1.0.41"
 api_client = { path = "api_client" }
 clap = { version = "2.33.3", features = ["wrap_help"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.94"
+libc = "0.2.97"
 log = { version = "0.4.14", features = ["std"] }
 option_parser = { path = "option_parser" }
-seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.3" }
+seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.4" }
 serde_json = "1.0.64"
-signal-hook = "0.3.8"
-thiserror = "1.0.24"
+signal-hook = "0.3.9"
+thiserror = "1.0.25"
 vmm = { path = "vmm" }
 vmm-sys-util = "0.8.0"
 vm-memory = "0.5.0"
@@ -37,6 +37,7 @@ clap = { version = "2.33.3", features = ["wrap_help"] }
 [patch.crates-io]
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.4.0", features = ["with-serde", "fam-wrappers"] }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
+vm-memory = { git = "https://github.com/rust-vmm/vm-memory", rev = "5bd7138758183a73ac0da27ce40c004d95f1a7e9"}
 
 [dev-dependencies]
 credibility = "0.1.3"

@@ -16,13 +16,15 @@ use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 use std::sync::Arc;
 use vm_memory::{
-    Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap,
+    bitmap::AtomicBitmap, Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryError,
     GuestUsize,
 };
 
 pub const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 pub const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 pub const VIRTQ_DESC_F_INDIRECT: u16 = 0x4;
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -277,7 +279,7 @@ impl<'a> DescriptorChain<'a> {
     /// If the driver designated this as a write only descriptor.
     ///
     /// If this is false, this descriptor is read only.
-    /// Write only means the the emulated device can write and the driver can read.
+    /// Write only means that the emulated device can write and the driver can read.
     pub fn is_write_only(&self) -> bool {
         self.flags & VIRTQ_DESC_F_WRITE != 0
     }
@@ -384,11 +386,7 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "GuestAddress")]
-struct GuestAddressDef(pub u64);
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 /// A virtio queue's parameters.
 pub struct Queue {
     /// The maximal size in elements offered by the device
@@ -403,22 +401,18 @@ pub struct Queue {
     /// Interrupt vector index of the queue
     pub vector: u16,
 
-    #[serde(with = "GuestAddressDef")]
     /// Guest physical address of the descriptor table
     pub desc_table: GuestAddress,
 
-    #[serde(with = "GuestAddressDef")]
     /// Guest physical address of the available ring
     pub avail_ring: GuestAddress,
 
-    #[serde(with = "GuestAddressDef")]
     /// Guest physical address of the used ring
     pub used_ring: GuestAddress,
 
     pub next_avail: Wrapping<u16>,
     pub next_used: Wrapping<u16>,
 
-    #[serde(skip)]
     pub iommu_mapping_cb: Option<Arc<VirtioIommuRemapping>>,
 
     /// VIRTIO_F_RING_EVENT_IDX negotiated
@@ -725,7 +719,9 @@ pub mod testing {
     use std::marker::PhantomData;
     use std::mem;
     use vm_memory::Bytes;
-    use vm_memory::{Address, GuestAddress, GuestMemoryMmap, GuestUsize};
+    use vm_memory::{bitmap::AtomicBitmap, Address, GuestAddress, GuestUsize};
+
+    type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 
     // Represents a location in GuestMemoryMmap which holds a given type.
     pub struct SomeplaceInMemory<'a, T> {
@@ -968,7 +964,9 @@ pub mod testing {
 pub mod tests {
     use super::testing::*;
     pub use super::*;
-    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    use vm_memory::{bitmap::AtomicBitmap, GuestAddress};
+
+    type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 
     #[test]
     fn test_checked_new_descriptor_chain() {
@@ -1003,7 +1001,7 @@ pub mod tests {
             // the first desc has a normal len now, and the next_descriptor flag is set
             vq.dtable[0].len.set(0x1000);
             vq.dtable[0].flags.set(VIRTQ_DESC_F_NEXT);
-            //..but the the index of the next descriptor is too large
+            //..but the index of the next descriptor is too large
             vq.dtable[0].next.set(16);
 
             assert!(DescriptorChain::checked_new(m, vq.start(), 16, 0, None).is_none());

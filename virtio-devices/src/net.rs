@@ -5,10 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use super::net_util::{
-    build_net_config_space, build_net_config_space_with_mq, virtio_features_to_tap_offload,
-    NetCtrl, NetCtrlEpollHandler, VirtioNetConfig,
-};
 use super::Error as DeviceError;
 use super::{
     ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
@@ -16,9 +12,13 @@ use super::{
     EPOLL_HELPER_EVENT_LAST,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::GuestMemoryMmap;
 use crate::VirtioInterrupt;
+use net_util::CtrlQueue;
 use net_util::{
-    open_tap, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio, Tap, TapError, TxVirtio,
+    build_net_config_space, build_net_config_space_with_mq, open_tap,
+    virtio_features_to_tap_offload, MacAddr, NetCounters, NetQueuePair, OpenTapError, RxVirtio,
+    Tap, TapError, TxVirtio, VirtioNetConfig,
 };
 use seccomp::{SeccompAction, SeccompFilter};
 use std::net::Ipv4Addr;
@@ -34,11 +34,64 @@ use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_bindings::bindings::virtio_net::*;
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
+/// Control queue
+// Event available on the control queue.
+const CTRL_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
+
+pub struct NetCtrlEpollHandler {
+    pub mem: GuestMemoryAtomic<GuestMemoryMmap>,
+    pub kill_evt: EventFd,
+    pub pause_evt: EventFd,
+    pub ctrl_q: CtrlQueue,
+    pub queue_evt: EventFd,
+    pub queue: Queue,
+}
+
+impl NetCtrlEpollHandler {
+    pub fn run_ctrl(
+        &mut self,
+        paused: Arc<AtomicBool>,
+        paused_sync: Arc<Barrier>,
+    ) -> std::result::Result<(), EpollHelperError> {
+        let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
+        helper.add_event(self.queue_evt.as_raw_fd(), CTRL_QUEUE_EVENT)?;
+        helper.run(paused, paused_sync, self)?;
+
+        Ok(())
+    }
+}
+
+impl EpollHelperHandler for NetCtrlEpollHandler {
+    fn handle_event(&mut self, _helper: &mut EpollHelper, event: &epoll::Event) -> bool {
+        let ev_type = event.data as u16;
+        match ev_type {
+            CTRL_QUEUE_EVENT => {
+                let mem = self.mem.memory();
+                if let Err(e) = self.queue_evt.read() {
+                    error!("failed to get ctl queue event: {:?}", e);
+                    return true;
+                }
+                if let Err(e) = self.ctrl_q.process(&mem, &mut self.queue) {
+                    error!("failed to process ctrl queue: {:?}", e);
+                    return true;
+                }
+            }
+            _ => {
+                error!("Unknown event for virtio-net");
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Rx/Tx queue pair
 // The guest has made a buffer available to receive a frame into.
 pub const RX_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // The transmit queue has a frame that is ready to send from the guest.
@@ -492,32 +545,14 @@ impl VirtioDevice for Net {
             let cvq_queue = queues.remove(queue_num - 1);
             let cvq_queue_evt = queue_evts.remove(queue_num - 1);
 
-            let kill_evt = self
-                .common
-                .kill_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone kill_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
-            let pause_evt = self
-                .common
-                .pause_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone pause_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
-
+            let (kill_evt, pause_evt) = self.common.dup_eventfds();
             let mut ctrl_handler = NetCtrlEpollHandler {
                 mem: mem.clone(),
                 kill_evt,
                 pause_evt,
-                ctrl_q: NetCtrl::new(cvq_queue, cvq_queue_evt, Some(self.taps.clone())),
+                ctrl_q: CtrlQueue::new(self.taps.clone()),
+                queue: cvq_queue,
+                queue_evt: cvq_queue_evt,
             };
 
             let paused = self.common.paused.clone();
@@ -562,26 +597,7 @@ impl VirtioDevice for Net {
 
             let queue_evt_pair = vec![queue_evts.remove(0), queue_evts.remove(0)];
 
-            let kill_evt = self
-                .common
-                .kill_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone kill_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
-            let pause_evt = self
-                .common
-                .pause_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone pause_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
+            let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
             let rx_rate_limiter: Option<rate_limiter::RateLimiter> = self
                 .rate_limiter_config

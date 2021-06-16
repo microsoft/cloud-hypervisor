@@ -8,14 +8,78 @@ export BUILD_TARGET=${BUILD_TARGET-aarch64-unknown-linux-gnu}
 
 WORKLOADS_DIR="$HOME/workloads"
 WORKLOADS_LOCK="$WORKLOADS_DIR/integration_test.lock"
+EDK2_BUILD_DIR="$WORKLOADS_DIR/edk2_build"
 
 mkdir -p "$WORKLOADS_DIR"
+
+build_edk2() {
+    EDK2_REPO="https://github.com/cloud-hypervisor/edk2.git"
+    EDK2_DIR="edk2"
+    EDK2_BRANCH="ch-aarch64"
+    EDK2_PLAT_REPO="https://github.com/tianocore/edk2-platforms.git"
+    EDK2_PLAT_DIR="edk2-platforms"
+    ACPICA_REPO="https://github.com/acpica/acpica.git"
+    ACPICA_DIR="acpica"
+
+    export WORKSPACE="$EDK2_BUILD_DIR"
+    export PACKAGES_PATH="$WORKSPACE/$EDK2_DIR:$WORKSPACE/$EDK2_PLAT_DIR"
+    export IASL_PREFIX="$WORKSPACE/acpica/generate/unix/bin/"
+
+    cd "$WORKLOADS_DIR"
+    if [ ! -d "$WORKSPACE" ]; then
+        mkdir -p "$WORKSPACE"
+    fi
+
+    pushd "$WORKSPACE"
+
+    # Check whether the local HEAD commit same as the remote HEAD or not. Remove the folder if they are different.
+    if [ -d "$EDK2_DIR" ]; then
+        pushd $EDK2_DIR
+        git fetch
+        EDK2_LOCAL_HEAD=$(git rev-parse HEAD)
+        EDK2_REMOTE_HEAD=$(git rev-parse remotes/origin/$EDK2_BRANCH)
+        popd
+        if [ "$EDK2_LOCAL_HEAD" != "$EDK2_REMOTE_HEAD" ]; then
+            # If EDK2 code is out of date, remove and rebuild all
+            rm -rf "$EDK2_DIR"
+            rm -rf "$EDK2_PLAT_DIR"
+            rm -rf "$ACPICA_DIR"
+        fi
+    fi
+
+    if [ ! -d "$EDK2_DIR" ]; then
+        time git clone --depth 1 "$EDK2_REPO" -b "$EDK2_BRANCH" "$EDK2_DIR"
+        pushd $EDK2_DIR
+        git submodule update --init
+        popd
+    fi
+
+    if [ ! -d "$EDK2_PLAT_DIR" ]; then
+        time git clone --depth 1 "$EDK2_PLAT_REPO" -b master "$EDK2_PLAT_DIR"
+    fi
+
+    if [ ! -d "$ACPICA_DIR" ]; then
+        time git clone --depth 1 "$ACPICA_REPO" -b master "$ACPICA_DIR"
+    fi
+
+    make -C "$ACPICA_DIR"/
+
+    source edk2/edksetup.sh
+    make -C edk2/BaseTools
+
+    build -a AARCH64 -t GCC5 -p ArmVirtPkg/ArmVirtCloudHv.dsc -b RELEASE
+    cp Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd "$WORKLOADS_DIR"
+
+    echo "Info: build UEFI successfully"
+
+    popd
+}
 
 update_workloads() {
     cp scripts/sha1sums-aarch64 $WORKLOADS_DIR
 
     BIONIC_OS_IMAGE_DOWNLOAD_NAME="bionic-server-cloudimg-arm64.img"
-    BIONIC_OS_IMAGE_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$BIONIC_OS_IMAGE_DOWNLOAD_NAME"
+    BIONIC_OS_IMAGE_DOWNLOAD_URL="https://cloud-hypervisor.azureedge.net/$BIONIC_OS_IMAGE_DOWNLOAD_NAME"
     BIONIC_OS_DOWNLOAD_IMAGE="$WORKLOADS_DIR/$BIONIC_OS_IMAGE_DOWNLOAD_NAME"
     if [ ! -f "$BIONIC_OS_DOWNLOAD_IMAGE" ]; then
         pushd $WORKLOADS_DIR
@@ -42,7 +106,7 @@ update_workloads() {
     fi
 
     FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-arm64-custom.raw"
-    FOCAL_OS_RAW_IMAGE_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_RAW_IMAGE_NAME"
+    FOCAL_OS_RAW_IMAGE_DOWNLOAD_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_RAW_IMAGE_NAME"
     FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
     if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
         pushd $WORKLOADS_DIR
@@ -53,7 +117,7 @@ update_workloads() {
     # Convert the raw image to qcow2 image to remove compressed blocks from the disk. Therefore letting the
     # qcow2 format image can be directly used in the integration test.
     FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME="focal-server-cloudimg-arm64-custom.qcow2"
-    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL="https://cloudhypervisorstorage.blob.core.windows.net/images/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
+    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     if [ ! -f "$FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE" ]; then
         pushd $WORKLOADS_DIR
@@ -176,6 +240,9 @@ update_workloads() {
         echo "foo" > "$SHARED_DIR/file1"
         echo "bar" > "$SHARED_DIR/file3" || exit 1
     fi
+
+    # Check and build EDK2 binary
+    build_edk2
 }
 
 process_common_args "$@"
@@ -186,8 +253,10 @@ if [[ "$hypervisor" = "mshv" ]]; then
     exit 1
 fi
 
-features_build="--no-default-features --features $hypervisor "
-features_test="--no-default-features --features integration_tests,$hypervisor"
+features_build_fdt="--no-default-features --features $hypervisor"
+features_build_acpi="--no-default-features --features $hypervisor,acpi"
+features_test_fdt="--no-default-features --features integration_tests,$hypervisor"
+features_test_acpi="--no-default-features --features integration_tests,$hypervisor,acpi"
 
 # lock the workloads folder to avoid parallel updating by different containers
 (
@@ -211,7 +280,10 @@ TARGET_CC="musl-gcc"
 CFLAGS="-I /usr/include/aarch64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --all --release  $features_build --target $BUILD_TARGET
+export RUST_BACKTRACE=1
+
+# Test without ACPI
+cargo build --all --release $features_build_fdt --target $BUILD_TARGET
 strip target/$BUILD_TARGET/release/cloud-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
@@ -222,8 +294,27 @@ sudo bash -c "echo 1000000 > /sys/kernel/mm/ksm/pages_to_scan"
 sudo bash -c "echo 10 > /sys/kernel/mm/ksm/sleep_millisecs"
 sudo bash -c "echo 1 > /sys/kernel/mm/ksm/run"
 
-export RUST_BACKTRACE=1
-time cargo test $features_test "tests::parallel::$test_filter"
+# Setup ovs-dpdk
+echo 2048 | sudo tee /proc/sys/vm/nr_hugepages
+service openvswitch-switch start
+ovs-vsctl init
+ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+service openvswitch-switch restart
+
+time cargo test $features_test_fdt "tests::parallel::$test_filter"
 RES=$?
+echo "Integration test on FDT finished with result $RES."
+
+if [ $RES -eq 0 ]; then
+    # Test with EDK2 + ACPI
+    cargo build --all --release $features_build_acpi --target $BUILD_TARGET
+    strip target/$BUILD_TARGET/release/cloud-hypervisor
+    strip target/$BUILD_TARGET/release/vhost_user_net
+    strip target/$BUILD_TARGET/release/ch-remote
+
+    time cargo test $features_test_acpi "tests::parallel::test_edk2_acpi_launch"
+    RES=$?
+    echo "Integration test on UEFI & ACPI finished with result $RES."
+fi
 
 exit $RES

@@ -23,7 +23,6 @@ mod tests {
     use std::io;
     use std::io::BufRead;
     use std::io::Read;
-    #[cfg(target_arch = "x86_64")]
     use std::io::Write;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
@@ -54,7 +53,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-amd64.raw";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210407-0.raw";
+    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210609-0.raw";
     #[cfg(target_arch = "x86_64")]
     const FOCAL_SGX_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-sgx.raw";
     #[cfg(target_arch = "x86_64")]
@@ -66,11 +65,11 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-arm64-custom.qcow2";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210407-0.qcow2";
+    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210609-0.qcow2";
     #[cfg(target_arch = "aarch64")]
     const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-arm64-custom.vhd";
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210407-0.vhd";
+    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210609-0.vhd";
     #[cfg(target_arch = "x86_64")]
     const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
     #[cfg(target_arch = "x86_64")]
@@ -89,9 +88,9 @@ mod tests {
     const ENABLE_SECCOMP: &str = "false";
 
     #[cfg(target_arch = "x86_64")]
-    const GREP_SERIAL_IRQ_CMD: &str = "cat /proc/interrupts | grep 'IO-APIC' | grep -c 'ttyS0'";
+    const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'IO-APIC.*ttyS0' /proc/interrupts || true";
     #[cfg(target_arch = "aarch64")]
-    const GREP_SERIAL_IRQ_CMD: &str = "cat /proc/interrupts | grep 'GICv3' | grep -c 'uart-pl011'";
+    const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'GICv3.*uart-pl011' /proc/interrupts || true";
 
     const PIPE_SIZE: i32 = 32 << 20;
 
@@ -459,7 +458,6 @@ mod tests {
         }
 
         fn api_create_body(&self, cpu_count: u8) -> String {
-
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
@@ -542,18 +540,16 @@ mod tests {
                 .map_err(Error::WaitForBoot)
         }
 
-        fn check_numa_node_cpus(&self, node_id: usize, cpus: Vec<usize>) -> Result<bool, Error> {
+        fn check_numa_node_cpus(&self, node_id: usize, cpus: Vec<usize>) -> Result<(), Error> {
             for cpu in cpus.iter() {
                 let cmd = format!(
-                    "[ -d \"/sys/devices/system/node/node{}/cpu{}\" ]  && echo ok",
+                    "[ -d \"/sys/devices/system/node/node{}/cpu{}\" ]",
                     node_id, cpu
                 );
-                if self.ssh_command(cmd.as_str())?.trim() != "ok" {
-                    return Ok(false);
-                }
+                self.ssh_command(cmd.as_str())?;
             }
 
-            Ok(true)
+            Ok(())
         }
 
         fn check_numa_node_distances(
@@ -569,39 +565,21 @@ mod tests {
             }
         }
 
-        fn check_sgx_support(&self) -> Result<bool, Error> {
-            if self
-                .ssh_command(
-                    "cpuid -l 0x7 -s 0 | tr -s [:space:] | grep -q 'SGX: \
-                    Software Guard Extensions supported = true' && echo ok",
-                )?
-                .trim()
-                != "ok"
-            {
-                return Ok(false);
-            }
-            if self
-                .ssh_command(
-                    "cpuid -l 0x7 -s 0 | tr -s [:space:] | grep -q 'SGX_LC: \
-                    SGX launch config supported = true' && echo ok",
-                )?
-                .trim()
-                != "ok"
-            {
-                return Ok(false);
-            }
-            if self
-                .ssh_command(
-                    "cpuid -l 0x12 -s 0 | tr -s [:space:] | grep -q 'SGX1 \
-                    supported = true' && echo ok",
-                )?
-                .trim()
-                != "ok"
-            {
-                return Ok(false);
-            }
+        fn check_sgx_support(&self) -> Result<(), Error> {
+            self.ssh_command(
+                "cpuid -l 0x7 -s 0 | tr -s [:space:] | grep -q 'SGX: \
+                    Software Guard Extensions supported = true'",
+            )?;
+            self.ssh_command(
+                "cpuid -l 0x7 -s 0 | tr -s [:space:] | grep -q 'SGX_LC: \
+                    SGX launch config supported = true'",
+            )?;
+            self.ssh_command(
+                "cpuid -l 0x12 -s 0 | tr -s [:space:] | grep -q 'SGX1 \
+                    supported = true'",
+            )?;
 
-            Ok(true)
+            Ok(())
         }
 
         fn get_entropy(&self) -> Result<u32, Error> {
@@ -663,7 +641,7 @@ mod tests {
         ) -> Result<bool, Error> {
             // SHM region is called different things depending on kernel
             let shm_region = self
-                .ssh_command("sudo grep 'virtio[0-9]\\|virtio-pci-shm' /proc/iomem")?
+                .ssh_command("sudo grep 'virtio[0-9]\\|virtio-pci-shm' /proc/iomem || true")?
                 .trim()
                 .to_string();
 
@@ -712,17 +690,11 @@ mod tests {
             thread::sleep(std::time::Duration::new(10, 0));
 
             // Write something to vsock from the host
-            Command::new("bash")
-                .arg("-c")
-                .arg(
-                    format!(
-                        "echo -e \"CONNECT 16\\nHelloWorld!\" | socat - UNIX-CONNECT:{}",
-                        socket
-                    )
-                    .as_str(),
-                )
-                .output()
-                .unwrap();
+            assert!(exec_host_command_status(&format!(
+                "echo -e \"CONNECT 16\\nHelloWorld!\" | socat - UNIX-CONNECT:{}",
+                socket
+            ))
+            .success());
 
             // Wait for the thread to terminate.
             listen_socat.join().unwrap();
@@ -745,12 +717,7 @@ mod tests {
             assert!(device_query_result.contains("Result = PASS"));
 
             // Run NVIDIA DCGM Diagnostics to validate the device is functional
-            assert_eq!(
-                self.ssh_command("sudo nv-hostengine && echo ok")
-                    .unwrap()
-                    .trim(),
-                "ok"
-            );
+            self.ssh_command("sudo nv-hostengine").unwrap();
 
             assert!(self
                 .ssh_command("sudo dcgmi discovery -l")
@@ -979,9 +946,6 @@ mod tests {
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
-
         let kernel_path = direct_kernel_boot_path();
 
         let host_mac = if generate_host_mac {
@@ -1046,20 +1010,14 @@ mod tests {
             guest.wait_vm_boot(None).unwrap();
 
             if let Some(tap_name) = tap {
-                let tap_count = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(format!("ip link | grep -c {}", tap_name))
-                    .output()
-                    .expect("Expected checking of tap count to succeed");
+                let tap_count =
+                    exec_host_command_output(&format!("ip link | grep -c {}", tap_name));
                 assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
             }
 
             if let Some(host_mac) = tap {
-                let mac_count = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(format!("ip link | grep -c {}", host_mac))
-                    .output()
-                    .expect("Expected checking of host mac to succeed");
+                let mac_count =
+                    exec_host_command_output(&format!("ip link | grep -c {}", host_mac));
                 assert_eq!(String::from_utf8_lossy(&mac_count.stdout).trim(), "1");
             }
 
@@ -1142,9 +1100,6 @@ mod tests {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
-
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
 
         let kernel_path = direct_kernel_boot_path();
 
@@ -1293,9 +1248,6 @@ mod tests {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
-
         let kernel_path = direct_kernel_boot_path();
 
         let disk_path = guest.disk_config.disk(DiskType::OperatingSystem).unwrap();
@@ -1430,11 +1382,10 @@ mod tests {
             // Mount shared directory through virtio_fs filesystem
             let mount_cmd = format!(
                 "mkdir -p mount_dir && \
-                 sudo mount -t virtiofs {} myfs mount_dir/ && \
-                 echo ok",
+                 sudo mount -t virtiofs {} myfs mount_dir/",
                 dax_mount_param
             );
-            assert_eq!(guest.ssh_command(&mount_cmd).unwrap().trim(), "ok");
+            guest.ssh_command(&mount_cmd).unwrap();
 
             assert!(guest
                 .valid_virtio_fs_cache_size(dax, cache_size)
@@ -1446,10 +1397,10 @@ mod tests {
                 "foo"
             );
             // Check file2 does not exist
-            assert_ne!(
-                guest.ssh_command("ls mount_dir/file2").unwrap().trim(),
-                "mount_dir/file2"
-            );
+            guest
+                .ssh_command("[ ! -f 'mount_dir/file2' ] || true")
+                .unwrap();
+
             // Check file3 exists and its content is "bar"
             assert_eq!(
                 guest.ssh_command("cat mount_dir/file3").unwrap().trim(),
@@ -1478,13 +1429,7 @@ mod tests {
 
             if hotplug {
                 // Remove from VM
-                assert_eq!(
-                    guest
-                        .ssh_command("sudo umount mount_dir && echo ok")
-                        .unwrap()
-                        .trim(),
-                    "ok"
-                );
+                guest.ssh_command("sudo umount mount_dir").unwrap();
                 assert!(remote_command(&api_socket, "remove-device", Some("myfs0")));
             }
         });
@@ -1514,11 +1459,10 @@ mod tests {
                 // Mount shared directory through virtio_fs filesystem
                 let mount_cmd = format!(
                     "mkdir -p mount_dir && \
-                     sudo mount -t virtiofs {} myfs mount_dir/ && \
-                     echo ok",
+                     sudo mount -t virtiofs {} myfs mount_dir/",
                     dax_mount_param
                 );
-                assert_eq!(guest.ssh_command(&mount_cmd).unwrap().trim(), "ok");
+                guest.ssh_command(&mount_cmd).unwrap();
                 // Check file1 exists and its content is "foo"
                 assert_eq!(
                     guest.ssh_command("cat mount_dir/file1").unwrap().trim(),
@@ -1548,9 +1492,6 @@ mod tests {
     fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
 
         let kernel_path = direct_kernel_boot_path();
 
@@ -1609,7 +1550,10 @@ mod tests {
             guest.reboot_linux(0, None);
             assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
             assert_eq!(
-                guest.ssh_command("sudo cat /mnt/test").unwrap().trim(),
+                guest
+                    .ssh_command("sudo cat /mnt/test || true")
+                    .unwrap()
+                    .trim(),
                 if discard_writes { "" } else { "test123" }
             );
         });
@@ -1627,9 +1571,6 @@ mod tests {
     fn _test_virtio_vsock(hotplug: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
 
         let kernel_path = direct_kernel_boot_path();
 
@@ -1914,114 +1855,50 @@ mod tests {
     // We reserve a different IP class for it: 172.18.0.0/24.
     fn setup_vfio_network_interfaces() {
         // 'vfio-br0'
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link add name vfio-br0 type bridge")
-            .output()
-            .expect("Failed to create 'vfio-br0'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-br0 up")
-            .output()
-            .expect("Failed to create 'vfio-br0'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip addr add 172.18.0.1/24 dev vfio-br0")
-            .output()
-            .expect("Failed to create 'vfio-br0'");
+        assert!(exec_host_command_status("sudo ip link add name vfio-br0 type bridge").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-br0 up").success());
+        assert!(exec_host_command_status("sudo ip addr add 172.18.0.1/24 dev vfio-br0").success());
         // 'vfio-tap0'
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip tuntap add vfio-tap0 mode tap")
-            .output()
-            .expect("Failed to create 'vfio-tap0'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap0 master vfio-br0")
-            .output()
-            .expect("Failed to create 'vfio-tap0'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap0 up")
-            .output()
-            .expect("Failed to create 'vfio-tap0'");
+        assert!(exec_host_command_status("sudo ip tuntap add vfio-tap0 mode tap").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap0 master vfio-br0").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap0 up").success());
         // 'vfio-tap1'
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip tuntap add vfio-tap1 mode tap")
-            .output()
-            .expect("Failed to create 'vfio-tap1'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap1 master vfio-br0")
-            .output()
-            .expect("Failed to create 'vfio-tap1'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap1 up")
-            .output()
-            .expect("Failed to create 'vfio-tap1'");
+        assert!(exec_host_command_status("sudo ip tuntap add vfio-tap1 mode tap").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap1 master vfio-br0").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap1 up").success());
         // 'vfio-tap2'
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip tuntap add vfio-tap2 mode tap")
-            .output()
-            .expect("Failed to create 'vfio-tap2'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap2 master vfio-br0")
-            .output()
-            .expect("Failed to create 'vfio-tap2'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap2 up")
-            .output()
-            .expect("Failed to create 'vfio-tap2'");
+        assert!(exec_host_command_status("sudo ip tuntap add vfio-tap2 mode tap").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap2 master vfio-br0").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap2 up").success());
         // 'vfio-tap3'
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip tuntap add vfio-tap3 mode tap")
-            .output()
-            .expect("Failed to create 'vfio-tap3'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap3 master vfio-br0")
-            .output()
-            .expect("Failed to create 'vfio-tap3'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link set vfio-tap3 up")
-            .output()
-            .expect("Failed to create 'vfio-tap3'");
+        assert!(exec_host_command_status("sudo ip tuntap add vfio-tap3 mode tap").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap3 master vfio-br0").success());
+        assert!(exec_host_command_status("sudo ip link set vfio-tap3 up").success());
     }
 
     // Tear VFIO test network down
     fn cleanup_vfio_network_interfaces() {
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link del vfio-br0")
-            .output()
-            .expect("Failed to delete 'vfio-br0'");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link del vfio-tap0")
-            .output()
-            .expect("Failed to delete ''");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link del vfio-tap1")
-            .output()
-            .expect("Failed to delete ''");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link del vfio-tap2")
-            .output()
-            .expect("Failed to delete ''");
-        Command::new("bash")
-            .arg("-c")
-            .arg("sudo ip link del vfio-tap3")
-            .output()
-            .expect("Failed to delete ''");
+        assert!(exec_host_command_status("sudo ip link del vfio-br0").success());
+        assert!(exec_host_command_status("sudo ip link del vfio-tap0").success());
+        assert!(exec_host_command_status("sudo ip link del vfio-tap1").success());
+        assert!(exec_host_command_status("sudo ip link del vfio-tap2").success());
+        assert!(exec_host_command_status("sudo ip link del vfio-tap3").success());
+    }
+
+    fn balloon_size(api_socket: &str) -> u64 {
+        let (cmd_success, cmd_output) = remote_command_w_output(&api_socket, "info", None);
+        assert!(cmd_success);
+
+        let info: serde_json::Value = serde_json::from_slice(&cmd_output).unwrap_or_default();
+        let total_mem = &info["config"]["memory"]["size"]
+            .to_string()
+            .parse::<u64>()
+            .unwrap();
+        let actual_mem = &info["memory_actual_size"]
+            .to_string()
+            .parse::<u64>()
+            .unwrap();
+        total_mem - actual_mem
     }
 
     mod parallel {
@@ -2065,6 +1942,45 @@ mod tests {
 
                     handle_child_output(r, &output);
                 });
+        }
+
+        #[test]
+        #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+        fn test_edk2_acpi_launch() {
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let mut workload_path = dirs::home_dir().unwrap();
+            workload_path.push("workloads");
+            let mut edk2_path = workload_path;
+            edk2_path.push("CLOUDHV_EFI.fd");
+
+            vec![Box::new(focal)].drain(..).for_each(|disk_config| {
+                let guest = Guest::new(disk_config);
+
+                let mut child = GuestCommand::new(&guest)
+                    .args(&["--cpus", "boot=1"])
+                    .args(&["--memory", "size=512M"])
+                    .args(&["--kernel", edk2_path.to_str().unwrap()])
+                    .default_disks()
+                    .default_net()
+                    .args(&["--serial", "tty", "--console", "off"])
+                    .capture_output()
+                    .spawn()
+                    .unwrap();
+
+                let r = std::panic::catch_unwind(|| {
+                    guest.wait_vm_boot(Some(120)).unwrap();
+
+                    assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
+                    assert!(guest.get_total_memory().unwrap_or_default() > 400_000);
+                    assert!(guest.get_entropy().unwrap_or_default() >= 900);
+                    assert_eq!(guest.get_pci_bridge_class().unwrap_or_default(), "0x060000");
+                });
+
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+
+                handle_child_output(r, &output);
+            });
         }
 
         #[test]
@@ -2198,6 +2114,17 @@ mod tests {
             guest.wait_vm_boot(None).unwrap();
 
             let r = std::panic::catch_unwind(|| {
+                assert_eq!(guest.get_cpu_count().unwrap_or_default(), 48);
+                assert_eq!(
+                    guest
+                        .ssh_command(
+                            "lscpu | grep \"On-line\" | cut -f 2 -d \":\" | sed \"s# *##\""
+                        )
+                        .unwrap()
+                        .trim(),
+                    "0-47"
+                );
+
                 assert!(guest.get_total_memory().unwrap_or_default() > 5_000_000);
             });
 
@@ -2273,9 +2200,6 @@ mod tests {
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
@@ -2346,9 +2270,6 @@ mod tests {
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
@@ -2386,9 +2307,9 @@ mod tests {
                 assert!(guest.get_numa_node_memory(2).unwrap_or_default() > 2_880_000);
 
                 // Check each NUMA node has been assigned the right CPUs set.
-                assert!(guest.check_numa_node_cpus(0, vec![0, 1, 2]).unwrap());
-                assert!(guest.check_numa_node_cpus(1, vec![3, 4]).unwrap());
-                assert!(guest.check_numa_node_cpus(2, vec![5]).unwrap());
+                guest.check_numa_node_cpus(0, vec![0, 1, 2]).unwrap();
+                guest.check_numa_node_cpus(1, vec![3, 4]).unwrap();
+                guest.check_numa_node_cpus(2, vec![5]).unwrap();
 
                 // Check each NUMA node has been assigned the right distances.
                 assert!(guest.check_numa_node_distances(0, "10 15 20").unwrap());
@@ -2459,12 +2380,9 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
-        fn test_vmlinux_boot() {
+        fn test_direct_kernel_boot() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -2487,9 +2405,14 @@ mod tests {
                 assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
                 assert!(guest.get_entropy().unwrap_or_default() >= 900);
 
+                let grep_cmd = if cfg!(target_arch = "x86_64") {
+                    "grep -c PCI-MSI /proc/interrupts"
+                } else {
+                    "grep -c ITS-MSI /proc/interrupts"
+                };
                 assert_eq!(
                     guest
-                        .ssh_command("grep -c PCI-MSI /proc/interrupts")
+                        .ssh_command(grep_cmd)
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -2502,49 +2425,6 @@ mod tests {
             let output = child.wait_with_output().unwrap();
 
             handle_child_output(r, &output);
-        }
-
-        #[test]
-        #[cfg(target_arch = "aarch64")]
-        fn test_aarch64_pe_boot() {
-            let bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
-            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-
-            vec![Box::new(bionic), Box::new(focal)]
-                .drain(..)
-                .for_each(|disk_config| {
-                    let guest = Guest::new(disk_config);
-
-                    let mut workload_path = dirs::home_dir().unwrap();
-                    workload_path.push("workloads");
-
-                    let kernel_path = direct_kernel_boot_path();
-
-                    let mut child = GuestCommand::new(&guest)
-                        .args(&["--cpus", "boot=1"])
-                        .args(&["--memory", "size=512M"])
-                        .args(&["--kernel", kernel_path.to_str().unwrap()])
-                        .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                        .default_disks()
-                        .default_net()
-                        .args(&["--seccomp", "false"])
-                        .capture_output()
-                        .spawn()
-                        .unwrap();
-
-                    let r = std::panic::catch_unwind(|| {
-                        guest.wait_vm_boot(Some(120)).unwrap();
-
-                        assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-                        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
-                        assert!(guest.get_entropy().unwrap_or_default() >= 900);
-                    });
-
-                    let _ = child.kill();
-                    let output = child.wait_with_output().unwrap();
-
-                    handle_child_output(r, &output);
-                });
         }
 
         fn _test_virtio_block(image_name: &str, disable_io_uring: bool) {
@@ -2719,7 +2599,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_vhost_user_net_host_mac() {
             test_vhost_user_net(None, 2, &prepare_vhost_user_net_daemon, true, false)
         }
@@ -2730,25 +2609,21 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_vhost_user_blk_default() {
             test_vhost_user_blk(2, false, false, Some(&prepare_vubd))
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_vhost_user_blk_readonly() {
             test_vhost_user_blk(1, true, false, Some(&prepare_vubd))
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_vhost_user_blk_direct() {
             test_vhost_user_blk(1, false, true, Some(&prepare_vubd))
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_boot_from_vhost_user_blk_default() {
             test_boot_from_vhost_user_blk(1, false, false, Some(&prepare_vubd))
         }
@@ -2777,7 +2652,7 @@ mod tests {
 
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'timer'")
+                        .ssh_command("grep -c IO-APIC.*timer /proc/interrupts || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -2786,7 +2661,7 @@ mod tests {
                 );
                 assert_eq!(
                     guest
-                        .ssh_command("cat /proc/interrupts | grep 'IO-APIC' | grep -c 'cascade'")
+                        .ssh_command("grep -c IO-APIC.*cascade /proc/interrupts || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -2890,8 +2765,6 @@ mod tests {
         fn test_boot_from_virtio_pmem() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -2949,9 +2822,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
@@ -2974,11 +2844,7 @@ mod tests {
             let r = std::panic::catch_unwind(|| {
                 guest.wait_vm_boot(None).unwrap();
 
-                let tap_count = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg("ip link | grep -c mytap1")
-                    .output()
-                    .expect("Expected checking of tap count to succeed");
+                let tap_count = exec_host_command_output("ip link | grep -c mytap1");
                 assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
 
                 // 3 network interfaces + default localhost ==> 4 interfaces
@@ -3097,9 +2963,6 @@ mod tests {
         fn test_serial_tty() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -3227,13 +3090,17 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         fn test_pty_interaction() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
-            let cmdline = DIRECT_KERNEL_BOOT_CMDLINE.to_owned() + " console=ttyS0";
+            let serial_option = if cfg!(target_arch = "x86_64") {
+                " console=ttyS0"
+            } else {
+                " console=ttyAMA0"
+            };
+            let cmdline = DIRECT_KERNEL_BOOT_CMDLINE.to_owned() + serial_option;
 
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
@@ -3317,9 +3184,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
@@ -3362,7 +3226,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         fn test_console_file() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3658,12 +3521,9 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
-        fn test_vmlinux_boot_noacpi() {
+        fn test_direct_kernel_boot_noacpi() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -3760,8 +3620,6 @@ mod tests {
         fn test_api_create_boot() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -3805,7 +3663,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
@@ -3814,8 +3671,6 @@ mod tests {
         fn test_api_pause_resume() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -3897,8 +3752,6 @@ mod tests {
         fn test_virtio_iommu() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4079,8 +3932,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4165,8 +4016,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4250,8 +4099,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4328,8 +4175,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4384,8 +4229,6 @@ mod tests {
         fn test_memory_overhead() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4428,9 +4271,6 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
@@ -4454,7 +4294,7 @@ mod tests {
                 // Check /dev/vdc is not there
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep vdc | grep -c 16M")
+                        .ssh_command("lsblk | grep -c vdc.*16M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4488,9 +4328,9 @@ mod tests {
                     1
                 );
                 // And check the block device can be read.
-                assert!(guest
-                    .ssh_command("dd if=/dev/vdc of=/dev/null bs=1M iflag=direct count=16")
-                    .is_ok());
+                guest
+                    .ssh_command("sudo dd if=/dev/vdc of=/dev/null bs=1M iflag=direct count=16")
+                    .unwrap();
 
                 // Let's remove it the extra disk.
                 assert!(remote_command(&api_socket, "remove-device", Some("test0")));
@@ -4498,7 +4338,7 @@ mod tests {
                 // And check /dev/vdc is not there
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep vdc | grep -c 16M")
+                        .ssh_command("lsblk | grep -c vdc.*16M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4529,9 +4369,9 @@ mod tests {
                     1
                 );
                 // And check the block device can be read.
-                assert!(guest
-                    .ssh_command("dd if=/dev/vdc of=/dev/null bs=1M iflag=direct count=16")
-                    .is_ok());
+                guest
+                    .ssh_command("sudo dd if=/dev/vdc of=/dev/null bs=1M iflag=direct count=16")
+                    .unwrap();
 
                 // Reboot the VM.
                 guest.reboot_linux(0, None);
@@ -4554,7 +4394,7 @@ mod tests {
                 // Check device has gone away
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep vdc | grep -c 16M")
+                        .ssh_command("lsblk | grep -c vdc.*16M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4567,7 +4407,7 @@ mod tests {
                 // Check device still absent
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep vdc | grep -c 16M")
+                        .ssh_command("lsblk | grep -c vdc.*16M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4584,12 +4424,71 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        fn test_pmem_hotplug() {
+        #[cfg(not(feature = "mshv"))]
+        fn test_virtio_balloon() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
+            let kernel_path = direct_kernel_boot_path();
+
+            let api_socket = temp_api_path(&guest.tmp_dir);
+
+            //Let's start a 4G guest with balloon occupied 2G memory
+            let mut child = GuestCommand::new(&guest)
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=1"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--balloon", "size=2G,deflate_on_oom=on"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
+                .default_disks()
+                .default_net()
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                guest.wait_vm_boot(None).unwrap();
+
+                // Wait for balloon memory's initialization and check its size.
+                // The virtio-balloon driver might take a few seconds to report the
+                // balloon effective size back to the VMM.
+                thread::sleep(std::time::Duration::new(20, 0));
+
+                let orig_balloon = balloon_size(&api_socket);
+                println!("The original balloon memory size is {} bytes", orig_balloon);
+                assert!(orig_balloon == 2147483648);
+
+                // Two steps to verify if the 'deflate_on_oom' parameter works.
+                // 1st: run a command in guest to eat up memory heavily, which
+                // will consume much more memory than $(total_mem - balloon_size)
+                // to trigger an oom.
+                guest
+                    .ssh_command("sudo stress --vm 25 --vm-keep --vm-bytes 1G --timeout 20")
+                    .unwrap();
+
+                // 2nd: check balloon_mem's value to verify balloon has been automatically deflated
+                let deflated_balloon = balloon_size(&api_socket);
+                println!(
+                    "After deflating, balloon memory size is {} bytes",
+                    deflated_balloon
+                );
+                // Verify the balloon size deflated by 10% at least
+                assert!(deflated_balloon > 0 && deflated_balloon < 1932735283);
+            });
+
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn test_pmem_hotplug() {
+            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest = Guest::new(Box::new(focal));
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4614,7 +4513,7 @@ mod tests {
                 // Check /dev/pmem0 is not there
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep -c pmem0")
+                        .ssh_command("lsblk | grep -c pmem0 || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4667,7 +4566,7 @@ mod tests {
                 // Check device has gone away
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep pmem0 | grep -c 128M")
+                        .ssh_command("lsblk | grep -c pmem0.*128M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4680,7 +4579,7 @@ mod tests {
                 // Check still absent after reboot
                 assert_eq!(
                     guest
-                        .ssh_command("lsblk | grep pmem0 | grep -c 128M")
+                        .ssh_command("lsblk | grep -c pmem0.*128M || true")
                         .unwrap()
                         .trim()
                         .parse::<u32>()
@@ -4701,9 +4600,6 @@ mod tests {
         fn test_net_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
 
             let kernel_path = direct_kernel_boot_path();
 
@@ -4853,9 +4749,6 @@ mod tests {
         fn test_snapshot_restore() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-
             let kernel_path = direct_kernel_boot_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
@@ -4908,21 +4801,21 @@ mod tests {
                 // Check the guest RAM
                 assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
                 // Check block devices are readable
-                assert!(guest
-                    .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
-                    .is_ok());
-                assert!(guest
-                    .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
-                    .is_ok());
+                guest
+                    .ssh_command("sudo dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
+                    .unwrap();
+                guest
+                    .ssh_command("sudo dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
+                    .unwrap();
                 // Check if the rng device is readable
-                assert!(guest
-                    .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
-                    .is_ok());
+                guest
+                    .ssh_command("sudo head -c 1000 /dev/hwrng > /dev/null")
+                    .unwrap();
                 // Check vsock
                 guest.check_vsock(socket.as_str());
                 // Check if the console is usable
 
-                assert!(guest.ssh_command(&console_cmd).is_ok());
+                guest.ssh_command(&console_cmd).unwrap();
 
                 // We check that removing and adding back the virtio-net device
                 // does not break the snapshot/restore support for virtio-pci.
@@ -4994,17 +4887,17 @@ mod tests {
                 // Perform same checks to validate VM has been properly restored
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
                 assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
-                assert!(guest
-                    .ssh_command("dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
-                    .is_ok());
-                assert!(guest
-                    .ssh_command("dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
-                    .is_ok());
-                assert!(guest
-                    .ssh_command("head -c 1000 /dev/hwrng > /dev/null")
-                    .is_ok());
+                guest
+                    .ssh_command("sudo dd if=/dev/vda of=/dev/null bs=1M iflag=direct count=1024")
+                    .unwrap();
+                guest
+                    .ssh_command("sudo dd if=/dev/vdb of=/dev/null bs=1M iflag=direct count=8")
+                    .unwrap();
+                guest
+                    .ssh_command("sudo head -c 1000 /dev/hwrng > /dev/null")
+                    .unwrap();
                 guest.check_vsock(socket.as_str());
-                assert!(guest.ssh_command(&console_cmd).is_ok());
+                guest.ssh_command(&console_cmd).unwrap();
                 // Shutdown the target VM and check console output
             });
             let _ = child.kill();
@@ -5042,9 +4935,9 @@ mod tests {
                 guest.wait_vm_boot(None).unwrap();
 
                 let orig_counters = get_counters(&api_socket);
-                assert!(guest
+                guest
                     .ssh_command("dd if=/dev/zero of=test count=8 bs=1M")
-                    .is_ok());
+                    .unwrap();
 
                 let new_counters = get_counters(&api_socket);
 
@@ -5381,6 +5274,134 @@ mod tests {
 
             handle_child_output(r, &output);
         }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        fn test_ovs_dpdk() {
+            // Create OVS-DPDK bridge and ports
+            assert!(exec_host_command_status(
+                "ovs-vsctl add-br ovsbr0 -- set bridge ovsbr0 datapath_type=netdev",
+            )
+            .success());
+            assert!(exec_host_command_status("ovs-vsctl add-port ovsbr0 vhost-user1 -- set Interface vhost-user1 type=dpdkvhostuserclient options:vhost-server-path=/tmp/dpdkvhostclient1").success());
+            assert!(exec_host_command_status("ovs-vsctl add-port ovsbr0 vhost-user2 -- set Interface vhost-user2 type=dpdkvhostuserclient options:vhost-server-path=/tmp/dpdkvhostclient2").success());
+            assert!(exec_host_command_status("ip link set up dev ovsbr0").success());
+            assert!(exec_host_command_status("service openvswitch-switch restart").success());
+
+            let focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest1 = Guest::new(Box::new(focal1));
+            let mut child1 = GuestCommand::new(&guest1)
+                .args(&["--cpus", "boot=2"])
+                .args(&["--memory", "size=0,shared=on"])
+                .args(&["--memory-zone", "id=mem0,size=1G,shared=on,host_numa_node=0"])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .args(&["--seccomp", ENABLE_SECCOMP])
+                .default_disks()
+                .args(&["--net", guest1.default_net_string().as_str(), "vhost_user=true,socket=/tmp/dpdkvhostclient1,num_queues=2,queue_size=256,vhost_mode=server"])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            #[cfg(target_arch = "x86_64")]
+            let guest_net_iface = "ens5";
+            #[cfg(target_arch = "aarch64")]
+            let guest_net_iface = "enp0s5";
+
+            let r = std::panic::catch_unwind(|| {
+                guest1.wait_vm_boot(None).unwrap();
+
+                guest1
+                    .ssh_command(&format!(
+                        "sudo ip addr add 172.100.0.1/24 dev {}",
+                        guest_net_iface
+                    ))
+                    .unwrap();
+                guest1
+                    .ssh_command(&format!("sudo ip link set up dev {}", guest_net_iface))
+                    .unwrap();
+
+                let guest_ip = guest1.network.guest_ip.clone();
+                thread::spawn(move || {
+                    ssh_command_ip(
+                        "nc -l 12345",
+                        &guest_ip,
+                        DEFAULT_SSH_RETRIES,
+                        DEFAULT_SSH_TIMEOUT,
+                    )
+                    .unwrap();
+                });
+            });
+            if r.is_err() {
+                let _ = child1.kill();
+                let output = child1.wait_with_output().unwrap();
+                handle_child_output(r, &output);
+                panic!("Test should already be failed/panicked"); // To explicitly mark this block never return
+            }
+
+            let focal2 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            let guest2 = Guest::new(Box::new(focal2));
+            let mut child2 = GuestCommand::new(&guest2)
+                .args(&["--cpus", "boot=2"])
+                .args(&["--memory", "size=0,shared=on"])
+                .args(&["--memory-zone", "id=mem0,size=1G,shared=on,host_numa_node=0"])
+                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+                .default_disks()
+                .args(&["--net", guest2.default_net_string().as_str(), "vhost_user=true,socket=/tmp/dpdkvhostclient2,num_queues=2,queue_size=256,vhost_mode=server"])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let r = std::panic::catch_unwind(|| {
+                guest2.wait_vm_boot(None).unwrap();
+
+                guest2
+                    .ssh_command(&format!(
+                        "sudo ip addr add 172.100.0.2/24 dev {}",
+                        guest_net_iface
+                    ))
+                    .unwrap();
+                guest2
+                    .ssh_command(&format!("sudo ip link set up dev {}", guest_net_iface))
+                    .unwrap();
+
+                // Check the connection works properly between the two VMs
+                guest2.ssh_command("nc -vz 172.100.0.1 12345").unwrap();
+
+                // Remove one of the two ports from the OVS bridge
+                assert!(exec_host_command_status("ovs-vsctl del-port vhost-user1").success());
+
+                // Spawn a new netcat listener in the first VM
+                let guest_ip = guest1.network.guest_ip.clone();
+                thread::spawn(move || {
+                    ssh_command_ip(
+                        "nc -l 12345",
+                        &guest_ip,
+                        DEFAULT_SSH_RETRIES,
+                        DEFAULT_SSH_TIMEOUT,
+                    )
+                    .unwrap();
+                });
+
+                // Check the connection fails this time
+                assert!(guest2.ssh_command("nc -vz 172.100.0.1 12345").is_err());
+
+                // Add the OVS port back
+                assert!(exec_host_command_status("ovs-vsctl add-port ovsbr0 vhost-user1 -- set Interface vhost-user1 type=dpdkvhostuserclient options:vhost-server-path=/tmp/dpdkvhostclient1").success());
+
+                // And finally check the connection is functional again
+                guest2.ssh_command("nc -vz 172.100.0.1 12345").unwrap();
+            });
+
+            let _ = child1.kill();
+            let _ = child2.kill();
+
+            let output = child1.wait_with_output().unwrap();
+            child2.wait().unwrap();
+
+            handle_child_output(r, &output);
+        }
     }
     #[cfg(not(feature = "mshv"))]
     mod sequential {
@@ -5417,68 +5438,51 @@ mod tests {
                 &self.guest
             }
 
+            fn ssh_cmd(&self, cmd: &str) -> String {
+                ssh_command_ip_with_auth(
+                    cmd,
+                    &self.auth,
+                    &self.guest.network.guest_ip,
+                    DEFAULT_SSH_RETRIES,
+                    DEFAULT_SSH_TIMEOUT,
+                )
+                .unwrap()
+            }
+
             fn cpu_count(&self) -> u8 {
-                return ssh_command_ip_with_auth(
-                "powershell -Command \"(Get-CimInstance win32_computersystem).NumberOfLogicalProcessors\"",
-                &self.auth,
-                &self.guest.network.guest_ip,
-                DEFAULT_SSH_RETRIES,
-                DEFAULT_SSH_TIMEOUT,
-            )
-            .unwrap()
-            .trim()
-            .parse::<u8>()
-            .unwrap_or(0);
+                self.ssh_cmd("powershell -Command \"(Get-CimInstance win32_computersystem).NumberOfLogicalProcessors\"")
+                .trim()
+                .parse::<u8>()
+                .unwrap_or(0)
             }
 
             fn ram_size(&self) -> usize {
-                return ssh_command_ip_with_auth(
-                "powershell -Command \"(Get-CimInstance win32_computersystem).TotalPhysicalMemory\"",
-                &self.auth,
-                &self.guest.network.guest_ip,
-                DEFAULT_SSH_RETRIES,
-                DEFAULT_SSH_TIMEOUT,
-            )
-            .unwrap()
-            .trim()
-            .parse::<usize>()
-            .unwrap_or(0);
+                self.ssh_cmd("powershell -Command \"(Get-CimInstance win32_computersystem).TotalPhysicalMemory\"")
+                .trim()
+                .parse::<usize>()
+                .unwrap_or(0)
             }
 
             fn netdev_count(&self) -> u8 {
-                return ssh_command_ip_with_auth(
-                "powershell -Command \"netsh int ipv4 show interfaces | Select-String ethernet | Measure-Object -Line | Format-Table -HideTableHeaders\"",
-                &self.auth,
-                &self.guest.network.guest_ip,
-                DEFAULT_SSH_RETRIES,
-                DEFAULT_SSH_TIMEOUT,
-            )
-            .unwrap()
-            .trim()
-            .parse::<u8>()
-            .unwrap_or(0);
+                self.ssh_cmd("powershell -Command \"netsh int ipv4 show interfaces | Select-String ethernet | Measure-Object -Line | Format-Table -HideTableHeaders\"")
+                .trim()
+                .parse::<u8>()
+                .unwrap_or(0)
+            }
+
+            fn disk_count(&self) -> u8 {
+                self.ssh_cmd("powershell -Command \"Get-Disk | Measure-Object -Line | Format-Table -HideTableHeaders\"")
+                .trim()
+                .parse::<u8>()
+                .unwrap_or(0)
             }
 
             fn reboot(&self) {
-                ssh_command_ip_with_auth(
-                    "shutdown /r /t 0",
-                    &self.auth,
-                    &self.guest.network.guest_ip,
-                    DEFAULT_SSH_RETRIES,
-                    DEFAULT_SSH_TIMEOUT,
-                )
-                .unwrap();
+                let _ = self.ssh_cmd("shutdown /r /t 0");
             }
 
             fn shutdown(&self) {
-                ssh_command_ip_with_auth(
-                    "shutdown /s",
-                    &self.auth,
-                    &self.guest.network.guest_ip,
-                    DEFAULT_SSH_RETRIES,
-                    DEFAULT_SSH_TIMEOUT,
-                )
-                .unwrap();
+                let _ = self.ssh_cmd("shutdown /s /t 0");
             }
 
             fn run_dnsmasq(&self) -> std::process::Child {
@@ -5497,12 +5501,155 @@ mod tests {
                     .arg("--log-queries")
                     .arg(listen_address.as_str())
                     .arg("--except-interface=lo")
-                    .arg("--bind-interfaces")
+                    .arg("--bind-dynamic") // Allow listening to host_ip while the interface is not ready yet.
                     .arg("--conf-file=/dev/null")
                     .arg(dhcp_host.as_str())
                     .arg(dhcp_range.as_str())
                     .spawn()
                     .unwrap()
+            }
+
+            // XXX Follow up test involving multiple disks will require:
+            // - Make image size variable
+            // - Make image filename random
+            // - Cleanup image file after test
+            // - NTFS should be added for use along with FAT for better coverage, needs mkfs.ntfs in the container.
+            fn disk_new(&self) -> String {
+                let img = PathBuf::from(
+                    String::from_utf8_lossy(b"/tmp/test-fat-hotplug-0.raw").to_string(),
+                );
+                let _ = fs::remove_file(&img);
+
+                // Create an image file
+                let out = Command::new("qemu-img")
+                    .args(&["create", "-f", "raw", &img.to_str().unwrap(), "100m"])
+                    .output()
+                    .expect("qemu-img command failed")
+                    .stdout;
+                println!("{:?}", out);
+
+                // Associate image to a loop device
+                let out = Command::new("losetup")
+                    .args(&["--show", "-f", &img.to_str().unwrap()])
+                    .output()
+                    .expect("failed to create loop device")
+                    .stdout;
+                let _tmp = String::from_utf8_lossy(&out);
+                let loop_dev = _tmp.trim();
+                println!("{:?}", out);
+
+                // Create a partition table
+                // echo 'type=7' | sudo sfdisk "${LOOP}"
+                let mut child = Command::new("sfdisk")
+                    .args(&[loop_dev])
+                    .stdin(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let stdin = child.stdin.as_mut().expect("failed to open stdin");
+                let _ = stdin
+                    .write_all("type=7".as_bytes())
+                    .expect("failed to write stdin");
+                let out = child.wait_with_output().expect("sfdisk failed").stdout;
+                println!("{:?}", out);
+
+                // Disengage the loop device
+                let out = Command::new("losetup")
+                    .args(&["-d", &loop_dev])
+                    .output()
+                    .expect("loop device not found")
+                    .stdout;
+                println!("{:?}", out);
+
+                // Re-associate loop device pointing to the partition only
+                let out = Command::new("losetup")
+                    .args(&[
+                        "--show",
+                        "--offset",
+                        (512 * 2048).to_string().as_str(),
+                        "-f",
+                        &img.to_str().unwrap(),
+                    ])
+                    .output()
+                    .expect("failed to create loop device")
+                    .stdout;
+                let _tmp = String::from_utf8_lossy(&out);
+                let loop_dev = _tmp.trim();
+                println!("{:?}", out);
+
+                // Create msdos filesystem.
+                // XXX mkfs.ntfs is missing in the docker image and should be added
+                // For mkfs.ntfs also add -f.
+                let out = Command::new("mkfs.msdos")
+                    .args(&[&loop_dev])
+                    .output()
+                    .expect("mkfs.msdos failed")
+                    .stdout;
+                println!("{:?}", out);
+
+                // Disengage the loop device
+                let out = Command::new("losetup")
+                    .args(&["-d", &loop_dev])
+                    .output()
+                    .expect("loop device not found")
+                    .stdout;
+                println!("{:?}", out);
+
+                img.to_str().unwrap().to_string()
+            }
+
+            fn disks_set_rw(&self) {
+                let _ = self.ssh_cmd("powershell -Command \"Get-Disk | Where-Object IsOffline -eq $True | Set-Disk -IsReadOnly $False\"");
+            }
+
+            fn disks_online(&self) {
+                let _ = self.ssh_cmd("powershell -Command \"Get-Disk | Where-Object IsOffline -eq $True | Set-Disk -IsOffline $False\"");
+            }
+
+            fn disk_file_put(&self, fname: &str, data: &str) {
+                let _ = self.ssh_cmd(&format!(
+                    "powershell -Command \"'{}' | Set-Content -Path {}\"",
+                    data, fname
+                ));
+            }
+
+            fn disk_file_read(&self, fname: &str) -> String {
+                self.ssh_cmd(&format!(
+                    "powershell -Command \"Get-Content -Path {}\"",
+                    fname
+                ))
+            }
+
+            fn wait_for_boot(&self) -> bool {
+                let cmd = "dir /b c:\\ | find \"Windows\"";
+                let tmo_max = 180;
+                // The timeout increase by n*1+n*2+n*3+..., therefore the initial
+                // interval must be small.
+                let tmo_int = 2;
+                let out = ssh_command_ip_with_auth(
+                    cmd,
+                    &self.auth,
+                    &self.guest.network.guest_ip,
+                    {
+                        let mut ret = 1;
+                        let mut tmo_acc = 0;
+                        loop {
+                            tmo_acc += tmo_int * ret;
+                            if tmo_acc >= tmo_max {
+                                break;
+                            }
+                            ret += 1;
+                        }
+                        ret
+                    },
+                    tmo_int,
+                )
+                .unwrap();
+
+                if "Windows" == out.trim() {
+                    return true;
+                }
+
+                false
             }
         }
 
@@ -5530,6 +5677,20 @@ mod tests {
             n
         }
 
+        fn disk_ctrl_threads_count(pid: u32) -> u8 {
+            // ps -T -p 15782  | grep "_disk[0-9]*_q0" | wc -l
+            let out = Command::new("ps")
+                .args(&["-T", "-p", format!("{}", pid).as_str()])
+                .output()
+                .expect("ps command failed")
+                .stdout;
+            let mut n = 0;
+            String::from_utf8_lossy(&out)
+                .split_whitespace()
+                .for_each(|s| n += (s.starts_with("_disk") && s.ends_with("_q0")) as u8); // _disk0_q0, don't care about multiple queues as they're related to the same hdd
+            n
+        }
+
         #[test]
         fn test_windows_guest() {
             let windows_guest = WindowsGuest::new();
@@ -5544,6 +5705,7 @@ mod tests {
                 .args(&["--kernel", ovmf_path.to_str().unwrap()])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .default_disks()
                 .default_net()
                 .capture_output()
@@ -5557,14 +5719,12 @@ mod tests {
 
             assert!(pipesize >= PIPE_SIZE && pipesize1 >= PIPE_SIZE);
 
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
                 windows_guest.shutdown();
             });
 
@@ -5592,6 +5752,7 @@ mod tests {
                 .args(&["--kernel", ovmf_path.to_str().unwrap()])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--disk",
                     format!(
@@ -5624,14 +5785,12 @@ mod tests {
 
             assert!(pipesize >= PIPE_SIZE && pipesize1 >= PIPE_SIZE);
 
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
                 windows_guest.shutdown();
             });
 
@@ -5677,13 +5836,10 @@ mod tests {
 
             assert!(pipesize >= PIPE_SIZE && pipesize1 >= PIPE_SIZE);
 
-            // Wait to make sure Windows boots up
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
+
+            // Wait to make sure Windows boots up
+            assert!(windows_guest.wait_for_boot());
 
             let snapshot_dir = temp_snapshot_dir_path(&tmp_dir);
 
@@ -5759,15 +5915,12 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            // Wait to make sure Windows boots up
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
                 let vcpu_num = 2;
                 // Check the initial number of CPUs the guest sees
                 assert_eq!(windows_guest.cpu_count(), vcpu_num);
@@ -5836,15 +5989,12 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            // Wait to make sure Windows boots up
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
                 let ram_size = 2 * 1024 * 1024 * 1024;
                 // Check the initial number of RAM the guest sees
                 let current_ram_size = windows_guest.ram_size();
@@ -5903,7 +6053,7 @@ mod tests {
             let mut child = GuestCommand::new(windows_guest.guest())
                 .args(&["--api-socket", &api_socket])
                 .args(&["--cpus", "boot=2,kvm_hyperv=on"])
-                .args(&["--memory", "size=2G,hotplug_size=5G"])
+                .args(&["--memory", "size=4G"])
                 .args(&["--kernel", ovmf_path.to_str().unwrap()])
                 .args(&["--serial", "tty"])
                 .args(&["--console", "off"])
@@ -5913,15 +6063,12 @@ mod tests {
                 .spawn()
                 .unwrap();
 
-            // Wait to make sure Windows boots up
-            thread::sleep(std::time::Duration::new(60, 0));
-
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
-            // Give some time for the guest to reach dnsmasq and get
-            // assigned the right IP address.
-            thread::sleep(std::time::Duration::new(30, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
                 // Initially present network device
                 let netdev_num = 1;
                 assert_eq!(windows_guest.netdev_count(), netdev_num);
@@ -5949,6 +6096,100 @@ mod tests {
                 let netdev_num = 1;
                 assert_eq!(windows_guest.netdev_count(), netdev_num);
                 assert_eq!(netdev_ctrl_threads_count(child.id()), netdev_num);
+
+                windows_guest.shutdown();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(60));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            let _ = child_dnsmasq.kill();
+            let _ = child_dnsmasq.wait();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        fn test_windows_guest_disk_hotplug() {
+            let windows_guest = WindowsGuest::new();
+
+            let mut ovmf_path = dirs::home_dir().unwrap();
+            ovmf_path.push("workloads");
+            ovmf_path.push(OVMF_NAME);
+
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = GuestCommand::new(windows_guest.guest())
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .default_disks()
+                .default_net()
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let mut child_dnsmasq = windows_guest.run_dnsmasq();
+
+            let disk = windows_guest.disk_new();
+
+            let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
+                // Initially present disk device
+                let disk_num = 1;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                // Hotplug disk device
+                let (cmd_success, cmd_output) = remote_command_w_output(
+                    &api_socket,
+                    "add-disk",
+                    Some(format!("path={},readonly=off", disk).as_str()),
+                );
+                assert!(cmd_success);
+                assert!(String::from_utf8_lossy(&cmd_output).contains("\"id\":\"_disk2\""));
+                thread::sleep(std::time::Duration::new(5, 0));
+                // Online disk device
+                windows_guest.disks_set_rw();
+                windows_guest.disks_online();
+                // Verify the device is on the system
+                let disk_num = 2;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                let data = "hello";
+                let fname = "d:\\world";
+                windows_guest.disk_file_put(fname, data);
+
+                // Unmount disk device
+                let cmd_success = remote_command(&api_socket, "remove-device", Some("_disk2"));
+                assert!(cmd_success);
+                thread::sleep(std::time::Duration::new(5, 0));
+                // Verify the device has been removed
+                let disk_num = 1;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                // Remount and check the file exists with the expected contents
+                let (cmd_success, _cmd_output) = remote_command_w_output(
+                    &api_socket,
+                    "add-disk",
+                    Some(format!("path={},readonly=off", disk).as_str()),
+                );
+                assert!(cmd_success);
+                thread::sleep(std::time::Duration::new(5, 0));
+                let out = windows_guest.disk_file_read(fname);
+                assert_eq!(data, out.trim());
+
+                // Intentionally no unmount, it'll happen at shutdown.
 
                 windows_guest.shutdown();
             });
@@ -5995,7 +6236,7 @@ mod tests {
                 guest.wait_vm_boot(None).unwrap();
 
                 // Check if SGX is correctly detected in the guest.
-                assert!(guest.check_sgx_support().unwrap());
+                guest.check_sgx_support().unwrap();
 
                 // Validate the SGX EPC section is 64MiB.
                 assert_eq!(

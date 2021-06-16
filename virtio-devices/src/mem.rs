@@ -19,6 +19,7 @@ use super::{
     EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
@@ -35,7 +36,7 @@ use std::thread;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
-    GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
+    GuestMemoryError, GuestMemoryRegion,
 };
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
@@ -926,27 +927,7 @@ impl VirtioDevice for Mem {
         mut queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
-        let kill_evt = self
-            .common
-            .kill_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone kill_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
-        let pause_evt = self
-            .common
-            .pause_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone pause_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
-
+        let (kill_evt, pause_evt) = self.common.dup_eventfds();
         let config = self.config.lock().unwrap();
         let mut handler = MemEpollHandler {
             host_addr: self.host_addr,

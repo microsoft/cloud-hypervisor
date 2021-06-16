@@ -40,6 +40,7 @@ use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::{result, thread};
 use thiserror::Error;
+use vm_memory::bitmap::AtomicBitmap;
 use vm_migration::protocol::*;
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
@@ -57,6 +58,9 @@ pub mod vm;
 
 #[cfg(feature = "acpi")]
 mod acpi;
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
 
 /// Errors associated with VMM management
 #[derive(Debug, Error)]
@@ -340,7 +344,7 @@ impl Vmm {
     }
 
     fn vm_boot(&mut self) -> result::Result<(), VmError> {
-        // Create a new VM is we don't have one yet.
+        // Create a new VM if we don't have one yet.
         if self.vm.is_none() {
             let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
             let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
@@ -776,6 +780,10 @@ impl Vmm {
             MigratableError::MigrateReceive(anyhow!("Error deserialising snapshot: {}", e))
         })?;
 
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        vm.load_clock_from_snapshot(&snapshot)
+            .map_err(|e| MigratableError::MigrateReceive(anyhow!("Error resume clock: {:?}", e)))?;
+
         // Create VM
         vm.restore(snapshot).map_err(|e| {
             Response::error().write_to(socket).ok();
@@ -1090,6 +1098,7 @@ impl Vmm {
                 if let Some(dispatch_type) = self.epoll.dispatch_table[dispatch_idx] {
                     match dispatch_type {
                         EpollDispatch::Exit => {
+                            info!("VM exit event");
                             // Consume the event.
                             self.exit_evt.read().map_err(Error::EventFdRead)?;
                             self.vmm_shutdown().map_err(Error::VmmShutdown)?;
@@ -1097,6 +1106,7 @@ impl Vmm {
                             break 'outer;
                         }
                         EpollDispatch::Reset => {
+                            info!("VM reset event");
                             // Consume the event.
                             self.reset_evt.read().map_err(Error::EventFdRead)?;
                             self.vm_reboot().map_err(Error::VmReboot)?;
@@ -1129,6 +1139,7 @@ impl Vmm {
                             // Read from the API receiver channel
                             let api_request = api_receiver.recv().map_err(Error::ApiRequestRecv)?;
 
+                            info!("API request event: {:?}", api_request);
                             match api_request {
                                 ApiRequest::VmCreate(config, sender) => {
                                     // We only store the passed VM config.

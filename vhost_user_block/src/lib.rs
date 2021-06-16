@@ -30,11 +30,11 @@ use std::vec::Vec;
 use std::{convert, error, fmt, io};
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Listener;
-use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};
+use vhost_user_backend::{GuestMemoryMmap, VhostUserBackend, VhostUserDaemon, Vring};
 use virtio_bindings::bindings::virtio_blk::*;
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::ByteValued;
-use vm_memory::{Bytes, GuestMemoryMmap};
+use vm_memory::Bytes;
 use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
@@ -283,11 +283,14 @@ impl VhostUserBackend for VhostUserBlkBackend {
     }
 
     fn features(&self) -> u64 {
-        let mut avail_features = 1 << VIRTIO_BLK_F_MQ
+        let mut avail_features = 1 << VIRTIO_BLK_F_SEG_MAX
+            | 1 << VIRTIO_BLK_F_BLK_SIZE
+            | 1 << VIRTIO_BLK_F_FLUSH
+            | 1 << VIRTIO_BLK_F_TOPOLOGY
+            | 1 << VIRTIO_BLK_F_MQ
             | 1 << VIRTIO_BLK_F_CONFIG_WCE
             | 1 << VIRTIO_RING_F_EVENT_IDX
             | 1 << VIRTIO_F_VERSION_1
-            | 1 << VIRTIO_BLK_F_FLUSH
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
         if self.rdonly {

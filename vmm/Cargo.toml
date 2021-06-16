@@ -27,7 +27,7 @@ epoll = ">=4.0.1"
 event_monitor = { path = "../event_monitor" }
 hypervisor = { path = "../hypervisor" }
 lazy_static = "1.4.0"
-libc = "0.2.94"
+libc = "0.2.97"
 linux-loader = { version = "0.3.0", features = ["elf", "bzimage", "pe"] }
 log = "0.4.14"
 micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch = "main" }
@@ -35,17 +35,20 @@ net_util = { path = "../net_util" }
 option_parser = { path = "../option_parser" }
 pci = { path = "../pci" }
 qcow = { path = "../qcow" }
-seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.3" }
+seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.4" }
 serde = {version = ">=1.0.27", features = ["rc"] }
 serde_derive = ">=1.0.27"
 serde_json = ">=1.0.9"
-signal-hook = "0.3.8"
+signal-hook = "0.3.9"
 thiserror = "1.0"
+uuid = "0.8"
+versionize = "0.1.6"
+versionize_derive = "0.1.4"
 vfio-ioctls = { git = "https://github.com/rust-vmm/vfio-ioctls", branch = "master" }
 virtio-devices = { path = "../virtio-devices" }
 vm-allocator = { path = "../vm-allocator" }
 vm-device = { path = "../vm-device" }
-vm-memory = { version = "0.5.0", features = ["backend-mmap", "backend-atomic"] }
+vm-memory = { version = "0.5.0", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
 vm-migration = { path = "../vm-migration" }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = ">=0.5.0", features = ["with-serde"] }

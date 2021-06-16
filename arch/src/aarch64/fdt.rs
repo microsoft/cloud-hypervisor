@@ -12,15 +12,16 @@ use std::fmt::Debug;
 use std::result;
 
 use super::super::DeviceType;
+use super::super::GuestMemoryMmap;
 use super::super::InitramfsConfig;
 use super::get_fdt_addr;
 use super::gic::GicDevice;
 use super::layout::{
-    FDT_MAX_SIZE, MEM_32BIT_DEVICES_SIZE, MEM_32BIT_DEVICES_START, PCI_MMCONFIG_SIZE,
-    PCI_MMCONFIG_START,
+    IRQ_BASE, MEM_32BIT_DEVICES_SIZE, MEM_32BIT_DEVICES_START, MEM_PCI_IO_SIZE, MEM_PCI_IO_START,
+    PCI_HIGH_BASE, PCI_MMCONFIG_SIZE, PCI_MMCONFIG_START,
 };
 use vm_fdt::{FdtWriter, FdtWriterResult};
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError};
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -78,7 +79,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     pci_space_address: &(u64, u64),
 ) -> FdtWriterResult<Vec<u8>> {
     // Allocate stuff necessary for the holding the blob.
-    let mut fdt = FdtWriter::new(&[]);
+    let mut fdt = FdtWriter::new(&[]).unwrap();
 
     // For an explanation why these nodes were introduced in the blob take a look at
     // https://github.com/torvalds/linux/blob/master/Documentation/devicetree/booting-without-of.txt#L845
@@ -107,14 +108,14 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     // End Header node.
     fdt.end_node(root_node)?;
 
-    let fdt_final = fdt.finish(FDT_MAX_SIZE)?;
+    let fdt_final = fdt.finish()?;
 
     Ok(fdt_final)
 }
 
 pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Write FDT to memory.
-    let fdt_address = GuestAddress(get_fdt_addr(&guest_mem));
+    let fdt_address = GuestAddress(get_fdt_addr());
     guest_mem
         .write_slice(fdt_final.as_slice(), fdt_address)
         .map_err(Error::WriteFdtToMemory)?;
@@ -129,7 +130,7 @@ fn create_cpu_nodes(fdt: &mut FdtWriter, vcpu_mpidr: &[u64]) -> FdtWriterResult<
     fdt.property_u32("#size-cells", 0x0)?;
     let num_cpus = vcpu_mpidr.len();
 
-    for cpu_id in 0..num_cpus {
+    for (cpu_id, mpidr) in vcpu_mpidr.iter().enumerate().take(num_cpus) {
         let cpu_name = format!("cpu@{:x}", cpu_id);
         let cpu_node = fdt.begin_node(&cpu_name)?;
         fdt.property_string("device_type", "cpu")?;
@@ -138,7 +139,9 @@ fn create_cpu_nodes(fdt: &mut FdtWriter, vcpu_mpidr: &[u64]) -> FdtWriterResult<
             // This is required on armv8 64-bit. See aforementioned documentation.
             fdt.property_string("enable-method", "psci")?;
         }
-        fdt.property_u32("reg", cpu_id as u32)?;
+        // Set the field to first 24 bits of the MPIDR - Multiprocessor Affinity Register.
+        // See http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0488c/BABHBJCI.html.
+        fdt.property_u32("reg", (mpidr & 0x7FFFFF) as u32)?;
         fdt.end_node(cpu_node)?;
     }
     fdt.end_node(cpus_node)?;
@@ -293,7 +296,11 @@ fn create_serial_node<T: DeviceInfoForFdt + Clone + Debug>(
 ) -> FdtWriterResult<()> {
     let compatible = b"arm,pl011\0arm,primecell\0";
     let serial_reg_prop = [dev_info.addr(), dev_info.length()];
-    let irq = [GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING];
+    let irq = [
+        GIC_FDT_IRQ_TYPE_SPI,
+        dev_info.irq() - IRQ_BASE,
+        IRQ_TYPE_EDGE_RISING,
+    ];
 
     let serial_node = fdt.begin_node(&format!("pl011@{:x}", dev_info.addr()))?;
     fdt.property("compatible", compatible)?;
@@ -312,7 +319,11 @@ fn create_rtc_node<T: DeviceInfoForFdt + Clone + Debug>(
 ) -> FdtWriterResult<()> {
     let compatible = b"arm,pl031\0arm,primecell\0";
     let rtc_reg_prop = [dev_info.addr(), dev_info.length()];
-    let irq = [GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_LEVEL_HI];
+    let irq = [
+        GIC_FDT_IRQ_TYPE_SPI,
+        dev_info.irq() - IRQ_BASE,
+        IRQ_TYPE_LEVEL_HI,
+    ];
 
     let rtc_node = fdt.begin_node(&format!("rtc@{:x}", dev_info.addr()))?;
     fdt.property("compatible", compatible)?;
@@ -332,7 +343,11 @@ fn create_gpio_node<T: DeviceInfoForFdt + Clone + Debug>(
     // PL061 GPIO controller node
     let compatible = b"arm,pl061\0arm,primecell\0";
     let gpio_reg_prop = [dev_info.addr(), dev_info.length()];
-    let irq = [GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING];
+    let irq = [
+        GIC_FDT_IRQ_TYPE_SPI,
+        dev_info.irq() - IRQ_BASE,
+        IRQ_TYPE_EDGE_RISING,
+    ];
 
     let gpio_node = fdt.begin_node(&format!("pl061@{:x}", dev_info.addr()))?;
     fdt.property("compatible", compatible)?;
@@ -400,7 +415,32 @@ fn create_pci_nodes(
     // Add node for PCIe controller.
     // See Documentation/devicetree/bindings/pci/host-generic-pci.txt in the kernel
     // and https://elinux.org/Device_Tree_Usage.
+
+    // EDK2 requires the PCIe high space above 4G address.
+    // The actual space in CLH follows the RAM. If the RAM space is small, the PCIe high space
+    // could fall bellow 4G.
+    // Here we put it above 512G in FDT to workaround the EDK2 check.
+    // But the address written in ACPI is not impacted.
+    let pci_device_base_64bit: u64 = if cfg!(feature = "acpi") {
+        pci_device_base + PCI_HIGH_BASE
+    } else {
+        pci_device_base
+    };
+    let pci_device_size_64bit: u64 = if cfg!(feature = "acpi") {
+        pci_device_size - PCI_HIGH_BASE
+    } else {
+        pci_device_size
+    };
+
     let ranges = [
+        // io addresses
+        0x1000000,
+        0_u32,
+        0_u32,
+        (MEM_PCI_IO_START.0 >> 32) as u32,
+        MEM_PCI_IO_START.0 as u32,
+        (MEM_PCI_IO_SIZE >> 32) as u32,
+        MEM_PCI_IO_SIZE as u32,
         // mmio addresses
         0x2000000,                                // (ss = 10: 32-bit memory space)
         (MEM_32BIT_DEVICES_START.0 >> 32) as u32, // PCI address
@@ -410,13 +450,13 @@ fn create_pci_nodes(
         (MEM_32BIT_DEVICES_SIZE >> 32) as u32, // size
         MEM_32BIT_DEVICES_SIZE as u32,
         // device addresses
-        0x3000000,                      // (ss = 11: 64-bit memory space)
-        (pci_device_base >> 32) as u32, // PCI address
-        pci_device_base as u32,
-        (pci_device_base >> 32) as u32, // CPU address
-        pci_device_base as u32,
-        (pci_device_size >> 32) as u32, // size
-        pci_device_size as u32,
+        0x3000000,                            // (ss = 11: 64-bit memory space)
+        (pci_device_base_64bit >> 32) as u32, // PCI address
+        pci_device_base_64bit as u32,
+        (pci_device_base_64bit >> 32) as u32, // CPU address
+        pci_device_base_64bit as u32,
+        (pci_device_size_64bit >> 32) as u32, // size
+        pci_device_size_64bit as u32,
     ];
     let bus_range = [0, 0]; // Only bus 0
     let reg = [PCI_MMCONFIG_START.0, PCI_MMCONFIG_SIZE];
