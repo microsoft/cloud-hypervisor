@@ -4745,7 +4745,6 @@ mod tests {
         // verify the migration went well for virtio-net.
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_snapshot_restore() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4869,6 +4868,7 @@ mod tests {
             // Restore the VM from the snapshot
             let mut child = GuestCommand::new(&guest)
                 .args(&["--api-socket", &api_socket])
+                .args(&["--seccomp", ENABLE_SECCOMP])
                 .args(&[
                     "--restore",
                     format!("source_url=file://{}", snapshot_dir).as_str(),
