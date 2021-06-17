@@ -10,8 +10,6 @@
 
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
 
 pub mod async_io;
 pub mod fixed_vhd_async;
@@ -37,9 +35,14 @@ use std::sync::{Arc, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_bindings::bindings::virtio_blk::*;
-use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap};
+use vm_memory::{
+    bitmap::AtomicBitmap, bitmap::Bitmap, ByteValued, Bytes, GuestAddress, GuestMemory,
+    GuestMemoryError,
+};
 use vm_virtio::DescriptorChain;
 use vmm_sys_util::eventfd::EventFd;
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 
 const SECTOR_SHIFT: u8 = 9;
 pub const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
@@ -333,6 +336,12 @@ impl Request {
         // Queue operations expected to be submitted.
         match request_type {
             RequestType::In => {
+                for (data_addr, data_len) in &self.data_descriptors {
+                    mem.get_slice(*data_addr, *data_len as usize)
+                        .map_err(ExecuteError::GetHostAddress)?
+                        .bitmap()
+                        .mark_dirty(0, *data_len as usize);
+                }
                 disk_image
                     .read_vectored(offset, iovecs, user_data)
                     .map_err(ExecuteError::AsyncRead)?;
@@ -371,7 +380,7 @@ impl Request {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, Deserialize, Serialize, Versionize)]
+#[derive(Copy, Clone, Debug, Default, Versionize)]
 #[repr(C, packed)]
 pub struct VirtioBlockConfig {
     pub capacity: u64,
@@ -396,7 +405,7 @@ pub struct VirtioBlockConfig {
 }
 unsafe impl ByteValued for VirtioBlockConfig {}
 
-#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, Versionize)]
+#[derive(Copy, Clone, Debug, Default, Versionize)]
 #[repr(C, packed)]
 pub struct VirtioBlockGeometry {
     pub cylinders: u16,

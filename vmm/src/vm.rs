@@ -25,17 +25,22 @@ use crate::device_tree::DeviceTree;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::migration::{get_vm_snapshot, url_to_path, VM_SNAPSHOT_FILE};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
+#[cfg(feature = "tdx")]
+use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 use devices::AcpiNotificationFlags;
 use hypervisor::vm::{HypervisorVmError, VmmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
+#[cfg(target_arch = "aarch64")]
+use linux_loader::loader::pe::Error::InvalidImageMagicNumber;
 use linux_loader::loader::KernelLoader;
 use seccomp::{SeccompAction, SeccompFilter};
 use signal_hook::{
@@ -59,7 +64,7 @@ use std::{result, str, thread};
 use vm_device::Bus;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
-    GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap,
+    GuestMemoryRegion,
 };
 use vm_migration::{
     protocol::{MemoryRange, MemoryRangeTable},
@@ -73,6 +78,8 @@ use vmm_sys_util::terminal::Terminal;
 use arch::aarch64::gic::gicv3::kvm::{KvmGicV3, GIC_V3_SNAPSHOT_ID};
 #[cfg(target_arch = "aarch64")]
 use arch::aarch64::gic::kvm::create_gic;
+#[cfg(target_arch = "aarch64")]
+use devices::interrupt_controller::{self, InterruptController};
 
 /// Errors associated with VM management
 #[derive(Debug)]
@@ -85,6 +92,10 @@ pub enum Error {
 
     /// Cannot load the kernel in memory
     KernelLoad(linux_loader::loader::Error),
+
+    #[cfg(target_arch = "aarch64")]
+    /// Cannot load the UEFI binary in memory
+    UefiLoad(arch::aarch64::uefi::Error),
 
     /// Cannot load the initramfs in memory
     InitramfsLoad,
@@ -102,7 +113,8 @@ pub enum Error {
     ConfigureSystem(arch::Error),
 
     /// Cannot enable interrupt controller
-    EnableInterruptController(device_manager::DeviceManagerError),
+    #[cfg(target_arch = "aarch64")]
+    EnableInterruptController(interrupt_controller::Error),
 
     PoisonedState,
 
@@ -496,7 +508,9 @@ impl Vm {
         reset_evt: EventFd,
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
-        #[cfg(feature = "kvm")] _saved_clock: Option<hypervisor::ClockData>,
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))] _saved_clock: Option<
+            hypervisor::ClockData,
+        >,
         activate_evt: EventFd,
     ) -> Result<Self> {
         config
@@ -541,6 +555,8 @@ impl Vm {
         }));
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
+        #[cfg(feature = "tdx")]
+        let tdx_enabled = config.lock().unwrap().tdx.is_some();
         let cpu_manager = cpu::CpuManager::new(
             &config.lock().unwrap().cpus.clone(),
             &device_manager,
@@ -551,6 +567,8 @@ impl Vm {
             hypervisor,
             seccomp_action.clone(),
             vm_ops,
+            #[cfg(feature = "tdx")]
+            tdx_enabled,
         )
         .map_err(Error::CpuManager)?;
 
@@ -672,7 +690,6 @@ impl Vm {
     ) -> Result<Self> {
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().tdx.is_some();
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
         #[cfg(feature = "tdx")]
         let vm = hypervisor
@@ -717,7 +734,7 @@ impl Vm {
             reset_evt,
             seccomp_action,
             hypervisor,
-            #[cfg(feature = "kvm")]
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             None,
             activate_evt,
         )?;
@@ -744,7 +761,6 @@ impl Vm {
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         activate_evt: EventFd,
     ) -> Result<Self> {
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
         let vm = hypervisor.create_vm().unwrap();
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -783,8 +799,8 @@ impl Vm {
             reset_evt,
             seccomp_action,
             hypervisor,
-            #[cfg(feature = "kvm")]
-            None,
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            vm_snapshot.clock,
             activate_evt,
         )
     }
@@ -797,7 +813,6 @@ impl Vm {
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         activate_evt: EventFd,
     ) -> Result<Self> {
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         hypervisor.check_required_extensions().unwrap();
         let vm = hypervisor.create_vm().unwrap();
         #[cfg(target_arch = "x86_64")]
@@ -822,7 +837,7 @@ impl Vm {
             reset_evt,
             seccomp_action,
             hypervisor,
-            #[cfg(feature = "kvm")]
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             None,
             activate_evt,
         )
@@ -847,6 +862,7 @@ impl Vm {
             .read_from(address, &mut initramfs, size)
             .map_err(|_| Error::InitramfsLoad)?;
 
+        info!("Initramfs loaded: address = 0x{:x}", address.0);
         Ok(arch::InitramfsConfig { address, size })
     }
 
@@ -873,6 +889,21 @@ impl Vm {
             None,
         ) {
             Ok(entry_addr) => entry_addr,
+            // Try to load the binary as kernel PE file at first.
+            // If failed, retry to load it as UEFI binary.
+            // As the UEFI binary is formatless, it must be the last option to try.
+            Err(linux_loader::loader::Error::Pe(InvalidImageMagicNumber)) => {
+                arch::aarch64::uefi::load_uefi(
+                    mem.deref(),
+                    GuestAddress(arch::get_uefi_start()),
+                    &mut kernel,
+                )
+                .map_err(Error::UefiLoad)?;
+                // The entry point offset in UEFI image is always 0.
+                return Ok(EntryPoint {
+                    entry_addr: GuestAddress(arch::get_uefi_start()),
+                });
+            }
             Err(e) => {
                 return Err(Error::KernelLoad(e));
             }
@@ -887,6 +918,7 @@ impl Vm {
 
     #[cfg(target_arch = "x86_64")]
     fn load_kernel(&mut self) -> Result<EntryPoint> {
+        info!("Loading kernel");
         let cmdline_cstring = self.get_cmdline()?;
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
@@ -910,13 +942,10 @@ impl Vm {
         )
         .map_err(Error::LoadCmdLine)?;
 
-        if let PvhEntryPresent(pvh_entry_addr) = entry_addr.pvh_boot_cap {
+        if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
             // Use the PVH kernel entry point to boot the guest
-            let entry_point_addr: GuestAddress;
-            entry_point_addr = pvh_entry_addr;
-            Ok(EntryPoint {
-                entry_addr: entry_point_addr,
-            })
+            info!("Kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
+            Ok(EntryPoint { entry_addr })
         } else {
             Err(Error::KernelMissingPvhHeader)
         }
@@ -924,6 +953,7 @@ impl Vm {
 
     #[cfg(target_arch = "x86_64")]
     fn configure_system(&mut self) -> Result<()> {
+        info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
         let initramfs_config = match self.initramfs {
@@ -945,6 +975,10 @@ impl Vm {
                 &self.memory_manager,
                 &self.numa_nodes,
             ));
+            info!(
+                "Created ACPI tables: rsdp_addr = 0x{:x}",
+                rsdp_addr.unwrap().0
+            );
         }
 
         let sgx_epc_region = self
@@ -1016,17 +1050,22 @@ impl Vm {
             );
         }
 
-        // Call `configure_system` and pass the GIC devices out, so that
-        // we can register the GIC device to the device manager.
-        let gic_device = arch::configure_system(
+        let gic_device = create_gic(
             &self.memory_manager.lock().as_ref().unwrap().vm,
+            self.cpu_manager.lock().unwrap().boot_vcpus() as u64,
+        )
+        .map_err(|e| {
+            Error::ConfigureSystem(arch::Error::AArch64Setup(arch::aarch64::Error::SetupGic(e)))
+        })?;
+
+        arch::configure_system(
             &mem,
             &cmdline_cstring,
-            self.cpu_manager.lock().unwrap().boot_vcpus() as u64,
             vcpu_mpidrs,
             device_info,
             &initramfs_config,
             &pci_space,
+            &*gic_device,
         )
         .map_err(Error::ConfigureSystem)?;
 
@@ -1034,12 +1073,21 @@ impl Vm {
         self.device_manager
             .lock()
             .unwrap()
-            .set_gic_device_entity(Arc::new(Mutex::new(gic_device)));
+            .get_interrupt_controller()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_gic_device(Arc::new(Mutex::new(gic_device)));
 
+        // Activate gic device
         self.device_manager
             .lock()
             .unwrap()
-            .enable_interrupt_controller()
+            .get_interrupt_controller()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .enable()
             .map_err(Error::EnableInterruptController)?;
 
         Ok(())
@@ -1508,7 +1556,19 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
-    fn init_tdx_memory(&mut self) -> Result<Option<u64>> {
+    fn extract_tdvf_sections(&mut self) -> Result<Vec<TdvfSection>> {
+        use arch::x86_64::tdx::*;
+        // The TDVF file contains a table of section as well as code
+        let mut firmware_file =
+            File::open(&self.config.lock().unwrap().tdx.as_ref().unwrap().firmware)
+                .map_err(Error::LoadTdvf)?;
+
+        // For all the sections allocate some RAM backing them
+        parse_tdvf_sections(&mut firmware_file).map_err(Error::ParseTdvf)
+    }
+
+    #[cfg(feature = "tdx")]
+    fn populate_tdx_sections(&mut self, sections: &[TdvfSection]) -> Result<Option<u64>> {
         use arch::x86_64::tdx::*;
         // Get the memory end *before* we start adding TDVF ram regions
         let mem_end = {
@@ -1516,15 +1576,7 @@ impl Vm {
             let mem = guest_memory.memory();
             mem.last_addr()
         };
-
-        // The TDVF file contains a table of section as well as code
-        let mut firmware_file =
-            File::open(&self.config.lock().unwrap().tdx.as_ref().unwrap().firmware)
-                .map_err(Error::LoadTdvf)?;
-
-        // For all the sections allocate some RAM backing them
-        let sections = parse_tdvf_sections(&mut firmware_file).map_err(Error::ParseTdvf)?;
-        for section in &sections {
+        for section in sections {
             info!("Allocating TDVF Section: {:?}", section);
             self.memory_manager
                 .lock()
@@ -1533,12 +1585,17 @@ impl Vm {
                 .map_err(Error::AllocatingTdvfMemory)?;
         }
 
+        // The TDVF file contains a table of section as well as code
+        let mut firmware_file =
+            File::open(&self.config.lock().unwrap().tdx.as_ref().unwrap().firmware)
+                .map_err(Error::LoadTdvf)?;
+
         // The guest memory at this point now has all the required regions so it
         // is safe to copy from the TDVF file into it.
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
         let mut hob_offset = None;
-        for section in &sections {
+        for section in sections {
             info!("Populating TDVF Section: {:?}", section);
             match section.r#type {
                 TdvfSectionType::Bfv | TdvfSectionType::Cfv => {
@@ -1611,7 +1668,15 @@ impl Vm {
 
         hob.finish(&mem).map_err(Error::PopulateHob)?;
 
-        for section in &sections {
+        Ok(hob_offset)
+    }
+
+    #[cfg(feature = "tdx")]
+    fn init_tdx_memory(&mut self, sections: &[TdvfSection]) -> Result<()> {
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+        let mem = guest_memory.memory();
+
+        for section in sections {
             self.vm
                 .tdx_init_memory_region(
                     mem.get_host_address(GuestAddress(section.address)).unwrap() as u64,
@@ -1622,11 +1687,11 @@ impl Vm {
                 )
                 .map_err(Error::InitializeTdxMemoryRegion)?;
         }
-
-        Ok(hob_offset)
+        Ok(())
     }
 
     pub fn boot(&mut self) -> Result<()> {
+        info!("Booting VM");
         event!("vm", "booting");
         let current_state = self.get_state()?;
         if current_state == VmState::Paused {
@@ -1657,10 +1722,13 @@ impl Vm {
             .create_boot_vcpus(entry_point)
             .map_err(Error::CpuManager)?;
 
+        #[cfg(feature = "tdx")]
+        let sections = self.extract_tdvf_sections()?;
+
         // Configuring the TDX regions requires that the vCPUs are created
         #[cfg(feature = "tdx")]
         let hob_address = if self.config.lock().unwrap().tdx.is_some() {
-            self.init_tdx_memory()?
+            self.populate_tdx_sections(&sections)?
         } else {
             None
         };
@@ -1677,6 +1745,7 @@ impl Vm {
                 .unwrap()
                 .initialize_tdx(hob_address)
                 .map_err(Error::CpuManager)?;
+            self.init_tdx_memory(&sections)?;
             // With TDX memory and CPU state configured TDX setup is complete
             self.vm.tdx_finalize().map_err(Error::FinalizeTdx)?;
         }
@@ -1807,6 +1876,17 @@ impl Vm {
             .map(|state| *state)
     }
 
+    /// Load saved clock from snapshot
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    pub fn load_clock_from_snapshot(
+        &mut self,
+        snapshot: &Snapshot,
+    ) -> Result<Option<hypervisor::ClockData>> {
+        let vm_snapshot = get_vm_snapshot(snapshot).map_err(Error::Restore)?;
+        self.saved_clock = vm_snapshot.clock;
+        Ok(self.saved_clock)
+    }
+
     #[cfg(target_arch = "aarch64")]
     /// Add the vGIC section to the VM snapshot.
     fn add_vgic_snapshot_section(
@@ -1814,17 +1894,25 @@ impl Vm {
         vm_snapshot: &mut Snapshot,
     ) -> std::result::Result<(), MigratableError> {
         let saved_vcpu_states = self.cpu_manager.lock().unwrap().get_saved_states();
-        self.device_manager
-            .lock()
-            .unwrap()
-            .construct_gicr_typers(&saved_vcpu_states);
-
-        vm_snapshot.add_snapshot(
+        let gic_device = Arc::clone(
             self.device_manager
                 .lock()
                 .unwrap()
-                .get_gic_device_entity()
+                .get_interrupt_controller()
                 .unwrap()
+                .lock()
+                .unwrap()
+                .get_gic_device()
+                .unwrap(),
+        );
+
+        gic_device
+            .lock()
+            .unwrap()
+            .set_gicr_typers(&saved_vcpu_states);
+
+        vm_snapshot.add_snapshot(
+            gic_device
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
@@ -1849,28 +1937,26 @@ impl Vm {
         // Creating a GIC device here, as the GIC will not be created when
         // restoring the device manager. Note that currently only the bare GICv3
         // without ITS is supported.
-        let gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap())
+        let mut gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap())
             .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
 
+        // Here we prepare the GICR_TYPER registers from the restored vCPU states.
+        gic_device.set_gicr_typers(&saved_vcpu_states);
+
+        let gic_device = Arc::new(Mutex::new(gic_device));
         // Update the GIC entity in device manager
         self.device_manager
             .lock()
             .unwrap()
-            .set_gic_device_entity(Arc::new(Mutex::new(gic_device)));
-
-        // Here we prepare the GICR_TYPER registers from the restored vCPU states.
-        self.device_manager
+            .get_interrupt_controller()
+            .unwrap()
             .lock()
             .unwrap()
-            .construct_gicr_typers(&saved_vcpu_states);
+            .set_gic_device(Arc::clone(&gic_device));
 
         // Restore GIC states.
         if let Some(gic_v3_snapshot) = vm_snapshot.snapshots.get(GIC_V3_SNAPSHOT_ID) {
-            self.device_manager
-                .lock()
-                .unwrap()
-                .get_gic_device_entity()
-                .unwrap()
+            gic_device
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
@@ -1881,10 +1967,15 @@ impl Vm {
             return Err(MigratableError::Restore(anyhow!("Missing GICv3 snapshot")));
         }
 
+        // Activate gic device
         self.device_manager
             .lock()
             .unwrap()
-            .enable_interrupt_controller()
+            .get_interrupt_controller()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .enable()
             .map_err(|e| {
                 MigratableError::Restore(anyhow!(
                     "Could not enable interrupt controller routing: {:#?}",
@@ -1951,13 +2042,12 @@ impl Vm {
         let mut table = MemoryRangeTable::default();
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
 
-        guest_memory.memory().with_regions_mut(|_, region| {
+        for region in guest_memory.memory().iter() {
             table.push(MemoryRange {
                 gpa: region.start_addr().raw_value(),
                 length: region.len() as u64,
             });
-            Ok(())
-        })?;
+        }
 
         Ok(table)
     }
@@ -2368,11 +2458,12 @@ mod tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GuestMemoryMmap, GuestRegionMmap};
     use arch::aarch64::fdt::create_fdt;
     use arch::aarch64::gic::kvm::create_gic;
     use arch::aarch64::{layout, DeviceInfoForFdt};
     use arch::{DeviceType, MmioDeviceInfo};
-    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    use vm_memory::GuestAddress;
 
     const LEN: u64 = 4096;
 
@@ -2388,20 +2479,23 @@ mod tests {
         let dev_info: HashMap<(DeviceType, std::string::String), MmioDeviceInfo> = [
             (
                 (DeviceType::Serial, DeviceType::Serial.to_string()),
-                MmioDeviceInfo { addr: 0x00, irq: 1 },
+                MmioDeviceInfo {
+                    addr: 0x00,
+                    irq: 33,
+                },
             ),
             (
                 (DeviceType::Virtio(1), "virtio".to_string()),
                 MmioDeviceInfo {
                     addr: 0x00 + LEN,
-                    irq: 2,
+                    irq: 34,
                 },
             ),
             (
                 (DeviceType::Rtc, "rtc".to_string()),
                 MmioDeviceInfo {
                     addr: 0x00 + 2 * LEN,
-                    irq: 3,
+                    irq: 35,
                 },
             ),
         ]
@@ -2448,7 +2542,7 @@ pub fn test_vm() {
     let hv = hypervisor::new().unwrap();
     let vm = hv.create_vm().expect("new VM creation failed");
 
-    mem.with_regions(|index, region| {
+    for (index, region) in mem.iter().enumerate() {
         let mem_region = vm.make_user_memory_region(
             index as u32,
             region.start_addr().raw_value(),
@@ -2459,8 +2553,8 @@ pub fn test_vm() {
         );
 
         vm.set_user_memory_region(mem_region)
-    })
-    .expect("Cannot configure guest memory");
+            .expect("Cannot configure guest memory");
+    }
     mem.write_slice(&code, load_addr)
         .expect("Writing code to memory failed");
 

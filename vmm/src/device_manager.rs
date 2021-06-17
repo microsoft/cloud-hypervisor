@@ -24,13 +24,12 @@ use crate::memory_manager::MEMORY_MANAGER_ACPI_SIZE;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 #[cfg(feature = "acpi")]
 use crate::vm::NumaNodes;
+use crate::GuestRegionMmap;
 use crate::PciDeviceInfo;
 use crate::{device_node, DEVICE_MANAGER_SNAPSHOT_ID};
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml};
 use anyhow::anyhow;
-#[cfg(target_arch = "aarch64")]
-use arch::aarch64::gic::GicDevice;
 #[cfg(feature = "acpi")]
 use arch::layout;
 #[cfg(target_arch = "x86_64")]
@@ -55,8 +54,6 @@ use devices::{
 };
 #[cfg(feature = "kvm")]
 use hypervisor::kvm_ioctls::*;
-#[cfg(target_arch = "aarch64")]
-use hypervisor::CpuState;
 #[cfg(feature = "mshv")]
 use hypervisor::IoEventAddress;
 use libc::{
@@ -80,6 +77,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
+#[cfg(feature = "acpi")]
+use uuid::Uuid;
 #[cfg(feature = "kvm")]
 use vfio_ioctls::{VfioContainer, VfioDevice};
 use virtio_devices::transport::VirtioPciDevice;
@@ -97,7 +96,7 @@ use vm_device::{Bus, BusDevice, Resource};
 use vm_memory::guest_memory::FileOffset;
 #[cfg(feature = "kvm")]
 use vm_memory::GuestMemoryRegion;
-use vm_memory::{Address, GuestAddress, GuestRegionMmap, GuestUsize, MmapRegion};
+use vm_memory::{Address, GuestAddress, GuestUsize, MmapRegion};
 #[cfg(feature = "cmos")]
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::{
@@ -828,9 +827,6 @@ pub struct DeviceManager {
     #[cfg(target_arch = "aarch64")]
     interrupt_controller: Option<Arc<Mutex<gic::Gic>>>,
 
-    #[cfg(target_arch = "aarch64")]
-    gic_device_entity: Option<Arc<Mutex<Box<dyn GicDevice>>>>,
-
     // Things to be added to the commandline (i.e. for virtio-mmio)
     cmdline_additions: Vec<String>,
 
@@ -872,6 +868,12 @@ pub struct DeviceManager {
 
     // Paravirtualized IOMMU
     iommu_device: Option<Arc<Mutex<virtio_devices::Iommu>>>,
+
+    // PCI information about devices attached to the paravirtualized IOMMU
+    // It contains the virtual IOMMU PCI BDF along with the list of PCI BDF
+    // representing the devices attached to the virtual IOMMU. This is useful
+    // information for filling the ACPI VIOT table.
+    iommu_attached_devices: Option<(u32, Vec<u32>)>,
 
     // Bitmap of PCI devices to hotplug.
     pci_devices_up: u32,
@@ -966,8 +968,6 @@ impl DeviceManager {
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),
             interrupt_controller: None,
-            #[cfg(target_arch = "aarch64")]
-            gic_device_entity: None,
             cmdline_additions: Vec::new(),
             #[cfg(feature = "acpi")]
             ged_notification_device: None,
@@ -981,6 +981,7 @@ impl DeviceManager {
             legacy_interrupt_manager: None,
             passthrough_device: None,
             iommu_device: None,
+            iommu_attached_devices: None,
             pci_devices_up: 0,
             pci_devices_down: 0,
             pci_irq_slots: [0; 32],
@@ -1202,15 +1203,8 @@ impl DeviceManager {
         iommu_attached_devices.append(&mut vfio_iommu_device_ids);
 
         if let Some(iommu_device) = iommu_device {
-            iommu_device
-                .lock()
-                .unwrap()
-                .attach_pci_devices(0, iommu_attached_devices);
-
-            // Because we determined the virtio-iommu b/d/f, we have to
-            // add the device to the PCI topology now. Otherwise, the
-            // b/d/f won't match the virtio-iommu device as expected.
-            self.add_virtio_pci_device(iommu_device, &mut pci_bus, &None, iommu_id)?;
+            let dev_id = self.add_virtio_pci_device(iommu_device, &mut pci_bus, &None, iommu_id)?;
+            self.iommu_attached_devices = Some((dev_id, iommu_attached_devices));
         }
 
         let pci_bus = Arc::new(Mutex::new(pci_bus));
@@ -1262,56 +1256,8 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub fn set_gic_device_entity(&mut self, device_entity: Arc<Mutex<Box<dyn GicDevice>>>) {
-        self.gic_device_entity = Some(device_entity);
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub fn get_gic_device_entity(&self) -> Option<&Arc<Mutex<Box<dyn GicDevice>>>> {
-        self.gic_device_entity.as_ref()
-    }
-    #[cfg(target_arch = "aarch64")]
-    pub fn construct_gicr_typers(&self, vcpu_states: &[CpuState]) {
-        /* Pre-construct the GICR_TYPER:
-         * For our implementation:
-         *  Top 32 bits are the affinity value of the associated CPU
-         *  CommonLPIAff == 01 (redistributors with same Aff3 share LPI table)
-         *  Processor_Number == CPU index starting from 0
-         *  DPGS == 0 (GICR_CTLR.DPG* not supported)
-         *  Last == 1 if this is the last redistributor in a series of
-         *            contiguous redistributor pages
-         *  DirectLPI == 0 (direct injection of LPIs not supported)
-         *  VLPIS == 0 (virtual LPIs not supported)
-         *  PLPIS == 0 (physical LPIs not supported)
-         */
-        let mut gicr_typers: Vec<u64> = Vec::new();
-        for (index, state) in vcpu_states.iter().enumerate() {
-            let last = {
-                if index == vcpu_states.len() - 1 {
-                    1
-                } else {
-                    0
-                }
-            };
-            //calculate affinity
-            let mut cpu_affid = state.mpidr & 1095233437695;
-            cpu_affid = ((cpu_affid & 0xFF00000000) >> 8) | (cpu_affid & 0xFFFFFF);
-            gicr_typers.push((cpu_affid << 32) | (1 << 24) | (index as u64) << 8 | (last << 4));
-        }
-
-        self.get_gic_device_entity()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .set_gicr_typers(gicr_typers)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub fn enable_interrupt_controller(&self) -> DeviceManagerResult<()> {
-        if let Some(interrupt_controller) = &self.interrupt_controller {
-            interrupt_controller.lock().unwrap().enable().unwrap();
-        }
-        Ok(())
+    pub fn get_interrupt_controller(&mut self) -> Option<&Arc<Mutex<gic::Gic>>> {
+        self.interrupt_controller.as_ref()
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1878,6 +1824,8 @@ impl DeviceManager {
             id
         };
 
+        info!("Creating virtio-block device: {:?}", disk_cfg);
+
         if disk_cfg.vhost_user {
             let socket = disk_cfg.vhost_socket.as_ref().unwrap().clone();
             let vu_cfg = VhostUserConfig {
@@ -1886,11 +1834,7 @@ impl DeviceManager {
                 queue_size: disk_cfg.queue_size,
             };
             let vhost_user_block_device = Arc::new(Mutex::new(
-                match virtio_devices::vhost_user::Blk::new(
-                    id.clone(),
-                    vu_cfg,
-                    self.seccomp_action.clone(),
-                ) {
+                match virtio_devices::vhost_user::Blk::new(id.clone(), vu_cfg) {
                     Ok(vub_device) => vub_device,
                     Err(e) => {
                         return Err(DeviceManagerError::CreateVhostUserBlk(e));
@@ -1928,7 +1872,6 @@ impl DeviceManager {
                         .clone(),
                 )
                 .map_err(DeviceManagerError::Disk)?;
-
             let image_type =
                 detect_image_type(&mut file).map_err(DeviceManagerError::DetectImageType)?;
 
@@ -2028,6 +1971,7 @@ impl DeviceManager {
             net_cfg.id = Some(id.clone());
             id
         };
+        info!("Creating virtio-net device: {:?}", net_cfg);
 
         if net_cfg.vhost_user {
             let socket = net_cfg.vhost_socket.as_ref().unwrap().clone();
@@ -2045,8 +1989,8 @@ impl DeviceManager {
                     id.clone(),
                     net_cfg.mac,
                     vu_cfg,
-                    self.seccomp_action.clone(),
                     server,
+                    self.seccomp_action.clone(),
                 ) {
                     Ok(vun_device) => vun_device,
                     Err(e) => {
@@ -2158,6 +2102,7 @@ impl DeviceManager {
         // Add virtio-rng if required
         let rng_config = self.config.lock().unwrap().rng.clone();
         if let Some(rng_path) = rng_config.src.to_str() {
+            info!("Creating virtio-rng device: {:?}", rng_config);
             let id = String::from(RNG_DEVICE_NAME);
 
             let virtio_rng_device = Arc::new(Mutex::new(
@@ -2198,6 +2143,8 @@ impl DeviceManager {
             fs_cfg.id = Some(id.clone());
             id
         };
+
+        info!("Creating virtio-fs device: {:?}", fs_cfg);
 
         let mut node = device_node!(id);
 
@@ -2356,6 +2303,8 @@ impl DeviceManager {
             pmem_cfg.id = Some(id.clone());
             id
         };
+
+        info!("Creating virtio-pmem device: {:?}", pmem_cfg);
 
         let mut node = device_node!(id);
 
@@ -2543,6 +2492,8 @@ impl DeviceManager {
             id
         };
 
+        info!("Creating virtio-vsock device: {:?}", vsock_cfg);
+
         let socket_path = vsock_cfg
             .socket
             .to_str()
@@ -2602,7 +2553,7 @@ impl DeviceManager {
         for (_memory_zone_id, memory_zone) in mm.memory_zones().iter() {
             if let Some(virtio_mem_zone) = memory_zone.virtio_mem_zone() {
                 let id = self.next_device_name(MEM_DEVICE_NAME_PREFIX)?;
-
+                info!("Creating virtio-mem device: id = {}", id);
                 #[cfg(not(feature = "acpi"))]
                 let node_id: Option<u16> = None;
                 #[cfg(feature = "acpi")]
@@ -2653,11 +2604,13 @@ impl DeviceManager {
 
         if let Some(balloon_config) = &self.config.lock().unwrap().balloon {
             let id = String::from(BALLOON_DEVICE_NAME);
+            info!("Creating virtio-balloon device: id = {}", id);
 
             let virtio_balloon_device = Arc::new(Mutex::new(
                 virtio_devices::Balloon::new(
                     id.clone(),
                     balloon_config.size,
+                    balloon_config.deflate_on_oom,
                     self.seccomp_action.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioBalloon)?,
@@ -2690,6 +2643,7 @@ impl DeviceManager {
         }
 
         let id = String::from(WATCHDOG_DEVICE_NAME);
+        info!("Creating virtio-watchdog device: id = {}", id);
 
         let virtio_watchdog_device = Arc::new(Mutex::new(
             virtio_devices::Watchdog::new(
@@ -3533,6 +3487,10 @@ impl DeviceManager {
             .trigger_key(3)
             .map_err(DeviceManagerError::AArch64PowerButtonNotification)
     }
+
+    pub fn iommu_attached_devices(&self) -> &Option<(u32, Vec<u32>)> {
+        &self.iommu_attached_devices
+    }
 }
 
 #[cfg(feature = "acpi")]
@@ -3643,8 +3601,76 @@ impl Aml for PciDevSlotMethods {
 }
 
 #[cfg(feature = "acpi")]
+struct PciDsmMethod {}
+
+#[cfg(feature = "acpi")]
+impl Aml for PciDsmMethod {
+    fn to_aml_bytes(&self) -> Vec<u8> {
+        // Refer to ACPI spec v6.3 Ch 9.1.1 and PCI Firmware spec v3.3 Ch 4.6.1
+        // _DSM (Device Specific Method), the following is the implementation in ASL.
+        /*
+        Method (_DSM, 4, NotSerialized)  // _DSM: Device-Specific Method
+        {
+              If ((Arg0 == ToUUID ("e5c937d0-3553-4d7a-9117-ea4d19c3434d") /* Device Labeling Interface */))
+              {
+                  If ((Arg2 == Zero))
+                  {
+                      Return (Buffer (One) { 0x21 })
+                  }
+                  If ((Arg2 == 0x05))
+                  {
+                      Return (Zero)
+                  }
+              }
+
+              Return (Buffer (One) { 0x00 })
+        }
+         */
+        /*
+         * As per ACPI v6.3 Ch 19.6.142, the UUID is required to be in mixed endian:
+         * Among the fields of a UUID:
+         *   {d1 (8 digits)} - {d2 (4 digits)} - {d3 (4 digits)} - {d4 (16 digits)}
+         * d1 ~ d3 need to be little endian, d4 be big endian.
+         * See https://en.wikipedia.org/wiki/Universally_unique_identifier#Encoding .
+         */
+        let uuid = Uuid::parse_str("E5C937D0-3553-4D7A-9117-EA4D19C3434D").unwrap();
+        let (uuid_d1, uuid_d2, uuid_d3, uuid_d4) = uuid.as_fields();
+        let mut uuid_buf = vec![];
+        uuid_buf.extend(&uuid_d1.to_le_bytes());
+        uuid_buf.extend(&uuid_d2.to_le_bytes());
+        uuid_buf.extend(&uuid_d3.to_le_bytes());
+        uuid_buf.extend(uuid_d4);
+        aml::Method::new(
+            "_DSM".into(),
+            4,
+            false,
+            vec![
+                &aml::If::new(
+                    &aml::Equal::new(&aml::Arg(0), &aml::Buffer::new(uuid_buf)),
+                    vec![
+                        &aml::If::new(
+                            &aml::Equal::new(&aml::Arg(2), &aml::ZERO),
+                            vec![&aml::Return::new(&aml::Buffer::new(vec![0x21]))],
+                        ),
+                        &aml::If::new(
+                            &aml::Equal::new(&aml::Arg(2), &0x05u8),
+                            vec![&aml::Return::new(&aml::ZERO)],
+                        ),
+                    ],
+                ),
+                &aml::Return::new(&aml::Buffer::new(vec![0])),
+            ],
+        )
+        .to_aml_bytes()
+    }
+}
+
+#[cfg(feature = "acpi")]
 impl Aml for DeviceManager {
     fn to_aml_bytes(&self) -> Vec<u8> {
+        #[cfg(target_arch = "aarch64")]
+        use arch::aarch64::DeviceInfoForFdt;
+
         let mut bytes = Vec::new();
         // PCI hotplug controller
         bytes.extend_from_slice(
@@ -3717,11 +3743,22 @@ impl Aml for DeviceManager {
         pci_dsdt_inner_data.push(&uid);
         let supp = aml::Name::new("SUPP".into(), &aml::ZERO);
         pci_dsdt_inner_data.push(&supp);
+
+        let pci_dsm = PciDsmMethod {};
+        pci_dsdt_inner_data.push(&pci_dsm);
+
         let crs = aml::Name::new(
             "_CRS".into(),
             &aml::ResourceTemplate::new(vec![
                 &aml::AddressSpace::new_bus_number(0x0u16, 0xffu16),
+                #[cfg(target_arch = "x86_64")]
                 &aml::Io::new(0xcf8, 0xcf8, 1, 0x8),
+                #[cfg(target_arch = "aarch64")]
+                &aml::Memory32Fixed::new(
+                    true,
+                    layout::PCI_MMCONFIG_START.0 as u32,
+                    layout::PCI_MMCONFIG_SIZE as u32,
+                ),
                 &aml::AddressSpace::new_memory(
                     aml::AddressSpaceCachable::NotCacheable,
                     true,
@@ -3788,16 +3825,44 @@ impl Aml for DeviceManager {
         )
         .to_aml_bytes();
 
+        // Serial device
+        #[cfg(target_arch = "x86_64")]
+        let serial_irq = 4;
+        #[cfg(target_arch = "aarch64")]
+        let serial_irq =
+            if self.config.lock().unwrap().serial.clone().mode != ConsoleOutputMode::Off {
+                self.get_device_info()
+                    .clone()
+                    .get(&(DeviceType::Serial, DeviceType::Serial.to_string()))
+                    .unwrap()
+                    .irq()
+            } else {
+                // If serial is turned off, add a fake device with invalid irq.
+                31
+            };
         let com1_dsdt_data = aml::Device::new(
             "_SB_.COM1".into(),
             vec![
-                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0501")),
+                &aml::Name::new(
+                    "_HID".into(),
+                    #[cfg(target_arch = "x86_64")]
+                    &aml::EisaName::new("PNP0501"),
+                    #[cfg(target_arch = "aarch64")]
+                    &"ARMH0011",
+                ),
                 &aml::Name::new("_UID".into(), &aml::ZERO),
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![
-                        &aml::Interrupt::new(true, true, false, false, 4),
+                        &aml::Interrupt::new(true, true, false, false, serial_irq),
+                        #[cfg(target_arch = "x86_64")]
                         &aml::Io::new(0x3f8, 0x3f8, 0, 0x8),
+                        #[cfg(target_arch = "aarch64")]
+                        &aml::Memory32Fixed::new(
+                            true,
+                            arch::layout::LEGACY_SERIAL_MAPPED_IO_START as u32,
+                            MMIO_LEN as u32,
+                        ),
                     ]),
                 ),
             ],

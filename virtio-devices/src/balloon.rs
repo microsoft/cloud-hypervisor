@@ -17,6 +17,7 @@ use super::{
     VirtioCommon, VirtioDevice, VirtioDeviceType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::GuestMemoryMmap;
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use libc::EFD_NONBLOCK;
 use seccomp::{SeccompAction, SeccompFilter};
@@ -31,7 +32,7 @@ use std::thread;
 use vm_memory::GuestMemory;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
-    GuestMemoryError, GuestMemoryMmap,
+    GuestMemoryError,
 };
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
@@ -50,6 +51,9 @@ const DEFLATE_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
 // Size of a PFN in the balloon interface.
 const VIRTIO_BALLOON_PFN_SHIFT: u64 = 12;
 
+// Deflate balloon on OOM
+const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u64 = 2;
+
 #[derive(Debug)]
 pub enum Error {
     // Guest gave us bad memory addresses.
@@ -58,6 +62,8 @@ pub enum Error {
     UnexpectedWriteOnlyDescriptor,
     // Guest sent us invalid request.
     InvalidRequest,
+    // Fallocate fail.
+    FallocateFail(std::io::Error),
     // Madvise fail.
     MadviseFail(std::io::Error),
     // Failed to EventFd write.
@@ -199,7 +205,29 @@ impl BalloonEpollHandler {
                 let gpa = (pfn as u64) << VIRTIO_BALLOON_PFN_SHIFT;
                 if let Ok(hva) = mem.get_host_address(GuestAddress(gpa)) {
                     let advice = match ev_type {
-                        INFLATE_QUEUE_EVENT => libc::MADV_DONTNEED,
+                        INFLATE_QUEUE_EVENT => {
+                            let region =
+                                mem.find_region(GuestAddress(gpa))
+                                    .ok_or(Error::GuestMemory(
+                                        GuestMemoryError::InvalidGuestAddress(GuestAddress(gpa)),
+                                    ))?;
+                            if let Some(f_off) = region.file_offset() {
+                                let offset = hva as usize - region.as_ptr() as usize;
+                                let res = unsafe {
+                                    libc::fallocate64(
+                                        f_off.file().as_raw_fd(),
+                                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                                        (offset as u64 + f_off.start()) as libc::off64_t,
+                                        (1 << VIRTIO_BALLOON_PFN_SHIFT) as libc::off64_t,
+                                    )
+                                };
+
+                                if res != 0 {
+                                    return Err(Error::FallocateFail(io::Error::last_os_error()));
+                                }
+                            }
+                            libc::MADV_DONTNEED
+                        }
                         DEFLATE_QUEUE_EVENT => libc::MADV_WILLNEED,
                         _ => return Err(Error::ProcessQueueWrongEvType(ev_type)),
                     };
@@ -318,8 +346,16 @@ pub struct Balloon {
 
 impl Balloon {
     // Create a new virtio-balloon.
-    pub fn new(id: String, size: u64, seccomp_action: SeccompAction) -> io::Result<Self> {
-        let avail_features = 1u64 << VIRTIO_F_VERSION_1;
+    pub fn new(
+        id: String,
+        size: u64,
+        deflate_on_oom: bool,
+        seccomp_action: SeccompAction,
+    ) -> io::Result<Self> {
+        let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
+        if deflate_on_oom {
+            avail_features |= 1u64 << VIRTIO_BALLOON_F_DEFLATE_ON_OOM;
+        }
 
         let config = VirtioBalloonConfig {
             num_pages: (size >> VIRTIO_BALLOON_PFN_SHIFT) as u32,
@@ -404,26 +440,7 @@ impl VirtioDevice for Balloon {
         mut queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
-        let kill_evt = self
-            .common
-            .kill_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone kill_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
-        let pause_evt = self
-            .common
-            .pause_evt
-            .as_ref()
-            .unwrap()
-            .try_clone()
-            .map_err(|e| {
-                error!("failed to clone pause_evt eventfd: {}", e);
-                ActivateError::BadActivate
-            })?;
+        let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
         let mut handler = BalloonEpollHandler {
             config: self.config.clone(),

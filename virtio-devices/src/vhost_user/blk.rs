@@ -4,32 +4,37 @@
 use super::super::{
     ActivateError, ActivateResult, Queue, VirtioCommon, VirtioDevice, VirtioDeviceType,
 };
-use super::handler::*;
-use super::vu_common_ctrl::*;
-use super::{Error, Result};
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use super::vu_common_ctrl::{
+    add_memory_region, connect_vhost_user, negotiate_features_vhost_user, reset_vhost_user,
+    setup_vhost_user, update_mem_table, VhostUserConfig,
+};
+use super::{Error, Result, DEFAULT_VIRTIO_FEATURES};
+use crate::vhost_user::{Inflight, VhostUserEpollHandler};
 use crate::VirtioInterrupt;
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 use block_util::VirtioBlockConfig;
-use seccomp::{SeccompAction, SeccompFilter};
 use std::mem;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::result;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::vec::Vec;
 use vhost::vhost_user::message::VhostUserConfigFlags;
 use vhost::vhost_user::message::VHOST_USER_CONFIG_OFFSET;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost::vhost_user::{Master, VhostUserMaster, VhostUserMasterReqHandler};
+use vhost::vhost_user::{Master, MasterReqHandler, VhostUserMaster, VhostUserMasterReqHandler};
 use vhost::VhostBackend;
-use virtio_bindings::bindings::virtio_blk::*;
-use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use vm_memory::{
-    ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, GuestRegionMmap,
+use virtio_bindings::bindings::virtio_blk::{
+    VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_CONFIG_WCE, VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH,
+    VIRTIO_BLK_F_GEOMETRY, VIRTIO_BLK_F_MQ, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_SEG_MAX,
+    VIRTIO_BLK_F_SIZE_MAX, VIRTIO_BLK_F_TOPOLOGY, VIRTIO_BLK_F_WRITE_ZEROES,
 };
+use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
+
+const DEFAULT_QUEUE_NUMBER: usize = 1;
 
 struct SlaveReqHandler {}
 impl VhostUserMasterReqHandler for SlaveReqHandler {}
@@ -37,80 +42,66 @@ impl VhostUserMasterReqHandler for SlaveReqHandler {}
 pub struct Blk {
     common: VirtioCommon,
     id: String,
-    vhost_user_blk: Master,
+    vhost_user_blk: Arc<Mutex<Master>>,
     config: VirtioBlockConfig,
-    seccomp_action: SeccompAction,
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     acked_protocol_features: u64,
+    socket_path: String,
+    epoll_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Blk {
     /// Create a new vhost-user-blk device
-    pub fn new(id: String, vu_cfg: VhostUserConfig, seccomp_action: SeccompAction) -> Result<Blk> {
-        let mut vhost_user_blk = Master::connect(&vu_cfg.socket, vu_cfg.num_queues as u64)
-            .map_err(Error::VhostUserCreateMaster)?;
+    pub fn new(id: String, vu_cfg: VhostUserConfig) -> Result<Blk> {
+        let num_queues = vu_cfg.num_queues;
+
+        let mut vhost_user_blk =
+            connect_vhost_user(false, &vu_cfg.socket, num_queues as u64, false)?;
 
         // Filling device and vring features VMM supports.
-        let mut avail_features = 1 << VIRTIO_BLK_F_SEG_MAX
+        let mut avail_features = 1 << VIRTIO_BLK_F_SIZE_MAX
+            | 1 << VIRTIO_BLK_F_SEG_MAX
+            | 1 << VIRTIO_BLK_F_GEOMETRY
             | 1 << VIRTIO_BLK_F_RO
             | 1 << VIRTIO_BLK_F_BLK_SIZE
             | 1 << VIRTIO_BLK_F_FLUSH
             | 1 << VIRTIO_BLK_F_TOPOLOGY
-            | 1 << VIRTIO_RING_F_EVENT_IDX
             | 1 << VIRTIO_BLK_F_CONFIG_WCE
-            | 1 << VIRTIO_F_VERSION_1
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+            | 1 << VIRTIO_BLK_F_DISCARD
+            | 1 << VIRTIO_BLK_F_WRITE_ZEROES
+            | DEFAULT_VIRTIO_FEATURES;
 
-        if vu_cfg.num_queues > 1 {
+        if num_queues > 1 {
             avail_features |= 1 << VIRTIO_BLK_F_MQ;
         }
 
-        // Set vhost-user owner.
-        vhost_user_blk
-            .set_owner()
-            .map_err(Error::VhostUserSetOwner)?;
+        let avail_protocol_features = VhostUserProtocolFeatures::CONFIG
+            | VhostUserProtocolFeatures::MQ
+            | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
+            | VhostUserProtocolFeatures::REPLY_ACK
+            | VhostUserProtocolFeatures::INFLIGHT_SHMFD;
 
-        // Get features from backend, do negotiation to get a feature collection which
-        // both VMM and backend support.
-        let backend_features = vhost_user_blk
-            .get_features()
-            .map_err(Error::VhostUserGetFeatures)?;
-        avail_features &= backend_features;
-        // Set features back is required by the vhost crate mechanism, since the
-        // later vhost call will check if features is filled in master before execution.
-        vhost_user_blk
-            .set_features(avail_features)
-            .map_err(Error::VhostUserSetFeatures)?;
+        let (acked_features, acked_protocol_features) = negotiate_features_vhost_user(
+            &mut vhost_user_blk,
+            avail_features,
+            avail_protocol_features,
+        )?;
 
-        // Identify if protocol features are supported by the slave.
-        let mut acked_features = 0;
-        let mut acked_protocol_features = 0;
-        if avail_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0 {
-            acked_features |= VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
+        let backend_num_queues =
+            if acked_protocol_features & VhostUserProtocolFeatures::MQ.bits() != 0 {
+                vhost_user_blk
+                    .get_queue_num()
+                    .map_err(Error::VhostUserGetQueueMaxNum)? as usize
+            } else {
+                DEFAULT_QUEUE_NUMBER
+            };
 
-            let mut protocol_features = vhost_user_blk
-                .get_protocol_features()
-                .map_err(Error::VhostUserGetProtocolFeatures)?;
-            protocol_features &= VhostUserProtocolFeatures::CONFIG
-                | VhostUserProtocolFeatures::MQ
-                | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS;
-            vhost_user_blk
-                .set_protocol_features(protocol_features)
-                .map_err(Error::VhostUserSetProtocolFeatures)?;
-
-            acked_protocol_features = protocol_features.bits();
-        }
-        // Get the max queues number from backend, and the queue number set
-        // should be less than this max queue number.
-        let max_queues_num = vhost_user_blk
-            .get_queue_num()
-            .map_err(Error::VhostUserGetQueueMaxNum)?;
-
-        if vu_cfg.num_queues > max_queues_num as usize {
-            error!("vhost-user-blk has queue number: {} larger than the max queue number: {} backend allowed\n",
-                vu_cfg.num_queues, max_queues_num);
+        if num_queues > backend_num_queues {
+            error!("vhost-user-blk requested too many queues ({}) since the backend only supports {}\n",
+                num_queues, backend_num_queues);
             return Err(Error::BadQueueNum);
         }
+
         let config_len = mem::size_of::<VirtioBlockConfig>();
         let config_space: Vec<u8> = vec![0u8; config_len as usize];
         let (_, config_space) = vhost_user_blk
@@ -120,18 +111,17 @@ impl Blk {
                 VhostUserConfigFlags::WRITABLE,
                 config_space.as_slice(),
             )
-            .unwrap();
+            .map_err(Error::VhostUserGetConfig)?;
         let mut config = VirtioBlockConfig::default();
         if let Some(backend_config) = VirtioBlockConfig::from_slice(config_space.as_slice()) {
             config = *backend_config;
-            // Only set num_queues value(u16).
-            config.num_queues = vu_cfg.num_queues as u16;
+            config.num_queues = num_queues as u16;
         }
 
         // Send set_vring_base here, since it could tell backends, like SPDK,
         // how many virt queues to be handled, which backend required to know
         // at early stage.
-        for i in 0..vu_cfg.num_queues {
+        for i in 0..num_queues {
             vhost_user_blk
                 .set_vring_base(i, 0)
                 .map_err(Error::VhostUserSetVringBase)?;
@@ -140,19 +130,20 @@ impl Blk {
         Ok(Blk {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Block as u32,
-                queue_sizes: vec![vu_cfg.queue_size; vu_cfg.num_queues],
-                avail_features,
-                acked_features,
-                paused_sync: Some(Arc::new(Barrier::new(vu_cfg.num_queues + 1))),
-                min_queues: 1,
+                queue_sizes: vec![vu_cfg.queue_size; num_queues],
+                avail_features: acked_features,
+                acked_features: 0,
+                paused_sync: Some(Arc::new(Barrier::new(2))),
+                min_queues: DEFAULT_QUEUE_NUMBER as u16,
                 ..Default::default()
             },
             id,
-            vhost_user_blk,
+            vhost_user_blk: Arc::new(Mutex::new(vhost_user_blk)),
             config,
-            seccomp_action,
             guest_memory: None,
             acked_protocol_features,
+            socket_path: vu_cfg.socket,
+            epoll_thread: None,
         })
     }
 }
@@ -203,9 +194,15 @@ impl VirtioDevice for Blk {
         }
 
         self.config.writeback = data[0];
-        self.vhost_user_blk
+        if let Err(e) = self
+            .vhost_user_blk
+            .lock()
+            .unwrap()
             .set_config(offset as u32, VhostUserConfigFlags::WRITABLE, data)
-            .expect("Failed to set config");
+            .map_err(Error::VhostUserSetConfig)
+        {
+            error!("Failed setting vhost-user-blk configuration: {:?}", e);
+        }
     }
 
     fn activate(
@@ -219,72 +216,70 @@ impl VirtioDevice for Blk {
 
         self.guest_memory = Some(mem.clone());
 
-        let mut vu_interrupt_list = setup_vhost_user(
-            &mut self.vhost_user_blk,
+        let slave_req_handler: Option<MasterReqHandler<SlaveReqHandler>> = None;
+
+        // The backend acknowledged features must contain the protocol feature
+        // bit in case it was initially set but lost through the features
+        // negotiation with the guest.
+        let backend_acked_features = self.common.acked_features
+            | (self.common.avail_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits());
+
+        let mut inflight: Option<Inflight> =
+            if self.acked_protocol_features & VhostUserProtocolFeatures::INFLIGHT_SHMFD.bits() != 0
+            {
+                Some(Inflight::default())
+            } else {
+                None
+            };
+
+        setup_vhost_user(
+            &mut self.vhost_user_blk.lock().unwrap(),
             &mem.memory(),
-            queues,
-            queue_evts,
+            queues.clone(),
+            queue_evts.iter().map(|q| q.try_clone().unwrap()).collect(),
             &interrupt_cb,
-            self.common.acked_features,
+            backend_acked_features,
+            &slave_req_handler,
+            inflight.as_mut(),
         )
         .map_err(ActivateError::VhostUserBlkSetup)?;
 
-        let mut epoll_threads = Vec::new();
-        for i in 0..vu_interrupt_list.len() {
-            let interrupt_list_sub = vec![vu_interrupt_list.remove(0)];
+        // Run a dedicated thread for handling potential reconnections with
+        // the backend.
+        let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
-            let kill_evt = self
-                .common
-                .kill_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone kill_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
-            let pause_evt = self
-                .common
-                .pause_evt
-                .as_ref()
-                .unwrap()
-                .try_clone()
-                .map_err(|e| {
-                    error!("failed to clone pause_evt eventfd: {}", e);
-                    ActivateError::BadActivate
-                })?;
+        let mut handler: VhostUserEpollHandler<SlaveReqHandler> = VhostUserEpollHandler {
+            vu: self.vhost_user_blk.clone(),
+            mem,
+            kill_evt,
+            pause_evt,
+            queues,
+            queue_evts,
+            virtio_interrupt: interrupt_cb,
+            acked_features: backend_acked_features,
+            acked_protocol_features: self.acked_protocol_features,
+            socket_path: self.socket_path.clone(),
+            server: false,
+            slave_req_handler: None,
+            inflight,
+        };
 
-            let mut handler = VhostUserEpollHandler::<SlaveReqHandler>::new(VhostUserEpollConfig {
-                interrupt_cb: interrupt_cb.clone(),
-                kill_evt,
-                pause_evt,
-                vu_interrupt_list: interrupt_list_sub,
-                slave_req_handler: None,
-            });
+        let paused = self.common.paused.clone();
+        let paused_sync = self.common.paused_sync.clone();
 
-            let paused = self.common.paused.clone();
-            let paused_sync = self.common.paused_sync.clone();
-            let virtio_vhost_blk_seccomp_filter =
-                get_seccomp_filter(&self.seccomp_action, Thread::VirtioVhostBlk)
-                    .map_err(ActivateError::CreateSeccompFilter)?;
-            thread::Builder::new()
-                .name(format!("{}_q{}", self.id.clone(), i))
-                .spawn(move || {
-                    if let Err(e) = SeccompFilter::apply(virtio_vhost_blk_seccomp_filter) {
-                        error!("Error applying seccomp filter: {:?}", e);
-                    } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
-                        error!("Error running worker: {:?}", e);
-                    }
-                })
-                .map(|thread| epoll_threads.push(thread))
-                .map_err(|e| {
-                    error!("failed to clone virtio epoll thread: {}", e);
-                    ActivateError::BadActivate
-                })?;
-        }
-        self.common.epoll_threads = Some(epoll_threads);
+        thread::Builder::new()
+            .name(self.id.to_string())
+            .spawn(move || {
+                if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
+                    error!("Error running vhost-user-blk worker: {:?}", e);
+                }
+            })
+            .map(|thread| self.epoll_thread = Some(thread))
+            .map_err(|e| {
+                error!("failed to clone queue EventFd: {}", e);
+                ActivateError::BadActivate
+            })?;
 
-        event!("virtio-device", "activated", "id", &self.id);
         Ok(())
     }
 
@@ -294,7 +289,10 @@ impl VirtioDevice for Blk {
             self.common.resume().ok()?;
         }
 
-        if let Err(e) = reset_vhost_user(&mut self.vhost_user_blk, self.common.queue_sizes.len()) {
+        if let Err(e) = reset_vhost_user(
+            &mut self.vhost_user_blk.lock().unwrap(),
+            self.common.queue_sizes.len(),
+        ) {
             error!("Failed to reset vhost-user daemon: {:?}", e);
             return None;
         }
@@ -311,7 +309,7 @@ impl VirtioDevice for Blk {
     }
 
     fn shutdown(&mut self) {
-        let _ = unsafe { libc::close(self.vhost_user_blk.as_raw_fd()) };
+        let _ = unsafe { libc::close(self.vhost_user_blk.lock().unwrap().as_raw_fd()) };
     }
 
     fn add_memory_region(
@@ -320,11 +318,14 @@ impl VirtioDevice for Blk {
     ) -> std::result::Result<(), crate::Error> {
         if self.acked_protocol_features & VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS.bits() != 0
         {
-            add_memory_region(&mut self.vhost_user_blk, region)
+            add_memory_region(&mut self.vhost_user_blk.lock().unwrap(), region)
                 .map_err(crate::Error::VhostUserAddMemoryRegion)
         } else if let Some(guest_memory) = &self.guest_memory {
-            update_mem_table(&mut self.vhost_user_blk, guest_memory.memory().deref())
-                .map_err(crate::Error::VhostUserUpdateMemory)
+            update_mem_table(
+                &mut self.vhost_user_blk.lock().unwrap(),
+                guest_memory.memory().deref(),
+            )
+            .map_err(crate::Error::VhostUserUpdateMemory)
         } else {
             Ok(())
         }
@@ -337,7 +338,12 @@ impl Pausable for Blk {
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {
-        self.common.resume()
+        self.common.resume()?;
+
+        if let Some(epoll_thread) = &self.epoll_thread {
+            epoll_thread.thread().unpark();
+        }
+        Ok(())
     }
 }
 

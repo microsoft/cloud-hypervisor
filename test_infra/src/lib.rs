@@ -11,6 +11,7 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use std::process::{ExitStatus, Output};
 use std::str::FromStr;
 use std::thread;
 use vmm_sys_util::tempdir::TempDir;
@@ -503,6 +504,8 @@ pub enum SshCommandError {
     Authentication(ssh2::Error),
     ChannelSession(ssh2::Error),
     Command(ssh2::Error),
+    ExitStatus(ssh2::Error),
+    NonZeroExitStatus(i32),
 }
 
 pub fn ssh_command_ip_with_auth(
@@ -537,7 +540,14 @@ pub fn ssh_command_ip_with_auth(
             let _ = channel.read_to_string(&mut s);
             let _ = channel.close();
             let _ = channel.wait_close();
-            Ok(())
+
+            let status = channel.exit_status().map_err(SshCommandError::ExitStatus)?;
+
+            if status != 0 {
+                Err(SshCommandError::NonZeroExitStatus(status))
+            } else {
+                Ok(())
+            }
         })() {
             Ok(_) => break,
             Err(e) => {
@@ -579,4 +589,18 @@ pub fn ssh_command_ip(
         retries,
         timeout,
     )
+}
+
+pub fn exec_host_command_status(command: &str) -> ExitStatus {
+    std::process::Command::new("bash")
+        .args(&["-c", command])
+        .status()
+        .expect(&format!("Expected '{}' to run", command))
+}
+
+pub fn exec_host_command_output(command: &str) -> Output {
+    std::process::Command::new("bash")
+        .args(&["-c", command])
+        .output()
+        .expect(&format!("Expected '{}' to run", command))
 }

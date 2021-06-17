@@ -342,7 +342,8 @@ mod tests {
     use super::super::tests::TestContext;
     use super::*;
     use crate::vsock::defs::MAX_PKT_BUF_SIZE;
-    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    use crate::GuestMemoryMmap;
+    use vm_memory::GuestAddress;
     use vm_virtio::queue::testing::VirtqDesc as GuestQDesc;
     use vm_virtio::queue::VIRTQ_DESC_F_WRITE;
 
@@ -469,7 +470,7 @@ mod tests {
             expect_asm_error!(tx, test_ctx, handler_ctx, VsockError::UnreadableDescriptor);
         }
 
-        // Test case: the buffer descriptor cannot fit all the data advertised by the the
+        // Test case: the buffer descriptor cannot fit all the data advertised by the
         // packet header `len` field.
         {
             create_context!(test_ctx, handler_ctx);

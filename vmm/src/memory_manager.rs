@@ -7,6 +7,7 @@ use crate::config::SgxEpcConfig;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
 use crate::migration::url_to_path;
 use crate::MEMORY_MANAGER_SNAPSHOT_ID;
+use crate::{GuestMemoryMmap, GuestRegionMmap};
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml};
 use anyhow::anyhow;
@@ -27,6 +28,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 #[cfg(target_arch = "x86_64")]
 use vm_allocator::GsiApic;
 use vm_allocator::SystemAllocator;
@@ -34,13 +37,13 @@ use vm_device::BusDevice;
 use vm_memory::guest_memory::FileOffset;
 use vm_memory::{
     mmap::MmapRegionError, Address, Bytes, Error as MmapError, GuestAddress, GuestAddressSpace,
-    GuestMemory, GuestMemoryAtomic, GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryMmap,
-    GuestMemoryRegion, GuestRegionMmap, GuestUsize, MmapRegion,
+    GuestMemory, GuestMemoryAtomic, GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryRegion,
+    GuestUsize, MmapRegion,
 };
 use vm_migration::{
     protocol::{MemoryRange, MemoryRangeTable},
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
-    Transportable,
+    Transportable, VersionMapped,
 };
 
 #[cfg(feature = "acpi")]
@@ -770,7 +773,7 @@ impl MemoryManager {
             log_dirty,
         }));
 
-        guest_memory.memory().with_regions(|_, region| {
+        for region in guest_memory.memory().iter() {
             let mut mm = memory_manager.lock().unwrap();
             let slot = mm.create_userspace_mapping(
                 region.start_addr().raw_value(),
@@ -785,9 +788,7 @@ impl MemoryManager {
                 size: region.len(),
                 slot,
             });
-
-            Ok(())
-        })?;
+        }
 
         for region in virtio_mem_regions.drain(..) {
             let mut mm = memory_manager.lock().unwrap();
@@ -846,7 +847,7 @@ impl MemoryManager {
             let vm_snapshot_path = url_to_path(source_url).map_err(Error::Restore)?;
 
             let mem_snapshot: MemoryManagerSnapshotData = snapshot
-                .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
+                .to_versioned_state(MEMORY_MANAGER_SNAPSHOT_ID)
                 .map_err(Error::Restore)?;
 
             // Here we turn the content file name into a content file path as
@@ -1476,9 +1477,29 @@ impl MemoryManager {
         let page_size = 4096; // TODO: Does this need to vary?
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
-            let dirty_bitmap = self.vm.get_dirty_log(r.slot, r.size).map_err(|e| {
+            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.size).map_err(|e| {
                 MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
             })?;
+            let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
+            {
+                Some(region) => {
+                    assert!(region.start_addr().raw_value() == r.gpa);
+                    assert!(region.len() == r.size);
+                    region.bitmap().get_and_reset()
+                }
+                None => {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "Error finding 'guest memory region' with address {:x}",
+                        r.gpa
+                    )))
+                }
+            };
+
+            let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
+                .iter()
+                .zip(vmm_dirty_bitmap.iter())
+                .map(|(x, y)| x | y)
+                .collect();
 
             let mut entry: Option<MemoryRange> = None;
             for (i, block) in dirty_bitmap.iter().enumerate() {
@@ -1524,6 +1545,11 @@ impl MemoryManager {
                 MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
             })?;
         }
+
+        for r in self.guest_memory.memory().iter() {
+            r.bitmap().reset();
+        }
+
         Ok(())
     }
 }
@@ -1914,21 +1940,19 @@ impl Aml for MemoryManager {
 
 impl Pausable for MemoryManager {}
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "GuestAddress")]
-pub struct GuestAddressDef(pub u64);
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Versionize)]
 pub struct MemoryRegion {
     content: Option<String>,
     start_addr: u64,
     size: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Versionize)]
 pub struct MemoryManagerSnapshotData {
     memory_regions: Vec<MemoryRegion>,
 }
+
+impl VersionMapped for MemoryManagerSnapshotData {}
 
 impl Snapshottable for MemoryManager {
     fn id(&self) -> String {
@@ -1941,7 +1965,7 @@ impl Snapshottable for MemoryManager {
 
         let mut memory_regions: Vec<MemoryRegion> = Vec::new();
 
-        guest_memory.with_regions_mut(|index, region| {
+        for (index, region) in guest_memory.iter().enumerate() {
             if region.len() == 0 {
                 return Err(MigratableError::Snapshot(anyhow!("Zero length region")));
             }
@@ -1969,9 +1993,7 @@ impl Snapshottable for MemoryManager {
                 start_addr: region.start_addr().0,
                 size: region.len(),
             });
-
-            Ok(())
-        })?;
+        }
 
         // Store locally this list of regions as it will be used through the
         // Transportable::send() implementation. The point is to avoid the
@@ -1983,7 +2005,7 @@ impl Snapshottable for MemoryManager {
         // memory region content for the regions requiring it.
         self.snapshot_memory_regions = memory_regions.clone();
 
-        memory_manager_snapshot.add_data_section(SnapshotDataSection::new_from_state(
+        memory_manager_snapshot.add_data_section(SnapshotDataSection::new_from_versioned_state(
             MEMORY_MANAGER_SNAPSHOT_ID,
             &MemoryManagerSnapshotData { memory_regions },
         )?);

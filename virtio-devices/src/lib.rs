@@ -29,7 +29,6 @@ pub mod epoll_helper;
 mod iommu;
 pub mod mem;
 pub mod net;
-pub mod net_util;
 mod pmem;
 mod rng;
 pub mod seccomp_filters;
@@ -46,13 +45,16 @@ pub use self::epoll_helper::*;
 pub use self::iommu::*;
 pub use self::mem::*;
 pub use self::net::*;
-pub use self::net_util::*;
 pub use self::pmem::*;
 pub use self::rng::*;
 pub use self::vsock::*;
 pub use self::watchdog::*;
-use vm_memory::{GuestAddress, GuestMemory};
+use vm_memory::{bitmap::AtomicBitmap, GuestAddress, GuestMemory};
 use vm_virtio::{queue::*, VirtioDeviceType};
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
+type MmapRegion = vm_memory::MmapRegion<AtomicBitmap>;
 
 const DEVICE_INIT: u32 = 0x00;
 const DEVICE_ACKNOWLEDGE: u32 = 0x01;
@@ -61,9 +63,16 @@ const DEVICE_DRIVER_OK: u32 = 0x04;
 const DEVICE_FEATURES_OK: u32 = 0x08;
 const DEVICE_FAILED: u32 = 0x80;
 
+const VIRTIO_F_RING_INDIRECT_DESC: u32 = 28;
+const VIRTIO_F_RING_EVENT_IDX: u32 = 29;
 const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_F_IOMMU_PLATFORM: u32 = 33;
+const VIRTIO_F_RING_PACKED: u32 = 34;
 const VIRTIO_F_IN_ORDER: u32 = 35;
+const VIRTIO_F_ORDER_PLATFORM: u32 = 36;
+#[allow(dead_code)]
+const VIRTIO_F_SR_IOV: u32 = 37;
+const VIRTIO_F_NOTIFICATION_DATA: u32 = 38;
 
 #[derive(Debug)]
 pub enum ActivateError {

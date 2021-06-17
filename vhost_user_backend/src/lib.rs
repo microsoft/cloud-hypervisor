@@ -27,9 +27,12 @@ use vhost::vhost_user::{
 };
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::guest_memory::FileOffset;
-use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+use vm_memory::{bitmap::AtomicBitmap, GuestAddress, MmapRegion};
 use vm_virtio::Queue;
 use vmm_sys_util::eventfd::EventFd;
+
+pub type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+pub type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
 
 const MAX_MEM_SLOTS: u64 = 32;
 
@@ -295,15 +298,15 @@ impl<S: VhostUserBackend> VringEpollHandler<S> {
 
         let num_queues = self.vrings.len();
         if (device_event as usize) < num_queues {
+            // If the vring is not enabled, it should not be processed.
+            // But let's not read it (hence lose it) in case it is later enabled.
+            if !self.vrings[device_event as usize].read().unwrap().enabled {
+                return Ok(false);
+            }
+
             if let Some(kick) = &self.vrings[device_event as usize].read().unwrap().kick {
                 kick.read()
                     .map_err(VringEpollHandlerError::HandleEventReadKick)?;
-            }
-
-            // If the vring is not enabled, it should not be processed.
-            // The event is only read to be discarded.
-            if !self.vrings[device_event as usize].read().unwrap().enabled {
-                return Ok(false);
             }
         }
 
@@ -955,6 +958,24 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             .retain(|mapping| mapping.gpa_base != region.guest_phys_addr);
 
         Ok(())
+    }
+
+    fn get_inflight_fd(
+        &mut self,
+        _: &vhost::vhost_user::message::VhostUserInflight,
+    ) -> std::result::Result<
+        (vhost::vhost_user::message::VhostUserInflight, i32),
+        vhost::vhost_user::Error,
+    > {
+        std::unimplemented!()
+    }
+
+    fn set_inflight_fd(
+        &mut self,
+        _: &vhost::vhost_user::message::VhostUserInflight,
+        _: std::fs::File,
+    ) -> std::result::Result<(), vhost::vhost_user::Error> {
+        std::unimplemented!()
     }
 }
 

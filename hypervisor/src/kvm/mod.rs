@@ -22,6 +22,8 @@ use crate::vm::{self, VmmOps};
 use crate::{arm64_core_reg_id, offset__of};
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
 use serde_derive::{Deserialize, Serialize};
+#[cfg(target_arch = "aarch64")]
+use std::convert::TryInto;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 #[cfg(target_arch = "x86_64")]
@@ -70,9 +72,9 @@ pub use kvm_ioctls;
 pub use kvm_ioctls::{Cap, Kvm};
 #[cfg(target_arch = "aarch64")]
 use std::mem;
+use thiserror::Error;
 #[cfg(feature = "tdx")]
 use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_expr, ioctl_ioc_nr, ioctl_iowr_nr};
-
 ///
 /// Export generically-named wrappers of kvm-bindings for Unix-based platforms
 ///
@@ -373,7 +375,7 @@ impl vm::Vm for KvmVm {
         let data = TdxInitVm {
             max_vcpus,
             reserved: 0,
-            attributes: 0,
+            attributes: 1, // TDX1_TD_ATTRIBUTE_DEBUG,
             cpuid: cpuid.as_fam_struct_ptr() as u64,
         };
 
@@ -465,8 +467,9 @@ pub struct KvmHypervisor {
     kvm: Kvm,
 }
 /// Enum for KVM related error
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum KvmError {
+    #[error("Capability missing: {0:?}")]
     CapabilityMissing(Cap),
 }
 pub type KvmResult<T> = result::Result<T, KvmError>;
@@ -557,41 +560,25 @@ impl hypervisor::Hypervisor for KvmHypervisor {
     /// let vm = hypervisor.create_vm().unwrap()
     ///
     fn create_vm(&self) -> hypervisor::Result<Arc<dyn vm::Vm>> {
-        self.create_vm_with_type(0) // Create with default platform type
+        #[allow(unused_mut)]
+        let mut vm_type: u64 = 0; // Create with default platform type
+
+        // When KVM supports Cap::ArmVmIPASize, it is better to get the IPA
+        // size from the host and use that when creating the VM, which may
+        // avoid unnecessary VM creation failures.
+        #[cfg(target_arch = "aarch64")]
+        if self.kvm.check_extension(Cap::ArmVmIPASize) {
+            vm_type = self.kvm.get_host_ipa_limit().try_into().unwrap();
+        }
+
+        self.create_vm_with_type(vm_type)
     }
 
     fn check_required_extensions(&self) -> hypervisor::Result<()> {
-        check_required_kvm_extensions(&self.kvm).expect("Missing KVM capabilities");
-        Ok(())
+        check_required_kvm_extensions(&self.kvm)
+            .map_err(|e| hypervisor::HypervisorError::CheckExtensions(e.into()))
     }
 
-    ///
-    ///  Returns the size of the memory mapping required to use the vcpu's `kvm_run` structure.
-    ///
-    fn get_vcpu_mmap_size(&self) -> hypervisor::Result<usize> {
-        self.kvm
-            .get_vcpu_mmap_size()
-            .map_err(|e| hypervisor::HypervisorError::GetVcpuMmap(e.into()))
-    }
-    ///
-    /// Gets the recommended maximum number of VCPUs per VM.
-    ///
-    fn get_max_vcpus(&self) -> hypervisor::Result<usize> {
-        Ok(self.kvm.get_max_vcpus())
-    }
-    ///
-    /// Gets the recommended number of VCPUs per VM.
-    ///
-    fn get_nr_vcpus(&self) -> hypervisor::Result<usize> {
-        Ok(self.kvm.get_nr_vcpus())
-    }
-    #[cfg(target_arch = "x86_64")]
-    ///
-    /// Checks if a particular `Cap` is available.
-    ///
-    fn check_capability(&self, c: Cap) -> bool {
-        self.kvm.check_extension(c)
-    }
     #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call to get the system supported CPUID values.
@@ -601,6 +588,7 @@ impl hypervisor::Hypervisor for KvmHypervisor {
             .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
             .map_err(|e| hypervisor::HypervisorError::GetCpuId(e.into()))
     }
+
     #[cfg(target_arch = "x86_64")]
     ///
     /// Retrieve the list of MSRs supported by KVM.
@@ -609,6 +597,13 @@ impl hypervisor::Hypervisor for KvmHypervisor {
         self.kvm
             .get_msr_index_list()
             .map_err(|e| hypervisor::HypervisorError::GetMsrList(e.into()))
+    }
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Retrieve AArch64 host maximum IPA size supported by KVM.
+    ///
+    fn get_host_ipa_limit(&self) -> i32 {
+        self.kvm.get_host_ipa_limit()
     }
 }
 /// Vcpu struct for KVM

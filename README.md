@@ -180,7 +180,7 @@ To build the kernel:
 
 # Clone the Cloud Hypervisor Linux branch
 $ pushd $CLOUDH
-$ git clone --depth 1 https://github.com/cloud-hypervisor/linux.git -b ch-5.12 linux-cloud-hypervisor
+$ git clone --depth 1 https://github.com/cloud-hypervisor/linux.git -b ch-5.13-rc5 linux-cloud-hypervisor
 $ pushd linux-cloud-hypervisor
 
 # Use the cloud-hypervisor kernel config to build your kernel
@@ -205,7 +205,7 @@ $ popd
 #### Booting the guest VM
 
 Now we can directly boot into our custom kernel and make it use the Ubuntu root partition.
-If we want to have 4 vCPUs and 512 MBytes of memory:
+If we want to have 4 vCPUs and 1024 MBytes of memory:
 
 ```shell
 $ pushd $CLOUDH
