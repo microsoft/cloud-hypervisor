@@ -7,9 +7,9 @@
 // Copyright 2018-2019 CrowdStrike, Inc.
 //
 //
-
 use crate::arch::x86::{msr_index, SegmentRegisterOps, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
 use serde_derive::{Deserialize, Serialize};
+use std::fmt;
 
 ///
 /// Export generically-named wrappers of mshv_bindings for Unix-based platforms
@@ -20,8 +20,8 @@ pub use {
     mshv_bindings::FloatingPointUnit as FpuState, mshv_bindings::LapicState,
     mshv_bindings::MsrList, mshv_bindings::Msrs as MsrEntries, mshv_bindings::Msrs,
     mshv_bindings::SegmentRegister, mshv_bindings::SpecialRegisters,
-    mshv_bindings::StandardRegisters, mshv_bindings::VcpuEvents, mshv_bindings::XSave as Xsave,
-    mshv_bindings::Xcrs as ExtendedControlRegisters,
+    mshv_bindings::StandardRegisters, mshv_bindings::SuspendRegisters, mshv_bindings::VcpuEvents,
+    mshv_bindings::XSave as Xsave, mshv_bindings::Xcrs as ExtendedControlRegisters,
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuMshvState {
@@ -34,6 +34,30 @@ pub struct VcpuMshvState {
     pub lapic: LapicState,
     pub dbg: DebugRegisters,
     pub xsave: Xsave,
+}
+
+impl fmt::Display for VcpuMshvState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let expected_num_msrs = self.msrs.as_fam_struct_ref().nmsrs as usize;
+        let mut msr_entries = vec![vec![0; 2]; expected_num_msrs];
+
+        for (i, entry) in self.msrs.as_slice().iter().enumerate() {
+            msr_entries[i][1] = entry.data;
+            msr_entries[i][0] = entry.index as u64;
+        }
+        write!(f, "Number of MSRs: {}: MSRs: {:#010X?}, -- VCPU Events: {:?} -- Standard registers: {:?} Special Registers: {:?} ---- Floating Point Unit: {:?} --- Extended Control Register: {:?} --- Local APIC: {:?} --- DBG: {:?} --- Xsave: {:?}",
+                msr_entries.len(),
+                msr_entries,
+                self.vcpu_events,
+                self.regs,
+                self.sregs,
+                self.fpu,
+                self.xcrs,
+                self.lapic,
+                self.dbg,
+                self.xsave,
+        )
+    }
 }
 
 pub struct CreateDevice {}
