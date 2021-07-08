@@ -1013,6 +1013,8 @@ impl Vmm {
                 )));
             }
 
+            #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+            vm.enable_memory_log_dirty()?;
             // Start logging dirty pages
             vm.start_memory_dirty_log()?;
 
@@ -1078,6 +1080,9 @@ impl Vmm {
                 )));
             }
             info!("Migration complete");
+            // Disable dirty logging
+            #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+            vm.complete_live_migration()?;
             Ok(())
         } else {
             Err(MigratableError::MigrateSend(anyhow!("VM is not running")))

@@ -2119,6 +2119,25 @@ impl Vm {
         Ok(table)
     }
 
+    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    pub fn enable_memory_log_dirty(&self) -> std::result::Result<(), MigratableError> {
+        self.vm.enable_dirty_page_tracking().map_err(|e| {
+            MigratableError::EnableDirtyLogging(anyhow!(
+                "Error enabling dirty page tracking: {}",
+                e
+            ))
+        })
+    }
+    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    pub fn complete_live_migration(&self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().end_memory_dirty_log()?;
+        self.vm.disable_dirty_page_tracking().map_err(|e| {
+            MigratableError::DisableDirtyLogging(anyhow!(
+                "Error disabling dirty page tracking: {}",
+                e
+            ))
+        })
+    }
     pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
         self.memory_manager.lock().unwrap().start_memory_dirty_log()
     }
