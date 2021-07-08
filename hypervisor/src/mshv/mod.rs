@@ -886,9 +886,9 @@ impl vm::Vm for MshvVm {
         memory_size: u64,
         _flags: u64,
     ) -> vm::Result<Vec<u64>> {
-        Err(vm::HypervisorVmError::GetDirtyLog(anyhow!(
-            "get_dirty_log not implemented"
-        )))
+        self.fd
+            .get_dirty_log(_base_gpa >> PAGE_SHIFT, memory_size as usize, _flags)
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
     }
     ///
     /// Enable dirty page tracking
