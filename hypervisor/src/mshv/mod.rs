@@ -879,7 +879,13 @@ impl vm::Vm for MshvVm {
     ///
     /// Get dirty pages bitmap (one bit per page)
     ///
-    fn get_dirty_log(&self, _slot: u32, _memory_size: u64) -> vm::Result<Vec<u64>> {
+    fn get_dirty_log(
+        &self,
+        _slot: u32,
+        _base_gpa: u64,
+        memory_size: u64,
+        _flags: u64,
+    ) -> vm::Result<Vec<u64>> {
         Err(vm::HypervisorVmError::GetDirtyLog(anyhow!(
             "get_dirty_log not implemented"
         )))
