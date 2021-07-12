@@ -13,19 +13,19 @@ homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
 lto = true
 
 [dependencies]
-anyhow = "1.0.41"
+anyhow = "1.0.42"
 api_client = { path = "api_client" }
 clap = { version = "2.33.3", features = ["wrap_help"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.97"
+libc = "0.2.98"
 log = { version = "0.4.14", features = ["std"] }
 option_parser = { path = "option_parser" }
 seccomp = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v0.24.4" }
 serde_json = "1.0.64"
 signal-hook = "0.3.9"
-thiserror = "1.0.25"
+thiserror = "1.0.26"
 vmm = { path = "vmm" }
 vmm-sys-util = "0.8.0"
 vm-memory = "0.5.0"

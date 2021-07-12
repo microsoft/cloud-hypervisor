@@ -34,6 +34,7 @@ pub const ACPI_APIC_GENERIC_REDISTRIBUTOR: u8 = 14;
 #[cfg(target_arch = "aarch64")]
 pub const ACPI_APIC_GENERIC_TRANSLATOR: u8 = 15;
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct PciRangeEntry {
@@ -44,6 +45,7 @@ struct PciRangeEntry {
     _reserved: u32,
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct MemoryAffinity {
@@ -60,6 +62,7 @@ struct MemoryAffinity {
     _reserved3: u64,
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct ProcessorLocalX2ApicAffinity {
@@ -71,6 +74,18 @@ struct ProcessorLocalX2ApicAffinity {
     pub flags: u32,
     pub clock_domain: u32,
     _reserved2: u32,
+}
+
+#[allow(dead_code)]
+#[repr(packed)]
+#[derive(Default)]
+struct ProcessorGiccAffinity {
+    pub type_: u8,
+    pub length: u8,
+    pub proximity_domain: u32,
+    pub acpi_processor_uid: u32,
+    pub flags: u32,
+    pub clock_domain: u32,
 }
 
 bitflags! {
@@ -88,12 +103,24 @@ impl MemoryAffinity {
         proximity_domain: u32,
         flags: MemAffinityFlags,
     ) -> Self {
-        let base_addr = region.start_addr().raw_value();
+        Self::from_range(
+            region.start_addr().raw_value(),
+            region.len(),
+            proximity_domain,
+            flags,
+        )
+    }
+
+    fn from_range(
+        base_addr: u64,
+        size: u64,
+        proximity_domain: u32,
+        flags: MemAffinityFlags,
+    ) -> Self {
         let base_addr_lo = (base_addr & 0xffff_ffff) as u32;
         let base_addr_hi = (base_addr >> 32) as u32;
-        let length = region.len() as u64;
-        let length_lo = (length & 0xffff_ffff) as u32;
-        let length_hi = (length >> 32) as u32;
+        let length_lo = (size & 0xffff_ffff) as u32;
+        let length_hi = (size >> 32) as u32;
 
         MemoryAffinity {
             type_: 1,
@@ -109,6 +136,7 @@ impl MemoryAffinity {
     }
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct ViotVirtioPciNode {
@@ -120,6 +148,7 @@ struct ViotVirtioPciNode {
     _reserved2: [u8; 8],
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct ViotPciRangeNode {
@@ -237,6 +266,16 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
             ))
         }
 
+        #[cfg(target_arch = "x86_64")]
+        for section in node.sgx_epc_sections() {
+            srat.append(MemoryAffinity::from_range(
+                section.start().raw_value(),
+                section.size(),
+                proximity_domain,
+                MemAffinityFlags::ENABLE,
+            ))
+        }
+
         for cpu in node.cpus() {
             let x2apic_id = *cpu as u32;
 
@@ -245,6 +284,7 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
             // - Reserved bits 1-31
             let flags = 1;
 
+            #[cfg(target_arch = "x86_64")]
             srat.append(ProcessorLocalX2ApicAffinity {
                 type_: 2,
                 length: 24,
@@ -253,6 +293,15 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
                 flags,
                 clock_domain: 0,
                 ..Default::default()
+            });
+            #[cfg(target_arch = "aarch64")]
+            srat.append(ProcessorGiccAffinity {
+                type_: 3,
+                length: 18,
+                proximity_domain,
+                acpi_processor_uid: x2apic_id,
+                flags,
+                clock_domain: 0,
             });
         }
     }

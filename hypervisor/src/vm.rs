@@ -25,6 +25,8 @@ use crate::KvmVmState as VmState;
 use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
 #[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
+#[cfg(target_arch = "x86_64")]
+use std::fs::File;
 use std::sync::Arc;
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
@@ -92,10 +94,15 @@ pub enum HypervisorVmError {
     #[error("Failed to set GSI routing: {0}")]
     SetGsiRouting(#[source] anyhow::Error),
     ///
-    /// Set user memory error
+    /// Create user memory error
     ///
-    #[error("Failed to set user memory: {0}")]
-    SetUserMemory(#[source] anyhow::Error),
+    #[error("Failed to create user memory: {0}")]
+    CreateUserMemory(#[source] anyhow::Error),
+    ///
+    /// Remove user memory region error
+    ///
+    #[error("Failed to remove user memory: {0}")]
+    RemoveUserMemory(#[source] anyhow::Error),
     ///
     /// Create device error
     ///
@@ -111,6 +118,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to enable split Irq: {0}")]
     EnableSplitIrq(#[source] anyhow::Error),
+    ///
+    /// Enable SGX attribute error
+    ///
+    #[error("Failed to enable SGX attribute: {0}")]
+    EnableSgxAttribute(#[source] anyhow::Error),
     ///
     /// Get clock error
     ///
@@ -218,7 +230,7 @@ pub trait Vm: Send + Sync {
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> Result<()>;
     /// Sets the GSI routing table entries, overwriting any previously set
     fn set_gsi_routing(&self, entries: &[IrqRoutingEntry]) -> Result<()>;
-    /// Creates a memory region structure that can be used with set_user_memory_region
+    /// Creates a memory region structure that can be used with {create/remove}_user_memory_region
     fn make_user_memory_region(
         &self,
         slot: u32,
@@ -228,8 +240,10 @@ pub trait Vm: Send + Sync {
         readonly: bool,
         log_dirty_pages: bool,
     ) -> MemoryRegion;
-    /// Creates/modifies a guest physical memory slot.
-    fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> Result<()>;
+    /// Creates a guest physical memory slot.
+    fn create_user_memory_region(&self, user_memory_region: MemoryRegion) -> Result<()>;
+    /// Removes a guest physical memory slot.
+    fn remove_user_memory_region(&self, user_memory_region: MemoryRegion) -> Result<()>;
     #[cfg(feature = "kvm")]
     /// Creates an emulated device in the kernel.
     fn create_device(&self, device: &mut CreateDevice) -> Result<Arc<dyn Device>>;
@@ -239,6 +253,8 @@ pub trait Vm: Send + Sync {
     /// Enable split Irq capability
     #[cfg(target_arch = "x86_64")]
     fn enable_split_irq(&self) -> Result<()>;
+    #[cfg(target_arch = "x86_64")]
+    fn enable_sgx_attribute(&self, file: File) -> Result<()>;
     /// Retrieve guest clock.
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     fn get_clock(&self) -> Result<ClockData>;

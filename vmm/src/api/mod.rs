@@ -64,9 +64,6 @@ pub enum ApiError {
     /// The VM could not boot.
     VmBoot(VmError),
 
-    /// The VM is already created.
-    VmAlreadyCreated,
-
     /// The VM could not be created.
     VmCreate(VmError),
 
@@ -75,9 +72,6 @@ pub enum ApiError {
 
     /// The VM info is not available.
     VmInfo(VmError),
-
-    /// The VM config is missing.
-    VmMissingConfig,
 
     /// The VM could not be paused.
     VmPause(VmError),

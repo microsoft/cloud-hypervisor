@@ -18,6 +18,7 @@ use crate::DeviceType;
 use crate::GuestMemoryMmap;
 use crate::RegionType;
 use gic::GicDevice;
+use log::{log_enabled, Level};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::CStr;
@@ -87,7 +88,7 @@ pub fn configure_vcpu(
 pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, RegionType)> {
     // Normally UEFI should be loaded to a flash area at the beginning of memory.
     // But now flash memory type is not supported.
-    // As a workaround, we take 64 MiB memory from the main RAM for UEFI.
+    // As a workaround, we take 4 MiB memory from the main RAM for UEFI.
     // As a result, the RAM that the guest can see is less than what has been
     // assigned in command line, when ACPI and UEFI is enabled.
     let ram_deduction = if cfg!(feature = "acpi") {
@@ -97,7 +98,7 @@ pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, Region
     };
 
     vec![
-        // 0 ~ 64 MiB: Reserved for UEFI space
+        // 0 ~ 4 MiB: Reserved for UEFI space
         #[cfg(feature = "acpi")]
         (GuestAddress(0), layout::UEFI_SIZE as usize, RegionType::Ram),
         #[cfg(not(feature = "acpi"))]
@@ -106,7 +107,7 @@ pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, Region
             layout::UEFI_SIZE as usize,
             RegionType::Reserved,
         ),
-        // 64 MiB ~ 256 MiB: Gic and legacy devices
+        // 4 MiB ~ 256 MiB: Gic and legacy devices
         (
             GuestAddress(layout::UEFI_SIZE),
             (layout::MEM_32BIT_DEVICES_START.0 - layout::UEFI_SIZE) as usize,
@@ -153,6 +154,10 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
         pci_space_address,
     )
     .map_err(|_| Error::SetupFdt)?;
+
+    if log_enabled!(Level::Debug) {
+        fdt::print_fdt(&fdt_final);
+    }
 
     fdt::write_fdt_to_memory(fdt_final, guest_mem).map_err(Error::WriteFdtToMemory)?;
 

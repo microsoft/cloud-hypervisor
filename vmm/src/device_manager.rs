@@ -97,7 +97,7 @@ use vm_memory::guest_memory::FileOffset;
 #[cfg(feature = "kvm")]
 use vm_memory::GuestMemoryRegion;
 use vm_memory::{Address, GuestAddress, GuestUsize, MmapRegion};
-#[cfg(feature = "cmos")]
+#[cfg(all(target_arch = "x86_64", feature = "cmos"))]
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -727,20 +727,19 @@ impl DeviceRelocation for AddressManager {
                 let mut virtio_dev = virtio_dev.lock().unwrap();
                 if let Some(mut shm_regions) = virtio_dev.get_shm_regions() {
                     if shm_regions.addr.raw_value() == old_base {
-                        // Remove old region from KVM by passing a size of 0.
                         let mem_region = self.vm.make_user_memory_region(
                             shm_regions.mem_slot,
                             old_base,
-                            0,
+                            shm_regions.len,
                             shm_regions.host_addr,
                             false,
                             false,
                         );
 
-                        self.vm.set_user_memory_region(mem_region).map_err(|e| {
+                        self.vm.remove_user_memory_region(mem_region).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::Other,
-                                format!("failed to set user memory region: {:?}", e),
+                                format!("failed to remove user memory region: {:?}", e),
                             )
                         })?;
 
@@ -754,10 +753,10 @@ impl DeviceRelocation for AddressManager {
                             false,
                         );
 
-                        self.vm.set_user_memory_region(mem_region).map_err(|e| {
+                        self.vm.create_user_memory_region(mem_region).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::Other,
-                                format!("failed to set user memory regions: {:?}", e),
+                                format!("failed to create user memory regions: {:?}", e),
                             )
                         })?;
 
@@ -3159,7 +3158,7 @@ impl DeviceManager {
         device_cfg: &mut DeviceConfig,
     ) -> DeviceManagerResult<PciDeviceInfo> {
         let pci = if let Some(pci_bus) = &self.pci_bus {
-            Arc::clone(&pci_bus)
+            Arc::clone(pci_bus)
         } else {
             return Err(DeviceManagerError::NoPciBus);
         };
@@ -3235,7 +3234,7 @@ impl DeviceManager {
     pub fn eject_device(&mut self, device_id: u8) -> DeviceManagerResult<()> {
         // Retrieve the PCI bus.
         let pci = if let Some(pci_bus) = &self.pci_bus {
-            Arc::clone(&pci_bus)
+            Arc::clone(pci_bus)
         } else {
             return Err(DeviceManagerError::NoPciBus);
         };
@@ -3382,7 +3381,7 @@ impl DeviceManager {
         }
 
         let pci = if let Some(pci_bus) = &self.pci_bus {
-            Arc::clone(&pci_bus)
+            Arc::clone(pci_bus)
         } else {
             return Err(DeviceManagerError::NoPciBus);
         };
@@ -3463,6 +3462,39 @@ impl DeviceManager {
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
         self.device_tree.clone()
+    }
+
+    pub fn restore_devices(
+        &mut self,
+        snapshot: Snapshot,
+    ) -> std::result::Result<(), MigratableError> {
+        // Finally, restore all devices associated with the DeviceManager.
+        // It's important to restore devices in the right order, that's why
+        // the device tree is the right way to ensure we restore a child before
+        // its parent node.
+        for node in self
+            .device_tree
+            .lock()
+            .unwrap()
+            .breadth_first_traversal()
+            .rev()
+        {
+            // Restore the node
+            if let Some(migratable) = &node.migratable {
+                debug!("Restoring {} from DeviceManager", node.id);
+                if let Some(snapshot) = snapshot.snapshots.get(&node.id) {
+                    migratable.lock().unwrap().pause()?;
+                    migratable.lock().unwrap().restore(*snapshot.clone())?;
+                } else {
+                    return Err(MigratableError::Restore(anyhow!(
+                        "Missing device {}",
+                        node.id
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     #[cfg(feature = "acpi")]
@@ -3744,6 +3776,14 @@ impl Aml for DeviceManager {
         let supp = aml::Name::new("SUPP".into(), &aml::ZERO);
         pci_dsdt_inner_data.push(&supp);
 
+        // Since Cloud Hypervisor supports only one PCI bus, it can be tied
+        // to the NUMA node 0. It's up to the user to organize the NUMA nodes
+        // so that the PCI bus relates to the expected vCPUs and guest RAM.
+        let proximity_domain = 0u32;
+        let pxm_return = aml::Return::new(&proximity_domain);
+        let pxm = aml::Method::new("_PXM".into(), 0, false, vec![&pxm_return]);
+        pci_dsdt_inner_data.push(&pxm);
+
         let pci_dsm = PciDsmMethod {};
         pci_dsdt_inner_data.push(&pci_dsm);
 
@@ -3771,6 +3811,10 @@ impl Aml for DeviceManager {
                     start_of_device_area,
                     end_of_device_area,
                 ),
+                #[cfg(target_arch = "x86_64")]
+                &aml::AddressSpace::new_io(0u16, 0x0cf7u16),
+                #[cfg(target_arch = "x86_64")]
+                &aml::AddressSpace::new_io(0x0d00u16, 0xffffu16),
             ]),
         );
         pci_dsdt_inner_data.push(&crs);
@@ -3958,32 +4002,6 @@ impl Snapshottable for DeviceManager {
         self.create_devices(None, None)
             .map_err(|e| MigratableError::Restore(anyhow!("Could not create devices {:?}", e)))?;
 
-        // Finally, restore all devices associated with the DeviceManager.
-        // It's important to restore devices in the right order, that's why
-        // the device tree is the right way to ensure we restore a child before
-        // its parent node.
-        for node in self
-            .device_tree
-            .lock()
-            .unwrap()
-            .breadth_first_traversal()
-            .rev()
-        {
-            // Restore the node
-            if let Some(migratable) = &node.migratable {
-                debug!("Restoring {} from DeviceManager", node.id);
-                if let Some(snapshot) = snapshot.snapshots.get(&node.id) {
-                    migratable.lock().unwrap().pause()?;
-                    migratable.lock().unwrap().restore(*snapshot.clone())?;
-                } else {
-                    return Err(MigratableError::Restore(anyhow!(
-                        "Missing device {}",
-                        node.id
-                    )));
-                }
-            }
-        }
-
         Ok(())
     }
 }
@@ -4037,7 +4055,7 @@ impl BusDevice for DeviceManager {
             B0EJ_FIELD_OFFSET => {
                 assert!(data.len() == B0EJ_FIELD_SIZE);
                 let mut data_array: [u8; 4] = [0, 0, 0, 0];
-                data_array.copy_from_slice(&data);
+                data_array.copy_from_slice(data);
                 let device_bitmap = u32::from_le_bytes(data_array);
 
                 for device_id in 0..32 {

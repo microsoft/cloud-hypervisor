@@ -3,7 +3,6 @@
 // Copyright © 2020, Microsoft Corporation
 //
 
-#![allow(safe_packed_borrows)]
 use crate::arch::emulator::{PlatformEmulator, PlatformError};
 
 #[cfg(target_arch = "x86_64")]
@@ -29,6 +28,8 @@ pub use x86_64::VcpuMshvState as CpuState;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
+use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::sync::RwLock;
 
@@ -236,7 +237,7 @@ impl cpu::Vcpu for MshvVcpu {
     ///
     fn set_xcrs(&self, xcrs: &ExtendedControlRegisters) -> cpu::Result<()> {
         self.fd
-            .set_xcrs(&xcrs)
+            .set_xcrs(xcrs)
             .map_err(|e| cpu::HypervisorCpuError::SetXcsr(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
@@ -394,22 +395,22 @@ impl cpu::Vcpu for MshvVcpu {
                 }
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
                     let info = x.to_cpuid_info().unwrap();
-                    debug!("cpuid eax: {:x}", info.rax);
+                    debug!("cpuid eax: {:x}", { info.rax });
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
                     let info = x.to_msr_info().unwrap();
                     if info.header.intercept_access_type == 0 {
-                        debug!("msr read: {:x}", info.msr_number);
+                        debug!("msr read: {:x}", { info.msr_number });
                     } else {
-                        debug!("msr write: {:x}", info.msr_number);
+                        debug!("msr write: {:x}", { info.msr_number });
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT => {
                     //TODO: Handler for VMCALL here.
                     let info = x.to_exception_info().unwrap();
-                    debug!("Exception Info {:?}", info.exception_vector);
+                    debug!("Exception Info {:?}", { info.exception_vector });
                     Ok(cpu::VmExit::Ignore)
                 }
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
@@ -718,7 +719,7 @@ impl vm::Vm for MshvVm {
         debug!("register_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
 
         self.fd
-            .register_irqfd(&fd, gsi)
+            .register_irqfd(fd, gsi)
             .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))?;
 
         Ok(())
@@ -730,7 +731,7 @@ impl vm::Vm for MshvVm {
         debug!("unregister_irqfd fd {} gsi {}", fd.as_raw_fd(), gsi);
 
         self.fd
-            .unregister_irqfd(&fd, gsi)
+            .unregister_irqfd(fd, gsi)
             .map_err(|e| vm::HypervisorVmError::UnregisterIrqFd(e.into()))?;
 
         Ok(())
@@ -759,6 +760,10 @@ impl vm::Vm for MshvVm {
     }
     #[cfg(target_arch = "x86_64")]
     fn enable_split_irq(&self) -> vm::Result<()> {
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn enable_sgx_attribute(&self, _file: File) -> vm::Result<()> {
         Ok(())
     }
     fn register_ioevent(
@@ -799,11 +804,19 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
     }
 
-    /// Creates/modifies a guest physical memory slot.
-    fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+    /// Creates a guest physical memory region.
+    fn create_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
         self.fd
             .map_user_memory(user_memory_region)
-            .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()))?;
+            .map_err(|e| vm::HypervisorVmError::CreateUserMemory(e.into()))?;
+        Ok(())
+    }
+
+    /// Removes a guest physical memory region.
+    fn remove_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+        self.fd
+            .unmap_user_memory(user_memory_region)
+            .map_err(|e| vm::HypervisorVmError::RemoveUserMemory(e.into()))?;
         Ok(())
     }
 
@@ -843,7 +856,7 @@ impl vm::Vm for MshvVm {
         unsafe {
             let entries_slice: &mut [mshv_msi_routing_entry] =
                 msi_routing[0].entries.as_mut_slice(entries.len());
-            entries_slice.copy_from_slice(&entries);
+            entries_slice.copy_from_slice(entries);
         }
 
         self.fd

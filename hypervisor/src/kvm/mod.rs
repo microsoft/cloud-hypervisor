@@ -24,6 +24,8 @@ use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
 use serde_derive::{Deserialize, Serialize};
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
+#[cfg(target_arch = "x86_64")]
+use std::fs::File;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 #[cfg(target_arch = "x86_64")]
@@ -86,6 +88,9 @@ pub use {
     kvm_bindings::kvm_vcpu_events as VcpuEvents, kvm_ioctls::DeviceFd, kvm_ioctls::IoEventAddress,
     kvm_ioctls::VcpuExit,
 };
+
+#[cfg(target_arch = "x86_64")]
+const KVM_CAP_SGX_ATTRIBUTE: u32 = 196;
 
 #[cfg(feature = "tdx")]
 ioctl_iowr_nr!(KVM_MEMORY_ENCRYPT_OP, KVMIO, 0xba, std::os::raw::c_ulong);
@@ -226,7 +231,7 @@ impl vm::Vm for KvmVm {
         unsafe {
             let entries_slice: &mut [kvm_irq_routing_entry] =
                 irq_routing[0].entries.as_mut_slice(entries.len());
-            entries_slice.copy_from_slice(&entries);
+            entries_slice.copy_from_slice(entries);
         }
 
         self.fd
@@ -234,7 +239,7 @@ impl vm::Vm for KvmVm {
             .map_err(|e| vm::HypervisorVmError::SetGsiRouting(e.into()))
     }
     ///
-    /// Creates a memory region structure that can be used with set_user_memory_region
+    /// Creates a memory region structure that can be used with {create/remove}_user_memory_region
     ///
     fn make_user_memory_region(
         &self,
@@ -259,14 +264,29 @@ impl vm::Vm for KvmVm {
         }
     }
     ///
-    /// Creates/modifies a guest physical memory slot.
+    /// Creates a guest physical memory region.
     ///
-    fn set_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+    fn create_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
         // Safe because guest regions are guaranteed not to overlap.
         unsafe {
             self.fd
                 .set_user_memory_region(user_memory_region)
-                .map_err(|e| vm::HypervisorVmError::SetUserMemory(e.into()))
+                .map_err(|e| vm::HypervisorVmError::CreateUserMemory(e.into()))
+        }
+    }
+    ///
+    /// Removes a guest physical memory region.
+    ///
+    fn remove_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+        let mut region = user_memory_region;
+
+        // Setting the size to 0 means "remove"
+        region.memory_size = 0;
+        // Safe because guest regions are guaranteed not to overlap.
+        unsafe {
+            self.fd
+                .set_user_memory_region(region)
+                .map_err(|e| vm::HypervisorVmError::RemoveUserMemory(e.into()))
         }
     }
     ///
@@ -307,6 +327,18 @@ impl vm::Vm for KvmVm {
         self.fd
             .enable_cap(&cap)
             .map_err(|e| vm::HypervisorVmError::EnableSplitIrq(e.into()))?;
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn enable_sgx_attribute(&self, file: File) -> vm::Result<()> {
+        let mut cap = kvm_enable_cap {
+            cap: KVM_CAP_SGX_ATTRIBUTE,
+            ..Default::default()
+        };
+        cap.args[0] = file.as_raw_fd() as u64;
+        self.fd
+            .enable_cap(&cap)
+            .map_err(|e| vm::HypervisorVmError::EnableSgxAttribute(e.into()))?;
         Ok(())
     }
     /// Retrieve guest clock.
@@ -801,7 +833,7 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn set_xcrs(&self, xcrs: &ExtendedControlRegisters) -> cpu::Result<()> {
         self.fd
-            .set_xcrs(&xcrs)
+            .set_xcrs(xcrs)
             .map_err(|e| cpu::HypervisorCpuError::SetXcsr(e.into()))
     }
     ///

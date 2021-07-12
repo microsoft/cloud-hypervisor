@@ -343,15 +343,16 @@ it allows for specifying the distance between each NUMA node.
 
 ```rust
 struct NumaConfig {
-    id: u32,
+    guest_numa_id: u32,
     cpus: Option<Vec<u8>>,
     distances: Option<Vec<NumaDistance>>,
     memory_zones: Option<Vec<String>>,
+    sgx_epc_sections: Option<Vec<String>>,
 }
 ```
 
 ```
---numa <numa>	Settings related to a given NUMA node "id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,memory_zones=<list_of_memory_zones>"
+--numa <numa>	Settings related to a given NUMA node "guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,memory_zones=<list_of_memory_zones>,sgx_epc_sections=<list_of_sgx_epc_sections>"
 ```
 
 ### `guest_numa_id`
@@ -394,8 +395,7 @@ _Example_
 
 ```
 --cpus boot=8
---numa guest_numa_id=0,cpus=1-3:7
---numa guest_numa_id=1,cpus=0:4-6
+--numa guest_numa_id=0,cpus=1-3:7 guest_numa_id=1,cpus=0:4-6
 ```
 
 ### `distances`
@@ -420,9 +420,7 @@ different distances, it can be described with the following example.
 _Example_
 
 ```
---numa guest_numa_id=0,distances=1@15:2@25
---numa guest_numa_id=1,distances=0@15:2@20
---numa guest_numa_id=2,distances=0@25:1@20
+--numa guest_numa_id=0,distances=1@15:2@25 guest_numa_id=1,distances=0@15:2@20 guest_numa_id=2,distances=0@25:1@20
 ```
 
 ### `memory_zones`
@@ -445,9 +443,30 @@ _Example_
 
 ```
 --memory size=0
---memory-zone id=mem0,size=1G
---memory-zone id=mem1,size=1G
---memory-zone id=mem2,size=1G
---numa guest_numa_id=0,memory_zones=mem0:mem2
---numa guest_numa_id=1,memory_zones=mem1
+--memory-zone id=mem0,size=1G id=mem1,size=1G id=mem2,size=1G
+--numa guest_numa_id=0,memory_zones=mem0:mem2 guest_numa_id=1,memory_zones=mem1
 ```
+
+### `sgx_epc_sections`
+
+List of SGX EPC sections attached to the guest NUMA node identified by the
+`guest_numa_id` option. This allows for describing a list of SGX EPC sections
+which must be seen by the guest as belonging to the NUMA node `guest_numa_id`.
+
+Multiple values can be provided to define the list. Each value is a string
+referring to an existing SGX EPC section identifier. Values are separated from
+each other with the `:` separator.
+
+_Example_
+
+```
+--sgx-epc id=epc0,size=32M id=epc1,size=64M id=epc2,size=32M
+--numa guest_numa_id=0,sgx_epc_sections=epc1 guest_numa_id=1,sgx_epc_sections=epc0:epc2
+```
+
+### PCI bus
+
+Cloud Hypervisor supports only one PCI bus, which is why it has been tied to
+the NUMA node 0 by default. It is the user responsibility to organize the NUMA
+nodes correctly so that vCPUs and guest RAM which should be located on the same
+NUMA node as the PCI bus end up on the NUMA node 0.

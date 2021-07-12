@@ -1,5 +1,8 @@
+// Copyright 2021 Arm Limited (or its affiliates). All rights reserved.
 // Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+//
+// This file implements the GicV3 device.
 
 pub mod kvm {
     use crate::aarch64::gic::dist_regs::{get_dist_regs, read_ctlr, set_dist_regs, write_ctlr};
@@ -50,7 +53,7 @@ pub mod kvm {
     type Result<T> = result::Result<T, Error>;
 
     pub struct KvmGicV3 {
-        /// The hypervisor agnostic device
+        /// The hypervisor agnostic device for the GicV3
         device: Arc<dyn hypervisor::Device>,
 
         /// Vector holding values of GICR_TYPER for each vCPU
@@ -107,19 +110,19 @@ pub mod kvm {
         /// Save the state of GIC.
         fn state(&self, gicr_typers: &[u64]) -> Result<Gicv3State> {
             // Flush redistributors pending tables to guest RAM.
-            save_pending_tables(&self.device()).map_err(Error::SavePendingTables)?;
+            save_pending_tables(self.device()).map_err(Error::SavePendingTables)?;
 
             let gicd_ctlr =
-                read_ctlr(&self.device()).map_err(Error::SaveDistributorCtrlRegisters)?;
+                read_ctlr(self.device()).map_err(Error::SaveDistributorCtrlRegisters)?;
 
             let dist_state =
-                get_dist_regs(&self.device()).map_err(Error::SaveDistributorRegisters)?;
+                get_dist_regs(self.device()).map_err(Error::SaveDistributorRegisters)?;
 
-            let rdist_state = get_redist_regs(&self.device(), &gicr_typers)
+            let rdist_state = get_redist_regs(self.device(), gicr_typers)
                 .map_err(Error::SaveRedistributorRegisters)?;
 
             let icc_state =
-                get_icc_regs(&self.device(), &gicr_typers).map_err(Error::SaveIccRegisters)?;
+                get_icc_regs(self.device(), gicr_typers).map_err(Error::SaveIccRegisters)?;
 
             Ok(Gicv3State {
                 dist: dist_state,
@@ -131,16 +134,16 @@ pub mod kvm {
 
         /// Restore the state of GIC.
         fn set_state(&mut self, gicr_typers: &[u64], state: &Gicv3State) -> Result<()> {
-            write_ctlr(&self.device(), state.gicd_ctlr)
+            write_ctlr(self.device(), state.gicd_ctlr)
                 .map_err(Error::RestoreDistributorCtrlRegisters)?;
 
-            set_dist_regs(&self.device(), &state.dist)
+            set_dist_regs(self.device(), &state.dist)
                 .map_err(Error::RestoreDistributorRegisters)?;
 
-            set_redist_regs(&self.device(), gicr_typers, &state.rdist)
+            set_redist_regs(self.device(), gicr_typers, &state.rdist)
                 .map_err(Error::RestoreRedistributorRegisters)?;
 
-            set_icc_regs(&self.device(), &gicr_typers, &state.icc)
+            set_icc_regs(self.device(), gicr_typers, &state.icc)
                 .map_err(Error::RestoreIccRegisters)?;
 
             Ok(())
@@ -167,6 +170,8 @@ pub mod kvm {
         fn vcpu_count(&self) -> u64 {
             self.vcpu_count
         }
+
+        fn set_its_device(&mut self, _its_device: Option<Arc<dyn hypervisor::Device>>) {}
 
         fn set_gicr_typers(&mut self, vcpu_states: &[CpuState]) {
             let gicr_typers = construct_gicr_typers(vcpu_states);
@@ -202,7 +207,7 @@ pub mod kvm {
 
         fn init_device_attributes(
             _vm: &Arc<dyn hypervisor::Vm>,
-            gic_device: &dyn GicDevice,
+            gic_device: &mut dyn GicDevice,
         ) -> crate::aarch64::gic::Result<()> {
             /* Setting up the distributor attribute.
              We are placing the GIC below 1GB so we need to substract the size of the distributor.
