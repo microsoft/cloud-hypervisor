@@ -7,6 +7,7 @@ edition = "2018"
 [features]
 default = []
 io_uring = ["block_util/io_uring"]
+mshv = ["hypervisor/mshv"]
 
 [dependencies]
 anyhow = "1.0"
@@ -15,6 +16,7 @@ block_util = { path = "../block_util" }
 byteorder = "1.4.3"
 epoll = ">=4.0.1"
 event_monitor = { path = "../event_monitor" }
+hypervisor = { path = "../hypervisor" }
 io-uring = ">=0.4.0"
 libc = "0.2.98"
 log = "0.4.14"
