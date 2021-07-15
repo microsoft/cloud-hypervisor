@@ -176,8 +176,11 @@ pub enum Error {
     /// The requested hotplug memory addition is not a valid size
     InvalidSize,
 
-    /// Failed to set the user memory region.
-    SetUserMemoryRegion(hypervisor::HypervisorVmError),
+    /// Failed to create the user memory region.
+    CreateUserMemoryRegion(hypervisor::HypervisorVmError),
+
+    /// Failed to remove the user memory region.
+    RemoveUserMemoryRegion(hypervisor::HypervisorVmError),
 
     /// Failed to EventFd.
     EventFdFail(io::Error),
@@ -209,6 +212,14 @@ pub enum Error {
     /// Failed setting the SGX virtual EPC section size
     #[cfg(target_arch = "x86_64")]
     SgxVirtEpcFileSetLen(io::Error),
+
+    /// Failed opening SGX provisioning device
+    #[cfg(target_arch = "x86_64")]
+    SgxProvisionOpen(io::Error),
+
+    /// Failed enabling SGX provisioning
+    #[cfg(target_arch = "x86_64")]
+    SgxEnableProvisioning(hypervisor::HypervisorVmError),
 
     /// Failed creating a new MmapRegion instance.
     #[cfg(target_arch = "x86_64")]
@@ -1212,8 +1223,8 @@ impl MemoryManager {
         );
 
         self.vm
-            .set_user_memory_region(mem_region)
-            .map_err(Error::SetUserMemoryRegion)?;
+            .create_user_memory_region(mem_region)
+            .map_err(Error::CreateUserMemoryRegion)?;
 
         // Mark the pages as mergeable if explicitly asked for.
         if mergeable {
@@ -1259,15 +1270,15 @@ impl MemoryManager {
         let mem_region = self.vm.make_user_memory_region(
             slot,
             guest_phys_addr,
-            0, /* memory_size -- using 0 removes this slot */
+            memory_size,
             userspace_addr,
             false, /* readonly -- don't care */
             false, /* log dirty */
         );
 
         self.vm
-            .set_user_memory_region(mem_region)
-            .map_err(Error::SetUserMemoryRegion)?;
+            .remove_user_memory_region(mem_region)
+            .map_err(Error::RemoveUserMemoryRegion)?;
 
         // Mark the pages as unmergeable if there were previously marked as
         // mergeable.
@@ -1367,7 +1378,18 @@ impl MemoryManager {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn setup_sgx(&mut self, sgx_epc_config: Vec<SgxEpcConfig>) -> Result<(), Error> {
+    pub fn setup_sgx(
+        &mut self,
+        sgx_epc_config: Vec<SgxEpcConfig>,
+        vm: &Arc<dyn hypervisor::Vm>,
+    ) -> Result<(), Error> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open("/dev/sgx_provision")
+            .map_err(Error::SgxProvisionOpen)?;
+        vm.enable_sgx_attribute(file)
+            .map_err(Error::SgxEnableProvisioning)?;
+
         // Go over each EPC section and verify its size is a 4k multiple. At
         // the same time, calculate the total size needed for the contiguous
         // EPC region.
@@ -1436,10 +1458,13 @@ impl MemoryManager {
                 false,
             )?;
 
-            sgx_epc_region.push(SgxEpcSection::new(
-                GuestAddress(epc_section_start),
-                epc_section.size as GuestUsize,
-            ));
+            sgx_epc_region.insert(
+                epc_section.id.clone(),
+                SgxEpcSection::new(
+                    GuestAddress(epc_section_start),
+                    epc_section.size as GuestUsize,
+                ),
+            );
 
             epc_section_start += epc_section.size;
         }
@@ -1613,14 +1638,6 @@ impl Aml for MemorySlot {
                         "MCRS".into(),
                         vec![&self.slot_id],
                     ))],
-                ),
-                // We don't expose any NUMA characteristics so all memory is in the same "proximity domain"
-                &aml::Method::new(
-                    "_PXM".into(),
-                    0,
-                    false,
-                    // We aren't NUMA so associate all RAM into the same proximity region (zero)
-                    vec![&aml::Return::new(&0u32)],
                 ),
             ],
         )

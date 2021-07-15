@@ -94,6 +94,8 @@ mod tests {
 
     const PIPE_SIZE: i32 = 32 << 20;
 
+    const CONSOLE_TEST_STRING: &str = "Started OpenBSD Secure Shell server";
+
     fn clh_command(cmd: &str) -> String {
         env::var("BUILD_TARGET").map_or(
             format!("target/x86_64-unknown-linux-gnu/release/{}", cmd),
@@ -225,6 +227,16 @@ mod tests {
         kernel_path.push("Image");
 
         kernel_path
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn edk2_path() -> PathBuf {
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
+        let mut edk2_path = workload_path;
+        edk2_path.push("CLOUDHV_EFI.fd");
+
+        edk2_path
     }
 
     fn prepare_vhost_user_net_daemon(
@@ -1061,7 +1073,7 @@ mod tests {
             );
 
             // ACPI feature is needed.
-            #[cfg(feature = "acpi")]
+            #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
             {
                 guest.enable_memory_hotplug();
 
@@ -1202,7 +1214,7 @@ mod tests {
             );
 
             // ACPI feature is needed.
-            #[cfg(feature = "acpi")]
+            #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
             {
                 guest.enable_memory_hotplug();
 
@@ -1408,7 +1420,7 @@ mod tests {
             );
 
             // ACPI feature is needed.
-            #[cfg(feature = "acpi")]
+            #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
             {
                 guest.enable_memory_hotplug();
 
@@ -1792,7 +1804,7 @@ mod tests {
 
     fn get_counters(api_socket: &str) -> Counters {
         // Get counters
-        let (cmd_success, cmd_output) = remote_command_w_output(&api_socket, "counters", None);
+        let (cmd_success, cmd_output) = remote_command_w_output(api_socket, "counters", None);
         assert!(cmd_success);
 
         let counters: HashMap<&str, HashMap<&str, u64>> =
@@ -1840,7 +1852,7 @@ mod tests {
     }
 
     fn get_pty_path(api_socket: &str, pty_type: &str) -> PathBuf {
-        let (cmd_success, cmd_output) = remote_command_w_output(&api_socket, "info", None);
+        let (cmd_success, cmd_output) = remote_command_w_output(api_socket, "info", None);
         assert!(cmd_success);
         let info: serde_json::Value = serde_json::from_slice(&cmd_output).unwrap_or_default();
         assert_eq!("Pty", info["config"][pty_type]["mode"]);
@@ -1886,7 +1898,7 @@ mod tests {
     }
 
     fn balloon_size(api_socket: &str) -> u64 {
-        let (cmd_success, cmd_output) = remote_command_w_output(&api_socket, "info", None);
+        let (cmd_success, cmd_output) = remote_command_w_output(api_socket, "info", None);
         assert!(cmd_success);
 
         let info: serde_json::Value = serde_json::from_slice(&cmd_output).unwrap_or_default();
@@ -1948,10 +1960,6 @@ mod tests {
         #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
         fn test_edk2_acpi_launch() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let mut workload_path = dirs::home_dir().unwrap();
-            workload_path.push("workloads");
-            let mut edk2_path = workload_path;
-            edk2_path.push("CLOUDHV_EFI.fd");
 
             vec![Box::new(focal)].drain(..).for_each(|disk_config| {
                 let guest = Guest::new(disk_config);
@@ -1959,7 +1967,7 @@ mod tests {
                 let mut child = GuestCommand::new(&guest)
                     .args(&["--cpus", "boot=1"])
                     .args(&["--memory", "size=512M"])
-                    .args(&["--kernel", edk2_path.to_str().unwrap()])
+                    .args(&["--kernel", edk2_path().to_str().unwrap()])
                     .default_disks()
                     .default_net()
                     .args(&["--serial", "tty", "--console", "off"])
@@ -2263,17 +2271,20 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
+        #[cfg(feature = "acpi")]
         fn test_guest_numa_nodes() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
 
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
 
             let mut child = GuestCommand::new(&guest)
-                .args(&["--cpus", "boot=6"])
+                .args(&["--cpus", "boot=6,max=12"])
                 .args(&["--memory", "size=0,hotplug_method=virtio-mem"])
                 .args(&[
                     "--memory-zone",
@@ -2283,9 +2294,9 @@ mod tests {
                 ])
                 .args(&[
                     "--numa",
-                    "guest_numa_id=0,cpus=0-2,distances=1@15:2@20,memory_zones=mem0",
-                    "guest_numa_id=1,cpus=3-4,distances=0@20:2@25,memory_zones=mem1",
-                    "guest_numa_id=2,cpus=5,distances=0@25:1@30,memory_zones=mem2",
+                    "guest_numa_id=0,cpus=0-2:9,distances=1@15:2@20,memory_zones=mem0",
+                    "guest_numa_id=1,cpus=3-4:6-8,distances=0@20:2@25,memory_zones=mem1",
+                    "guest_numa_id=2,cpus=5:10-11,distances=0@25:1@30,memory_zones=mem2",
                 ])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
@@ -2316,19 +2327,31 @@ mod tests {
                 assert!(guest.check_numa_node_distances(1, "20 10 25").unwrap());
                 assert!(guest.check_numa_node_distances(2, "25 30 10").unwrap());
 
-                guest.enable_memory_hotplug();
+                // AArch64 currently does not support hotplug, and therefore we only
+                // test hotplug-related function on x86_64 here.
+                #[cfg(target_arch = "x86_64")]
+                {
+                    guest.enable_memory_hotplug();
 
-                // Resize every memory zone and check each associated NUMA node
-                // has been assigned the right amount of memory.
-                resize_zone_command(&api_socket, "mem0", "4G");
-                thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_numa_node_memory(0).unwrap_or_default() > 3_840_000);
-                resize_zone_command(&api_socket, "mem1", "4G");
-                thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_numa_node_memory(1).unwrap_or_default() > 3_840_000);
-                resize_zone_command(&api_socket, "mem2", "4G");
-                thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_numa_node_memory(2).unwrap_or_default() > 3_840_000);
+                    // Resize every memory zone and check each associated NUMA node
+                    // has been assigned the right amount of memory.
+                    resize_zone_command(&api_socket, "mem0", "4G");
+                    thread::sleep(std::time::Duration::new(5, 0));
+                    assert!(guest.get_numa_node_memory(0).unwrap_or_default() > 3_840_000);
+                    resize_zone_command(&api_socket, "mem1", "4G");
+                    thread::sleep(std::time::Duration::new(5, 0));
+                    assert!(guest.get_numa_node_memory(1).unwrap_or_default() > 3_840_000);
+                    resize_zone_command(&api_socket, "mem2", "4G");
+                    thread::sleep(std::time::Duration::new(5, 0));
+                    assert!(guest.get_numa_node_memory(2).unwrap_or_default() > 3_840_000);
+
+                    // Resize to the maximum amount of CPUs and check each NUMA
+                    // node has been assigned the right CPUs set.
+                    resize_command(&api_socket, Some(12), None, None);
+                    guest.check_numa_node_cpus(0, vec![0, 1, 2, 9]).unwrap();
+                    guest.check_numa_node_cpus(1, vec![3, 4, 6, 7, 8]).unwrap();
+                    guest.check_numa_node_cpus(2, vec![5, 10, 11]).unwrap();
+                }
             });
 
             let _ = child.kill();
@@ -2953,7 +2976,7 @@ mod tests {
             handle_child_output(r, &output);
 
             let r = std::panic::catch_unwind(|| {
-                assert!(!String::from_utf8_lossy(&output.stdout).contains("cloud login:"));
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(CONSOLE_TEST_STRING));
             });
 
             handle_child_output(r, &output);
@@ -3013,7 +3036,7 @@ mod tests {
             handle_child_output(r, &output);
 
             let r = std::panic::catch_unwind(|| {
-                assert!(String::from_utf8_lossy(&output.stdout).contains("cloud login:"));
+                assert!(String::from_utf8_lossy(&output.stdout).contains(CONSOLE_TEST_STRING));
             });
 
             handle_child_output(r, &output);
@@ -3083,7 +3106,7 @@ mod tests {
                 let mut f = std::fs::File::open(serial_path).unwrap();
                 let mut buf = String::new();
                 f.read_to_string(&mut buf).unwrap();
-                assert!(buf.contains("cloud login:"));
+                assert!(buf.contains(CONSOLE_TEST_STRING));
             });
 
             handle_child_output(r, &output);
@@ -3265,7 +3288,14 @@ mod tests {
                 let mut f = std::fs::File::open(console_path).unwrap();
                 let mut buf = String::new();
                 f.read_to_string(&mut buf).unwrap();
-                assert!(buf.contains("cloud login:"));
+
+                if !buf.contains(CONSOLE_TEST_STRING) {
+                    eprintln!(
+                        "\n\n==== Console file output ====\n\n{}\n\n==== End console file output ====",
+                        buf
+                    );
+                }
+                assert!(buf.contains(CONSOLE_TEST_STRING));
             });
 
             handle_child_output(r, &output);
@@ -4251,6 +4281,12 @@ mod tests {
             thread::sleep(std::time::Duration::new(20, 0));
 
             let r = std::panic::catch_unwind(|| {
+                // On AArch64 when acpi is enabled, there is a 4 MiB gap between the RAM
+                // that the VMM gives and the guest can see.
+                // This is a temporary solution, will be fixed in future.
+                #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+                let guest_memory_size_kb = guest_memory_size_kb - 4 * 1024;
+
                 let overhead = get_vmm_overhead(child.id(), guest_memory_size_kb);
                 eprintln!(
                     "Guest memory overhead: {} vs {}",
@@ -4474,8 +4510,8 @@ mod tests {
                     "After deflating, balloon memory size is {} bytes",
                     deflated_balloon
                 );
-                // Verify the balloon size deflated by 10% at least
-                assert!(deflated_balloon > 0 && deflated_balloon < 1932735283);
+                // Verify the balloon size deflated
+                assert!(deflated_balloon < 2147483648);
             });
 
             let _ = child.kill();
@@ -4744,7 +4780,6 @@ mod tests {
         // through each ssh command. There's no need to perform a dedicated test to
         // verify the migration went well for virtio-net.
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_snapshot_restore() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4816,22 +4851,26 @@ mod tests {
 
                 guest.ssh_command(&console_cmd).unwrap();
 
-                // We check that removing and adding back the virtio-net device
+                // x86_64: We check that removing and adding back the virtio-net device
                 // does not break the snapshot/restore support for virtio-pci.
                 // This is an important thing to test as the hotplug will
                 // trigger a PCI BAR reprogramming, which is a good way of
                 // checking if the stored resources are correctly restored.
                 // Unplug the virtio-net device
-                assert!(remote_command(&api_socket, "remove-device", Some(net_id),));
-                thread::sleep(std::time::Duration::new(10, 0));
+                // AArch64: Device hotplug is currently not supported, skipping here.
+                #[cfg(target_arch = "x86_64")]
+                {
+                    assert!(remote_command(&api_socket, "remove-device", Some(net_id),));
+                    thread::sleep(std::time::Duration::new(10, 0));
 
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                thread::sleep(std::time::Duration::new(10, 0));
+                    // Plug the virtio-net device again
+                    assert!(remote_command(
+                        &api_socket,
+                        "add-net",
+                        Some(net_params.as_str()),
+                    ));
+                    thread::sleep(std::time::Duration::new(10, 0));
+                }
 
                 // Pause the VM
                 assert!(remote_command(&api_socket, "pause", None));
@@ -5417,9 +5456,22 @@ mod tests {
     mod windows {
         use crate::tests::*;
 
+        lazy_static! {
+            static ref NEXT_DISK_ID: Mutex<u8> = Mutex::new(1);
+        }
+
         struct WindowsGuest {
             guest: Guest,
             auth: PasswordAuth,
+        }
+
+        trait FsType {
+            const FS_FAT: u8;
+            const FS_NTFS: u8;
+        }
+        impl FsType for WindowsGuest {
+            const FS_FAT: u8 = 0;
+            const FS_NTFS: u8 = 1;
         }
 
         impl WindowsGuest {
@@ -5509,20 +5561,24 @@ mod tests {
                     .unwrap()
             }
 
-            // XXX Follow up test involving multiple disks will require:
-            // - Make image size variable
-            // - Make image filename random
-            // - Cleanup image file after test
-            // - NTFS should be added for use along with FAT for better coverage, needs mkfs.ntfs in the container.
-            fn disk_new(&self) -> String {
-                let img = PathBuf::from(
-                    String::from_utf8_lossy(b"/tmp/test-fat-hotplug-0.raw").to_string(),
-                );
+            // TODO Cleanup image file explicitly after test, if there's some space issues.
+            fn disk_new(&self, fs: u8, sz: usize) -> String {
+                let mut guard = NEXT_DISK_ID.lock().unwrap();
+                let id = *guard;
+                *guard = id + 1;
+
+                let img = PathBuf::from(format!("/tmp/test-hotplug-{}.raw", id));
                 let _ = fs::remove_file(&img);
 
                 // Create an image file
                 let out = Command::new("qemu-img")
-                    .args(&["create", "-f", "raw", &img.to_str().unwrap(), "100m"])
+                    .args(&[
+                        "create",
+                        "-f",
+                        "raw",
+                        img.to_str().unwrap(),
+                        format!("{}m", sz).as_str(),
+                    ])
                     .output()
                     .expect("qemu-img command failed")
                     .stdout;
@@ -5530,7 +5586,7 @@ mod tests {
 
                 // Associate image to a loop device
                 let out = Command::new("losetup")
-                    .args(&["--show", "-f", &img.to_str().unwrap()])
+                    .args(&["--show", "-f", img.to_str().unwrap()])
                     .output()
                     .expect("failed to create loop device")
                     .stdout;
@@ -5554,7 +5610,7 @@ mod tests {
 
                 // Disengage the loop device
                 let out = Command::new("losetup")
-                    .args(&["-d", &loop_dev])
+                    .args(&["-d", loop_dev])
                     .output()
                     .expect("loop device not found")
                     .stdout;
@@ -5567,7 +5623,7 @@ mod tests {
                         "--offset",
                         (512 * 2048).to_string().as_str(),
                         "-f",
-                        &img.to_str().unwrap(),
+                        img.to_str().unwrap(),
                     ])
                     .output()
                     .expect("failed to create loop device")
@@ -5576,21 +5632,24 @@ mod tests {
                 let loop_dev = _tmp.trim();
                 println!("{:?}", out);
 
-                // Create msdos filesystem.
-                // XXX mkfs.ntfs is missing in the docker image and should be added
-                // For mkfs.ntfs also add -f.
-                let out = Command::new("mkfs.msdos")
+                // Create filesystem.
+                let fs_cmd = match fs {
+                    WindowsGuest::FS_FAT => "mkfs.msdos",
+                    WindowsGuest::FS_NTFS => "mkfs.ntfs",
+                    _ => panic!("Unknown filesystem type '{}'", fs),
+                };
+                let out = Command::new(fs_cmd)
                     .args(&[&loop_dev])
                     .output()
-                    .expect("mkfs.msdos failed")
+                    .unwrap_or_else(|_| panic!("{} failed", fs_cmd))
                     .stdout;
                 println!("{:?}", out);
 
                 // Disengage the loop device
                 let out = Command::new("losetup")
-                    .args(&["-d", &loop_dev])
+                    .args(&["-d", loop_dev])
                     .output()
-                    .expect("loop device not found")
+                    .unwrap_or_else(|_| panic!("loop device '{}' not found", loop_dev))
                     .stdout;
                 println!("{:?}", out);
 
@@ -6137,7 +6196,7 @@ mod tests {
 
             let mut child_dnsmasq = windows_guest.run_dnsmasq();
 
-            let disk = windows_guest.disk_new();
+            let disk = windows_guest.disk_new(WindowsGuest::FS_FAT, 100);
 
             let r = std::panic::catch_unwind(|| {
                 // Wait to make sure Windows boots up
@@ -6203,6 +6262,192 @@ mod tests {
 
             handle_child_output(r, &output);
         }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        fn test_windows_guest_disk_hotplug_multi() {
+            let windows_guest = WindowsGuest::new();
+
+            let mut ovmf_path = dirs::home_dir().unwrap();
+            ovmf_path.push("workloads");
+            ovmf_path.push(OVMF_NAME);
+
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = GuestCommand::new(windows_guest.guest())
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
+                .args(&["--memory", "size=2G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .default_disks()
+                .default_net()
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let mut child_dnsmasq = windows_guest.run_dnsmasq();
+
+            // Predefined data to used at various test stages
+            let disk_test_data: [[String; 4]; 2] = [
+                [
+                    "_disk2".to_string(),
+                    windows_guest.disk_new(WindowsGuest::FS_FAT, 123),
+                    "d:\\world".to_string(),
+                    "hello".to_string(),
+                ],
+                [
+                    "_disk3".to_string(),
+                    windows_guest.disk_new(WindowsGuest::FS_NTFS, 333),
+                    "e:\\hello".to_string(),
+                    "world".to_string(),
+                ],
+            ];
+
+            let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
+                // Initially present disk device
+                let disk_num = 1;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                for it in &disk_test_data {
+                    let disk_id = it[0].as_str();
+                    let disk = it[1].as_str();
+                    // Hotplug disk device
+                    let (cmd_success, cmd_output) = remote_command_w_output(
+                        &api_socket,
+                        "add-disk",
+                        Some(format!("path={},readonly=off", disk).as_str()),
+                    );
+                    assert!(cmd_success);
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains(format!("\"id\":\"{}\"", disk_id).as_str()));
+                    thread::sleep(std::time::Duration::new(5, 0));
+                    // Online disk devices
+                    windows_guest.disks_set_rw();
+                    windows_guest.disks_online();
+                }
+                // Verify the devices are on the system
+                let disk_num = (disk_test_data.len() + 1) as u8;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                // Put test data
+                for it in &disk_test_data {
+                    let fname = it[2].as_str();
+                    let data = it[3].as_str();
+                    windows_guest.disk_file_put(fname, data);
+                }
+
+                // Unmount disk devices
+                for it in &disk_test_data {
+                    let disk_id = it[0].as_str();
+                    let cmd_success = remote_command(&api_socket, "remove-device", Some(disk_id));
+                    assert!(cmd_success);
+                    thread::sleep(std::time::Duration::new(5, 0));
+                }
+
+                // Verify the devices have been removed
+                let disk_num = 1;
+                assert_eq!(windows_guest.disk_count(), disk_num);
+                assert_eq!(disk_ctrl_threads_count(child.id()), disk_num);
+
+                // Remount
+                for it in &disk_test_data {
+                    let disk = it[1].as_str();
+                    let (cmd_success, _cmd_output) = remote_command_w_output(
+                        &api_socket,
+                        "add-disk",
+                        Some(format!("path={},readonly=off", disk).as_str()),
+                    );
+                    assert!(cmd_success);
+                    thread::sleep(std::time::Duration::new(5, 0));
+                }
+
+                // Check the files exists with the expected contents
+                for it in &disk_test_data {
+                    let fname = it[2].as_str();
+                    let data = it[3].as_str();
+                    let out = windows_guest.disk_file_read(fname);
+                    assert_eq!(data, out.trim());
+                }
+
+                // Intentionally no unmount, it'll happen at shutdown.
+
+                windows_guest.shutdown();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(60));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            let _ = child_dnsmasq.kill();
+            let _ = child_dnsmasq.wait();
+
+            handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        fn test_windows_guest_netdev_multi() {
+            let windows_guest = WindowsGuest::new();
+
+            let mut ovmf_path = dirs::home_dir().unwrap();
+            ovmf_path.push("workloads");
+            ovmf_path.push(OVMF_NAME);
+
+            let tmp_dir = TempDir::new_with_prefix("/tmp/ch").unwrap();
+            let api_socket = temp_api_path(&tmp_dir);
+
+            let mut child = GuestCommand::new(windows_guest.guest())
+                .args(&["--api-socket", &api_socket])
+                .args(&["--cpus", "boot=2,kvm_hyperv=on"])
+                .args(&["--memory", "size=4G"])
+                .args(&["--kernel", ovmf_path.to_str().unwrap()])
+                .args(&["--serial", "tty"])
+                .args(&["--console", "off"])
+                .default_disks()
+                // The multi net dev config is borrowed from test_multiple_network_interfaces
+                .args(&[
+                    "--net",
+                    windows_guest.guest().default_net_string().as_str(),
+                    "tap=,mac=8a:6b:6f:5a:de:ac,ip=192.168.3.1,mask=255.255.255.0",
+                    "tap=mytap42,mac=fe:1f:9e:e1:60:f2,ip=192.168.4.1,mask=255.255.255.0",
+                ])
+                .capture_output()
+                .spawn()
+                .unwrap();
+
+            let mut child_dnsmasq = windows_guest.run_dnsmasq();
+
+            let r = std::panic::catch_unwind(|| {
+                // Wait to make sure Windows boots up
+                assert!(windows_guest.wait_for_boot());
+
+                let netdev_num = 3;
+                assert_eq!(windows_guest.netdev_count(), netdev_num);
+                assert_eq!(netdev_ctrl_threads_count(child.id()), netdev_num);
+
+                let tap_count = exec_host_command_output("ip link | grep -c mytap42");
+                assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
+
+                windows_guest.shutdown();
+            });
+
+            let _ = child.wait_timeout(std::time::Duration::from_secs(60));
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+
+            let _ = child_dnsmasq.kill();
+            let _ = child_dnsmasq.wait();
+
+            handle_child_output(r, &output);
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -6226,8 +6471,7 @@ mod tests {
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .default_net()
-                .args(&["--sgx-epc", "size=64M"])
-                .args(&["--seccomp", ENABLE_SECCOMP])
+                .args(&["--sgx-epc", "id=epc0,size=64M"])
                 .capture_output()
                 .spawn()
                 .unwrap();

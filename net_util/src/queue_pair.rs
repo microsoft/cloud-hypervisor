@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
-use super::{unregister_listener, vnet_hdr_len, Tap};
+use super::{register_listener, unregister_listener, vnet_hdr_len, Tap};
 use crate::GuestMemoryMmap;
 use rate_limiter::{RateLimiter, TokenType};
 use std::io;
@@ -39,33 +39,17 @@ impl TxVirtio {
         tap: &mut Tap,
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
-    ) -> Result<(), NetQueuePairError> {
-        while let Some(avail_desc) = queue.iter(&mem).next() {
+    ) -> Result<bool, NetQueuePairError> {
+        let mut retry_write = false;
+        let mut rate_limit_reached = false;
+        while let Some(avail_desc) = queue.iter(mem).next() {
+            if rate_limit_reached {
+                queue.go_to_previous_position();
+                break;
+            }
+
             let head_index = avail_desc.index;
             let mut next_desc = Some(avail_desc);
-
-            if let Some(rate_limiter) = rate_limiter {
-                if !rate_limiter.consume(1, TokenType::Ops) {
-                    queue.go_to_previous_position();
-                    break;
-                }
-
-                let mut bytes = Wrapping(0);
-                let mut tmp_next_desc = next_desc.clone();
-                while let Some(desc) = tmp_next_desc {
-                    if !desc.is_write_only() {
-                        bytes += Wrapping(desc.len as u64);
-                    }
-                    tmp_next_desc = desc.next_descriptor();
-                }
-                bytes -= Wrapping(vnet_hdr_len() as u64);
-                if !rate_limiter.consume(bytes.0, TokenType::Bytes) {
-                    // Revert the OPS consume().
-                    rate_limiter.manual_replenish(1, TokenType::Ops);
-                    queue.go_to_previous_position();
-                    break;
-                }
-            }
 
             let mut iovecs = Vec::new();
             while let Some(desc) = next_desc {
@@ -83,7 +67,7 @@ impl TxVirtio {
                 next_desc = desc.next_descriptor();
             }
 
-            if !iovecs.is_empty() {
+            let len = if !iovecs.is_empty() {
                 let result = unsafe {
                     libc::writev(
                         tap.as_raw_fd() as libc::c_int,
@@ -91,13 +75,14 @@ impl TxVirtio {
                         iovecs.len() as libc::c_int,
                     )
                 };
+
                 if result < 0 {
                     let e = std::io::Error::last_os_error();
-                    queue.go_to_previous_position();
 
                     /* EAGAIN */
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        warn!("net: tx: (recoverable) failed writing to tap: {}", e);
+                        queue.go_to_previous_position();
+                        retry_write = true;
                         break;
                     }
                     error!("net: tx: failed writing to tap: {}", e);
@@ -106,13 +91,25 @@ impl TxVirtio {
 
                 self.counter_bytes += Wrapping(result as u64 - vnet_hdr_len() as u64);
                 self.counter_frames += Wrapping(1);
-            }
 
-            queue.add_used(&mem, head_index, 0);
-            queue.update_avail_event(&mem);
+                result as u32
+            } else {
+                0
+            };
+
+            queue.add_used(mem, head_index, 0);
+            queue.update_avail_event(mem);
+
+            // For the sake of simplicity (similar to the RX rate limiting), we always
+            // let the 'last' descriptor chain go-through even if it was over the rate
+            // limit, and simply stop processing oncoming `avail_desc` if any.
+            if let Some(rate_limiter) = rate_limiter {
+                rate_limit_reached = !rate_limiter.consume(1, TokenType::Ops)
+                    || !rate_limiter.consume(len as u64, TokenType::Bytes);
+            }
         }
 
-        Ok(())
+        Ok(retry_write)
     }
 }
 
@@ -146,7 +143,7 @@ impl RxVirtio {
         let mut exhausted_descs = true;
         let mut rate_limit_reached = false;
 
-        while let Some(avail_desc) = queue.iter(&mem).next() {
+        while let Some(avail_desc) = queue.iter(mem).next() {
             if rate_limit_reached {
                 exhausted_descs = false;
                 queue.go_to_previous_position();
@@ -208,8 +205,8 @@ impl RxVirtio {
                 0
             };
 
-            queue.add_used(&mem, head_index, len);
-            queue.update_avail_event(&mem);
+            queue.add_used(mem, head_index, len);
+            queue.update_avail_event(mem);
 
             // For the sake of simplicity (keeping the handling of RX_QUEUE_EVENT and
             // RX_TAP_EVENT totally asynchronous), we always let the 'last' descriptor
@@ -252,12 +249,19 @@ pub enum NetQueuePairError {
 pub struct NetQueuePair {
     pub mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     pub tap: Tap,
+    // With epoll each FD must be unique. So in order to filter the
+    // events we need to get a second FD responding to the original
+    // device so that we can send EPOLLOUT and EPOLLIN to separate
+    // events.
+    pub tap_for_write_epoll: Tap,
     pub rx: RxVirtio,
     pub tx: TxVirtio,
     pub epoll_fd: Option<RawFd>,
     pub rx_tap_listening: bool,
+    pub tx_tap_listening: bool,
     pub counters: NetCounters,
-    pub tap_event_id: u16,
+    pub tap_rx_event_id: u16,
+    pub tap_tx_event_id: u16,
     pub rx_desc_avail: bool,
     pub rx_rate_limiter: Option<RateLimiter>,
     pub tx_rate_limiter: Option<RateLimiter>,
@@ -271,8 +275,35 @@ impl NetQueuePair {
             .ok_or(NetQueuePairError::NoMemoryConfigured)
             .map(|m| m.memory())?;
 
-        self.tx
-            .process_desc_chain(&mem, &mut self.tap, &mut queue, &mut self.tx_rate_limiter)?;
+        let tx_tap_retry = self.tx.process_desc_chain(
+            &mem,
+            &mut self.tap,
+            &mut queue,
+            &mut self.tx_rate_limiter,
+        )?;
+
+        // We got told to try again when writing to the tap. Wait for the TAP to be writable
+        if tx_tap_retry && !self.tx_tap_listening {
+            register_listener(
+                self.epoll_fd.unwrap(),
+                self.tap_for_write_epoll.as_raw_fd(),
+                epoll::Events::EPOLLOUT,
+                u64::from(self.tap_tx_event_id),
+            )
+            .map_err(NetQueuePairError::RegisterListener)?;
+            self.tx_tap_listening = true;
+            info!("Writing to TAP returned EAGAIN. Listening for TAP to become writable.");
+        } else if !tx_tap_retry && self.tx_tap_listening {
+            unregister_listener(
+                self.epoll_fd.unwrap(),
+                self.tap_for_write_epoll.as_raw_fd(),
+                epoll::Events::EPOLLOUT,
+                u64::from(self.tap_tx_event_id),
+            )
+            .map_err(NetQueuePairError::UnregisterListener)?;
+            self.tx_tap_listening = false;
+            info!("Writing to TAP succeeded. No longer listening for TAP to become writable.");
+        }
 
         self.counters
             .tx_bytes
@@ -312,7 +343,7 @@ impl NetQueuePair {
                 self.epoll_fd.unwrap(),
                 self.tap.as_raw_fd(),
                 epoll::Events::EPOLLIN,
-                u64::from(self.tap_event_id),
+                u64::from(self.tap_rx_event_id),
             )
             .map_err(NetQueuePairError::UnregisterListener)?;
             self.rx_tap_listening = false;

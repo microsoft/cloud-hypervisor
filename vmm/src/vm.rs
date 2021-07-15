@@ -33,6 +33,8 @@ use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
 #[cfg(feature = "tdx")]
 use arch::x86_64::tdx::TdvfSection;
+#[cfg(target_arch = "x86_64")]
+use arch::x86_64::SgxEpcSection;
 use arch::EntryPoint;
 use devices::AcpiNotificationFlags;
 use hypervisor::vm::{HypervisorVmError, VmmOps};
@@ -75,7 +77,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::terminal::Terminal;
 
 #[cfg(target_arch = "aarch64")]
-use arch::aarch64::gic::gicv3::kvm::{KvmGicV3, GIC_V3_SNAPSHOT_ID};
+use arch::aarch64::gic::gicv3_its::kvm::{KvmGicV3Its, GIC_V3_ITS_SNAPSHOT_ID};
 #[cfg(target_arch = "aarch64")]
 use arch::aarch64::gic::kvm::create_gic;
 #[cfg(target_arch = "aarch64")]
@@ -141,6 +143,9 @@ pub enum Error {
 
     /// Failed to join on vCPU threads
     ThreadCleanup(std::boxed::Box<dyn std::any::Any + std::marker::Send>),
+
+    /// VM config is missing.
+    VmMissingConfig,
 
     /// VM is not created
     VmNotCreated,
@@ -266,6 +271,8 @@ pub struct NumaNode {
     cpus: Vec<u8>,
     distances: BTreeMap<u32, u8>,
     memory_zones: Vec<String>,
+    #[cfg(target_arch = "x86_64")]
+    sgx_epc_sections: Vec<SgxEpcSection>,
 }
 
 impl NumaNode {
@@ -287,6 +294,11 @@ impl NumaNode {
 
     pub fn memory_zones(&self) -> &Vec<String> {
         &self.memory_zones
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn sgx_epc_sections(&self) -> &Vec<SgxEpcSection> {
+        &self.sgx_epc_sections
     }
 }
 
@@ -569,6 +581,8 @@ impl Vm {
             vm_ops,
             #[cfg(feature = "tdx")]
             tdx_enabled,
+            #[cfg(feature = "acpi")]
+            &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
 
@@ -622,8 +636,6 @@ impl Vm {
         let mut numa_nodes = BTreeMap::new();
 
         if let Some(configs) = &configs {
-            let node_id_list: Vec<u32> = configs.iter().map(|cfg| cfg.guest_numa_id).collect();
-
             for config in configs.iter() {
                 if numa_nodes.contains_key(&config.guest_numa_id) {
                     error!("Can't define twice the same NUMA node");
@@ -656,7 +668,7 @@ impl Vm {
                         let dest = distance.destination;
                         let dist = distance.distance;
 
-                        if !node_id_list.contains(&dest) {
+                        if !configs.iter().any(|cfg| cfg.guest_numa_id == dest) {
                             error!("Unknown destination NUMA node {}", dest);
                             return Err(Error::InvalidNumaConfig);
                         }
@@ -667,6 +679,24 @@ impl Vm {
                         }
 
                         node.distances.insert(dest, dist);
+                    }
+                }
+
+                #[cfg(target_arch = "x86_64")]
+                if let Some(sgx_epc_sections) = &config.sgx_epc_sections {
+                    if let Some(sgx_epc_region) = mm.sgx_epc_region() {
+                        let mm_sections = sgx_epc_region.epc_sections();
+                        for sgx_epc_section in sgx_epc_sections.iter() {
+                            if let Some(mm_section) = mm_sections.get(sgx_epc_section) {
+                                node.sgx_epc_sections.push(mm_section.clone());
+                            } else {
+                                error!("Unknown SGX EPC section '{}'", sgx_epc_section);
+                                return Err(Error::InvalidNumaConfig);
+                            }
+                        }
+                    } else {
+                        error!("Missing SGX EPC region");
+                        return Err(Error::InvalidNumaConfig);
                     }
                 }
 
@@ -721,7 +751,7 @@ impl Vm {
                 memory_manager
                     .lock()
                     .unwrap()
-                    .setup_sgx(sgx_epc_config)
+                    .setup_sgx(sgx_epc_config, &vm)
                     .map_err(Error::MemoryManager)?;
             }
         }
@@ -1184,7 +1214,7 @@ impl Vm {
                 self.device_manager
                     .lock()
                     .unwrap()
-                    .update_memory(&new_region)
+                    .update_memory(new_region)
                     .map_err(Error::DeviceManager)?;
 
                 match memory_config.hotplug_method {
@@ -1571,13 +1601,23 @@ impl Vm {
     fn populate_tdx_sections(&mut self, sections: &[TdvfSection]) -> Result<Option<u64>> {
         use arch::x86_64::tdx::*;
         // Get the memory end *before* we start adding TDVF ram regions
-        let mem_end = {
-            let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
-            let mem = guest_memory.memory();
-            mem.last_addr()
-        };
+        let boot_guest_memory = self
+            .memory_manager
+            .lock()
+            .as_ref()
+            .unwrap()
+            .boot_guest_memory();
         for section in sections {
-            info!("Allocating TDVF Section: {:?}", section);
+            // No need to allocate if the section falls within guest RAM ranges
+            if boot_guest_memory.address_in_range(GuestAddress(section.address)) {
+                info!(
+                    "Not allocating TDVF Section: {:x?} since it is already part of guest RAM",
+                    section
+                );
+                continue;
+            }
+
+            info!("Allocating TDVF Section: {:x?}", section);
             self.memory_manager
                 .lock()
                 .unwrap()
@@ -1596,7 +1636,7 @@ impl Vm {
         let mem = guest_memory.memory();
         let mut hob_offset = None;
         for section in sections {
-            info!("Populating TDVF Section: {:?}", section);
+            info!("Populating TDVF Section: {:x?}", section);
             match section.r#type {
                 TdvfSectionType::Bfv | TdvfSectionType::Cfv => {
                     info!("Copying section to guest memory");
@@ -1620,22 +1660,47 @@ impl Vm {
         // Generate HOB
         let mut hob = TdHob::start(hob_offset.unwrap());
 
-        // RAM regions (all below 3GiB case)
-        if mem_end < arch::layout::MEM_32BIT_RESERVED_START {
-            hob.add_memory_resource(&mem, 0, mem_end.0 + 1, true)
-                .map_err(Error::PopulateHob)?;
-        } else {
-            // Otherwise split into two
-            hob.add_memory_resource(&mem, 0, arch::layout::MEM_32BIT_RESERVED_START.0, true)
-                .map_err(Error::PopulateHob)?;
-            if mem_end > arch::layout::RAM_64BIT_START {
-                hob.add_memory_resource(
-                    &mem,
-                    arch::layout::RAM_64BIT_START.raw_value(),
-                    mem_end.unchecked_offset_from(arch::layout::RAM_64BIT_START) + 1,
-                    true,
-                )
-                .map_err(Error::PopulateHob)?;
+        let mut sorted_sections = sections.to_vec();
+        sorted_sections.retain(|section| {
+            !matches!(section.r#type, TdvfSectionType::Bfv | TdvfSectionType::Cfv)
+        });
+        sorted_sections.sort_by_key(|section| section.address);
+        sorted_sections.reverse();
+        let mut current_section = sorted_sections.pop();
+
+        // RAM regions interleaved with TDVF sections
+        let mut next_start_addr = 0;
+        for region in boot_guest_memory.iter() {
+            let region_start = region.start_addr().0;
+            let region_end = region.last_addr().0;
+            if region_start > next_start_addr {
+                next_start_addr = region_start;
+            }
+
+            loop {
+                let (start, size, ram) = if let Some(section) = &current_section {
+                    if section.address <= next_start_addr {
+                        (section.address, section.size, false)
+                    } else {
+                        let last_addr = std::cmp::min(section.address - 1, region_end);
+                        (next_start_addr, last_addr - next_start_addr + 1, true)
+                    }
+                } else {
+                    (next_start_addr, region_end - next_start_addr + 1, true)
+                };
+
+                hob.add_memory_resource(&mem, start, size, ram)
+                    .map_err(Error::PopulateHob)?;
+
+                if !ram {
+                    current_section = sorted_sections.pop();
+                }
+
+                next_start_addr = start + size;
+
+                if next_start_addr > region_end {
+                    break;
+                }
             }
         }
 
@@ -1916,7 +1981,7 @@ impl Vm {
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
-                .downcast_mut::<KvmGicV3>()
+                .downcast_mut::<KvmGicV3Its>()
                 .unwrap()
                 .snapshot()?,
         );
@@ -1955,16 +2020,18 @@ impl Vm {
             .set_gic_device(Arc::clone(&gic_device));
 
         // Restore GIC states.
-        if let Some(gic_v3_snapshot) = vm_snapshot.snapshots.get(GIC_V3_SNAPSHOT_ID) {
+        if let Some(gicv3_its_snapshot) = vm_snapshot.snapshots.get(GIC_V3_ITS_SNAPSHOT_ID) {
             gic_device
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
-                .downcast_mut::<KvmGicV3>()
+                .downcast_mut::<KvmGicV3Its>()
                 .unwrap()
-                .restore(*gic_v3_snapshot.clone())?;
+                .restore(*gicv3_its_snapshot.clone())?;
         } else {
-            return Err(MigratableError::Restore(anyhow!("Missing GICv3 snapshot")));
+            return Err(MigratableError::Restore(anyhow!(
+                "Missing GicV3Its snapshot"
+            )));
         }
 
         // Activate gic device
@@ -2272,6 +2339,17 @@ impl Snapshottable for Vm {
         #[cfg(target_arch = "aarch64")]
         self.restore_vgic_and_enable_interrupt(&snapshot)?;
 
+        if let Some(device_manager_snapshot) = snapshot.snapshots.get(DEVICE_MANAGER_SNAPSHOT_ID) {
+            self.device_manager
+                .lock()
+                .unwrap()
+                .restore_devices(*device_manager_snapshot.clone())?;
+        } else {
+            return Err(MigratableError::Restore(anyhow!(
+                "Missing device manager snapshot"
+            )));
+        }
+
         // Now we can start all vCPUs from here.
         self.cpu_manager
             .lock()
@@ -2458,10 +2536,10 @@ mod tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GuestMemoryMmap, GuestRegionMmap};
+    use crate::GuestMemoryMmap;
     use arch::aarch64::fdt::create_fdt;
     use arch::aarch64::gic::kvm::create_gic;
-    use arch::aarch64::{layout, DeviceInfoForFdt};
+    use arch::aarch64::layout;
     use arch::{DeviceType, MmioDeviceInfo};
     use vm_memory::GuestAddress;
 
@@ -2469,11 +2547,10 @@ mod tests {
 
     #[test]
     fn test_create_fdt_with_devices() {
-        let mut regions = Vec::new();
-        regions.push((
+        let regions = vec![(
             GuestAddress(layout::RAM_64BIT_START),
             (layout::FDT_MAX_SIZE + 0x1000) as usize,
-        ));
+        )];
         let mem = GuestMemoryMmap::from_ranges(&regions).expect("Cannot initialize memory");
 
         let dev_info: HashMap<(DeviceType, std::string::String), MmioDeviceInfo> = [
@@ -2486,15 +2563,12 @@ mod tests {
             ),
             (
                 (DeviceType::Virtio(1), "virtio".to_string()),
-                MmioDeviceInfo {
-                    addr: 0x00 + LEN,
-                    irq: 34,
-                },
+                MmioDeviceInfo { addr: LEN, irq: 34 },
             ),
             (
                 (DeviceType::Rtc, "rtc".to_string()),
                 MmioDeviceInfo {
-                    addr: 0x00 + 2 * LEN,
+                    addr: 2 * LEN,
                     irq: 35,
                 },
             ),
@@ -2552,7 +2626,7 @@ pub fn test_vm() {
             false,
         );
 
-        vm.set_user_memory_region(mem_region)
+        vm.create_user_memory_region(mem_region)
             .expect("Cannot configure guest memory");
     }
     mem.write_slice(&code, load_addr)
@@ -2578,7 +2652,7 @@ pub fn test_vm() {
                 println!(
                     "IO out -- addr: {:#x} data [{:?}]",
                     addr,
-                    str::from_utf8(&data).unwrap()
+                    str::from_utf8(data).unwrap()
                 );
             }
             VmExit::Reset => {

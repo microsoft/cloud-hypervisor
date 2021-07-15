@@ -77,6 +77,9 @@ pub enum Error {
     /// Failed to parse SGX EPC parameters
     #[cfg(target_arch = "x86_64")]
     ParseSgxEpc(OptionParserError),
+    /// Missing 'id' from SGX EPC section
+    #[cfg(target_arch = "x86_64")]
+    ParseSgxEpcIdMissing,
     /// Failed to parse NUMA parameters
     ParseNuma(OptionParserError),
     /// Failed to validate configuration
@@ -215,6 +218,8 @@ impl fmt::Display for Error {
             ParseRestore(o) => write!(f, "Error parsing --restore: {}", o),
             #[cfg(target_arch = "x86_64")]
             ParseSgxEpc(o) => write!(f, "Error parsing --sgx-epc: {}", o),
+            #[cfg(target_arch = "x86_64")]
+            ParseSgxEpcIdMissing => write!(f, "Error parsing --sgx-epc: id missing"),
             ParseNuma(o) => write!(f, "Error parsing --numa: {}", o),
             ParseRestoreSourceUrlMissing => {
                 write!(f, "Error parsing --restore: source_url missing")
@@ -1593,6 +1598,7 @@ impl TdxConfig {
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub struct SgxEpcConfig {
+    pub id: String,
     #[serde(default)]
     pub size: u64,
     #[serde(default)]
@@ -1602,12 +1608,13 @@ pub struct SgxEpcConfig {
 #[cfg(target_arch = "x86_64")]
 impl SgxEpcConfig {
     pub const SYNTAX: &'static str = "SGX EPC parameters \
-        \"size=<epc_section_size>,prefault=on|off\"";
+        \"id=<epc_section_identifier>,size=<epc_section_size>,prefault=on|off\"";
     pub fn parse(sgx_epc: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("size").add("prefault");
+        parser.add("id").add("size").add("prefault");
         parser.parse(sgx_epc).map_err(Error::ParseSgxEpc)?;
 
+        let id = parser.get("id").ok_or(Error::ParseSgxEpcIdMissing)?;
         let size = parser
             .convert::<ByteSized>("size")
             .map_err(Error::ParseSgxEpc)?
@@ -1619,7 +1626,7 @@ impl SgxEpcConfig {
             .unwrap_or(Toggle(false))
             .0;
 
-        Ok(SgxEpcConfig { size, prefault })
+        Ok(SgxEpcConfig { id, size, prefault })
     }
 }
 
@@ -1641,19 +1648,23 @@ pub struct NumaConfig {
     pub distances: Option<Vec<NumaDistance>>,
     #[serde(default)]
     pub memory_zones: Option<Vec<String>>,
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub sgx_epc_sections: Option<Vec<String>>,
 }
 
 impl NumaConfig {
     pub const SYNTAX: &'static str = "Settings related to a given NUMA node \
         \"guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,\
-        memory_zones=<list_of_memory_zones>\"";
+        memory_zones=<list_of_memory_zones>,sgx_epc_sections=<list_of_sgx_epc_sections>\"";
     pub fn parse(numa: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("guest_numa_id")
             .add("cpus")
             .add("distances")
-            .add("memory_zones");
+            .add("memory_zones")
+            .add("sgx_epc_sections");
         parser.parse(numa).map_err(Error::ParseNuma)?;
 
         let guest_numa_id = parser
@@ -1679,12 +1690,19 @@ impl NumaConfig {
             .convert::<StringList>("memory_zones")
             .map_err(Error::ParseNuma)?
             .map(|v| v.0);
+        #[cfg(target_arch = "x86_64")]
+        let sgx_epc_sections = parser
+            .convert::<StringList>("sgx_epc_sections")
+            .map_err(Error::ParseNuma)?
+            .map(|v| v.0);
 
         Ok(NumaConfig {
             guest_numa_id,
             cpus,
             distances,
             memory_zones,
+            #[cfg(target_arch = "x86_64")]
+            sgx_epc_sections,
         })
     }
 }

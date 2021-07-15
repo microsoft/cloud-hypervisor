@@ -343,7 +343,23 @@ impl Vmm {
         })
     }
 
+    fn vm_create(&mut self, config: Arc<Mutex<VmConfig>>) -> result::Result<(), VmError> {
+        // We only store the passed VM config.
+        // The VM will be created when being asked to boot it.
+        if self.vm_config.is_none() {
+            self.vm_config = Some(config);
+            Ok(())
+        } else {
+            Err(VmError::VmAlreadyCreated)
+        }
+    }
+
     fn vm_boot(&mut self) -> result::Result<(), VmError> {
+        // If we don't have a config, we can not boot a VM.
+        if self.vm_config.is_none() {
+            return Err(VmError::VmMissingConfig);
+        };
+
         // Create a new VM if we don't have one yet.
         if self.vm.is_none() {
             let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
@@ -1142,14 +1158,10 @@ impl Vmm {
                             info!("API request event: {:?}", api_request);
                             match api_request {
                                 ApiRequest::VmCreate(config, sender) => {
-                                    // We only store the passed VM config.
-                                    // The VM will be created when being asked to boot it.
-                                    let response = if self.vm_config.is_none() {
-                                        self.vm_config = Some(config);
-                                        Ok(ApiResponsePayload::Empty)
-                                    } else {
-                                        Err(ApiError::VmAlreadyCreated)
-                                    };
+                                    let response = self
+                                        .vm_create(config)
+                                        .map_err(ApiError::VmCreate)
+                                        .map(|_| ApiResponsePayload::Empty);
 
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }
@@ -1162,14 +1174,6 @@ impl Vmm {
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }
                                 ApiRequest::VmBoot(sender) => {
-                                    // If we don't have a config, we can not boot a VM.
-                                    if self.vm_config.is_none() {
-                                        sender
-                                            .send(Err(ApiError::VmMissingConfig))
-                                            .map_err(Error::ApiResponseSend)?;
-                                        continue;
-                                    }
-
                                     let response = self
                                         .vm_boot()
                                         .map_err(ApiError::VmBoot)

@@ -19,6 +19,8 @@ use crate::memory_manager::MemoryManager;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 #[cfg(target_arch = "x86_64")]
 use crate::vm::physical_bits;
+#[cfg(feature = "acpi")]
+use crate::vm::NumaNodes;
 use crate::GuestMemoryMmap;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
@@ -37,6 +39,8 @@ use hypervisor::{vm::VmmOps, CpuState, HypervisorCpuError, VmExit};
 use hypervisor::{CpuId, CpuIdEntry};
 use libc::{c_void, siginfo_t};
 use seccomp::{SeccompAction, SeccompFilter};
+#[cfg(feature = "acpi")]
+use std::collections::BTreeMap;
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -73,6 +77,8 @@ const KVM_FEATURE_CLOCKSOURCE_STABLE_BIT: u8 = 24;
 const KVM_FEATURE_ASYNC_PF_BIT: u8 = 4;
 #[cfg(feature = "tdx")]
 const KVM_FEATURE_ASYNC_PF_VMEXIT_BIT: u8 = 10;
+#[cfg(feature = "tdx")]
+const KVM_FEATURE_STEAL_TIME_BIT: u8 = 5;
 
 #[cfg(feature = "acpi")]
 pub const CPU_MANAGER_ACPI_SIZE: usize = 0xc;
@@ -144,6 +150,7 @@ pub enum Error {
 pub type Result<T> = result::Result<T, Error>;
 
 #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
+#[allow(dead_code)]
 #[repr(packed)]
 struct LocalApic {
     pub r#type: u8,
@@ -153,6 +160,7 @@ struct LocalApic {
     pub flags: u32,
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct Ioapic {
@@ -165,6 +173,7 @@ struct Ioapic {
 }
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[allow(dead_code)]
 #[repr(packed)]
 struct GicC {
     pub r#type: u8,
@@ -188,6 +197,7 @@ struct GicC {
 }
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[allow(dead_code)]
 #[repr(packed)]
 struct GicD {
     pub r#type: u8,
@@ -201,6 +211,7 @@ struct GicD {
 }
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[allow(dead_code)]
 #[repr(packed)]
 struct GicR {
     pub r#type: u8,
@@ -211,6 +222,7 @@ struct GicR {
 }
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[allow(dead_code)]
 #[repr(packed)]
 struct GicIts {
     pub r#type: u8,
@@ -221,6 +233,7 @@ struct GicIts {
     pub reserved1: u32,
 }
 
+#[allow(dead_code)]
 #[repr(packed)]
 #[derive(Default)]
 struct InterruptSourceOverride {
@@ -407,6 +420,8 @@ pub struct CpuManager {
     #[cfg(feature = "acpi")]
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     acpi_address: GuestAddress,
+    #[cfg(feature = "acpi")]
+    proximity_domain_per_cpu: BTreeMap<u8, u32>,
 }
 
 const CPU_ENABLE_FLAG: usize = 0;
@@ -545,6 +560,7 @@ impl CpuManager {
         seccomp_action: SeccompAction,
         vmmops: Arc<Box<dyn VmmOps>>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
+        #[cfg(feature = "acpi")] numa_nodes: &NumaNodes,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let guest_memory = memory_manager.lock().unwrap().guest_memory();
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
@@ -556,7 +572,7 @@ impl CpuManager {
             .unwrap()
             .sgx_epc_region()
             .as_ref()
-            .map(|sgx_epc_region| sgx_epc_region.epc_sections().clone());
+            .map(|sgx_epc_region| sgx_epc_region.epc_sections().values().cloned().collect());
         #[cfg(target_arch = "x86_64")]
         let cpuid = {
             let phys_bits = physical_bits(config.max_phys_bits);
@@ -579,6 +595,20 @@ impl CpuManager {
             .unwrap()
             .allocate_mmio_addresses(None, CPU_MANAGER_ACPI_SIZE as u64, None)
             .ok_or(Error::AllocateMmmioAddress)?;
+
+        #[cfg(feature = "acpi")]
+        let proximity_domain_per_cpu: BTreeMap<u8, u32> = {
+            let mut cpu_list = Vec::new();
+            for (proximity_domain, numa_node) in numa_nodes.iter() {
+                for cpu in numa_node.cpus().iter() {
+                    cpu_list.push((*cpu, *proximity_domain))
+                }
+            }
+            cpu_list
+        }
+        .into_iter()
+        .collect();
+
         let cpu_manager = Arc::new(Mutex::new(CpuManager {
             config: config.clone(),
             interrupt_controller: device_manager.interrupt_controller().clone(),
@@ -597,6 +627,8 @@ impl CpuManager {
             vmmops,
             #[cfg(feature = "acpi")]
             acpi_address,
+            #[cfg(feature = "acpi")]
+            proximity_domain_per_cpu,
         }));
 
         #[cfg(feature = "acpi")]
@@ -697,7 +729,8 @@ impl CpuManager {
                             | 1 << KVM_FEATURE_CLOCKSOURCE2_BIT
                             | 1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT
                             | 1 << KVM_FEATURE_ASYNC_PF_BIT
-                            | 1 << KVM_FEATURE_ASYNC_PF_VMEXIT_BIT)
+                            | 1 << KVM_FEATURE_ASYNC_PF_VMEXIT_BIT
+                            | 1 << KVM_FEATURE_STEAL_TIME_BIT)
                     }
                 }
                 _ => {}
@@ -1284,6 +1317,7 @@ impl CpuManager {
 #[cfg(feature = "acpi")]
 struct Cpu {
     cpu_id: u8,
+    proximity_domain: u32,
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
@@ -1340,6 +1374,12 @@ impl Aml for Cpu {
                         "CSTA".into(),
                         vec![&self.cpu_id],
                     ))],
+                ),
+                &aml::Method::new(
+                    "_PXM".into(),
+                    0,
+                    false,
+                    vec![&aml::Return::new(&self.proximity_domain)],
                 ),
                 // The Linux kernel expects every CPU device to have a _MAT entry
                 // containing the LAPIC for this processor with the enabled bit set
@@ -1573,7 +1613,11 @@ impl Aml for CpuManager {
 
         let mut cpu_devices = Vec::new();
         for cpu_id in 0..self.config.max_vcpus {
-            let cpu_device = Cpu { cpu_id };
+            let proximity_domain = *self.proximity_domain_per_cpu.get(&cpu_id).unwrap_or(&0);
+            let cpu_device = Cpu {
+                cpu_id,
+                proximity_domain,
+            };
 
             cpu_devices.push(cpu_device);
         }
@@ -1793,11 +1837,10 @@ mod tests {
         let hv = hypervisor::new().unwrap();
         let vm = hv.create_vm().unwrap();
         let vcpu = vm.create_vcpu(0, None).unwrap();
-        let mut regions = Vec::new();
-        regions.push((
+        let regions = vec![(
             GuestAddress(layout::RAM_64BIT_START),
             (layout::FDT_MAX_SIZE + 0x1000) as usize,
-        ));
+        )];
         let mem = GuestMemoryMmap::from_ranges(&regions).expect("Cannot initialize memory");
 
         let res = setup_regs(&vcpu, 0, 0x0, &mem);
@@ -1852,7 +1895,7 @@ mod tests {
             "Failed to get core register: Exec format error (os error 8)"
         );
 
-        let res = vcpu.set_core_registers(&mut state);
+        let res = vcpu.set_core_registers(&state);
         assert!(res.is_err());
         assert_eq!(
             format!("{}", res.unwrap_err()),
@@ -1892,7 +1935,7 @@ mod tests {
             id: MPIDR_EL1,
             addr: 0x00,
         });
-        let res = vcpu.set_system_registers(&mut state);
+        let res = vcpu.set_system_registers(&state);
         assert!(res.is_err());
         assert_eq!(
             format!("{}", res.unwrap_err()),

@@ -10,7 +10,7 @@ acpi = ["acpi_tables","devices/acpi", "arch/acpi"]
 cmos = ["devices/cmos"]
 fwdebug = ["devices/fwdebug"]
 kvm = ["hypervisor/kvm"]
-mshv = ["hypervisor/mshv"]
+mshv = ["hypervisor/mshv", "virtio-devices/mshv"]
 io_uring = ["virtio-devices/io_uring"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 
@@ -27,7 +27,7 @@ epoll = ">=4.0.1"
 event_monitor = { path = "../event_monitor" }
 hypervisor = { path = "../hypervisor" }
 lazy_static = "1.4.0"
-libc = "0.2.97"
+libc = "0.2.98"
 linux-loader = { version = "0.3.0", features = ["elf", "bzimage", "pe"] }
 log = "0.4.14"
 micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch = "main" }
