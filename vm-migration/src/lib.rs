@@ -46,6 +46,12 @@ pub enum MigratableError {
 
     #[error("Socket error: {0}")]
     MigrateSocket(#[source] std::io::Error),
+
+    #[error("Failed to enable dirty log tracking: {0}")]
+    EnableDirtyLogging(#[source] anyhow::Error),
+
+    #[error("Failed to disbale dirty log tracking: {0}")]
+    DisableDirtyLogging(#[source] anyhow::Error),
 }
 
 /// A Pausable component can be paused and resumed.

@@ -61,6 +61,9 @@ const MPOL_BIND: u32 = 2;
 const MPOL_MF_STRICT: u32 = 1;
 const MPOL_MF_MOVE: u32 = 1 << 1;
 
+#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
+const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 #[derive(Default)]
 struct HotPlugState {
     base: u64,
@@ -1502,9 +1505,12 @@ impl MemoryManager {
         let page_size = 4096; // TODO: Does this need to vary?
         let mut table = MemoryRangeTable::default();
         for r in &self.guest_ram_mappings {
-            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.size).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
-            })?;
+            let vm_dirty_bitmap = self
+                .vm
+                .get_dirty_log(r.slot, r.gpa, r.size, DIRTY_BITMAP_CLEAR_DIRTY)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
+                })?;
             let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
             {
                 Some(region) => {
@@ -1566,15 +1572,32 @@ impl MemoryManager {
     // pages touched during our bulk copy are tracked.
     pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
         for r in &self.guest_ram_mappings {
-            self.vm.get_dirty_log(r.slot, r.size).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
-            })?;
+            self.vm
+                .get_dirty_log(r.slot, r.gpa, r.size, DIRTY_BITMAP_CLEAR_DIRTY)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
+                })?;
         }
 
         for r in self.guest_memory.memory().iter() {
             r.bitmap().reset();
         }
 
+        Ok(())
+    }
+    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    //
+    // Live migration is compete and we want to set the dirty bits in the
+    // dirty log bitmap so that hypervisor can reconstruct the large pages
+    //
+    pub fn end_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
+        for r in &self.guest_ram_mappings {
+            self.vm
+                .get_dirty_log(r.slot, r.gpa, r.size, DIRTY_BITMAP_SET_DIRTY)
+                .map_err(|e| {
+                    MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
+                })?;
+        }
         Ok(())
     }
 }

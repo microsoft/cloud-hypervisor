@@ -75,12 +75,8 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     const OVMF_NAME: &str = "OVMF-4b47d0c6c8.fd";
 
-    #[cfg(not(feature = "mshv"))]
     const DIRECT_KERNEL_BOOT_CMDLINE: &str =
         "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
-    #[cfg(feature = "mshv")]
-    const DIRECT_KERNEL_BOOT_CMDLINE: &str =
-        "root=/dev/vda1 console=hvc0 quiet rw apic=verbose clocksource=acpi_pm systemd.journald.forward_to_console=1";
 
     #[cfg(not(feature = "mshv"))]
     const ENABLE_SECCOMP: &str = "true";

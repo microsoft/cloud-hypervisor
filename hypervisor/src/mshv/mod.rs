@@ -879,10 +879,32 @@ impl vm::Vm for MshvVm {
     ///
     /// Get dirty pages bitmap (one bit per page)
     ///
-    fn get_dirty_log(&self, _slot: u32, _memory_size: u64) -> vm::Result<Vec<u64>> {
-        Err(vm::HypervisorVmError::GetDirtyLog(anyhow!(
-            "get_dirty_log not implemented"
-        )))
+    fn get_dirty_log(
+        &self,
+        _slot: u32,
+        _base_gpa: u64,
+        memory_size: u64,
+        _flags: u64,
+    ) -> vm::Result<Vec<u64>> {
+        self.fd
+            .get_dirty_log(_base_gpa >> PAGE_SHIFT, memory_size as usize, _flags)
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
+    }
+    ///
+    /// Enable dirty page tracking
+    ///
+    fn enable_dirty_page_tracking(&self) -> vm::Result<()> {
+        self.fd
+            .enable_dirty_page_tracking()
+            .map_err(|e| vm::HypervisorVmError::EnableDirtyPageTracking(e.into()))
+    }
+    ///
+    /// Disable dirty page tracking
+    ///
+    fn disable_dirty_page_tracking(&self) -> vm::Result<()> {
+        self.fd
+            .disable_dirty_page_tracking()
+            .map_err(|e| vm::HypervisorVmError::DisableDirtyPageTracking(e.into()))
     }
 }
 pub use hv_cpuid_entry as CpuIdEntry;

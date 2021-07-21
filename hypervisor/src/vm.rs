@@ -196,6 +196,16 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to initialize memory region TDX: {0}")]
     InitMemRegionTdx(#[source] std::io::Error),
+    ///
+    /// Error enabling dirt page tracking
+    ///
+    #[error("Failed to enable dirty page tracking: {0}")]
+    EnableDirtyPageTracking(#[source] std::io::Error),
+    ///
+    /// Error disabling dirt page tracking
+    ///
+    #[error("Failed to disable dirty page tracking: {0}")]
+    DisableDirtyPageTracking(#[source] std::io::Error),
 }
 ///
 /// Result type for returning from a function
@@ -283,7 +293,13 @@ pub trait Vm: Send + Sync {
     /// Set the VM state
     fn set_state(&self, state: VmState) -> Result<()>;
     /// Get dirty pages bitmap
-    fn get_dirty_log(&self, slot: u32, memory_size: u64) -> Result<Vec<u64>>;
+    fn get_dirty_log(
+        &self,
+        slot: u32,
+        _base_gpa: u64,
+        memory_size: u64,
+        _flags: u64,
+    ) -> Result<Vec<u64>>;
     #[cfg(feature = "tdx")]
     /// Initalize TDX on this VM
     fn tdx_init(&self, cpuid: &CpuId, max_vcpus: u32) -> Result<()>;
@@ -299,6 +315,16 @@ pub trait Vm: Send + Sync {
         size: u64,
         measure: bool,
     ) -> Result<()>;
+    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    ///
+    /// Enable dirty page tracking by hypervisor
+    ///
+    fn enable_dirty_page_tracking(&self) -> Result<()>;
+    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    ///
+    /// Disable dirty page tracking by hypervisor
+    ///
+    fn disable_dirty_page_tracking(&self) -> Result<()>;
 }
 
 pub trait VmmOps: Send + Sync {

@@ -1188,7 +1188,6 @@ dependencies = [
  "byteorder",
  "epoll",
  "event_monitor",
- "hypervisor",
  "io-uring",
  "libc",
  "log",
