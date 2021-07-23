@@ -51,6 +51,9 @@ checksum = "595d3cfa7a60d4555cb5067b99f07142a08ea778de5cf993f7b75c7d8fabc486"
 [[package]]
 name = "api_client"
 version = "0.1.0"
+dependencies = [
+ "vmm-sys-util",
+]
 
 [[package]]
 name = "arc-swap"
@@ -77,6 +80,7 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "vm-migration",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -151,9 +155,9 @@ checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
 
 [[package]]
 name = "cc"
-version = "1.0.68"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a72c244c1ff497a746a7e1fb3d14bd08420ecda70c8f25c7112f2781652d787"
+checksum = "e70cc2f62c6ce1868963827bd677764c62d07c3d9a3e1fb1177ee1a9ab199eb2"
 
 [[package]]
 name = "cfg-if"
@@ -185,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "cloud-hypervisor"
-version = "16.0.0"
+version = "17.0.0"
 dependencies = [
  "anyhow",
  "api_client",
@@ -278,9 +282,9 @@ dependencies = [
 
 [[package]]
 name = "env_logger"
-version = "0.8.4"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a19187fea3ac7e84da7dacf48de0c45d63c6a76f9490dae389aead16c243fce3"
+checksum = "0b2cf0344971ee6c64c31be0d530793fba457d322dfec2810c453d0ef228f9c3"
 dependencies = [
  "atty",
  "humantime",
@@ -527,7 +531,7 @@ checksum = "b16bd47d9e329435e309c58469fe0791c2d0d1ba96ec0954152a5ae2b04387dc"
 [[package]]
 name = "micro_http"
 version = "0.1.0"
-source = "git+https://github.com/firecracker-microvm/micro-http?branch=main#81a3c71efb19a52434fd5e29d7aa255ac41d497b"
+source = "git+https://github.com/firecracker-microvm/micro-http?branch=main#9517a300370a158a7af0996b7eebf040d171e1a4"
 dependencies = [
  "libc",
  "vmm-sys-util",
@@ -951,9 +955,9 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
 name = "syn"
-version = "1.0.73"
+version = "1.0.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f71489ff30030d2ae598524f61326b902466f72a0fb1a8564c001cc63425bcc7"
+checksum = "1873d832550d4588c3dbc20f01361ab00bfe741048f71e3fecf145a7cc18b29c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -962,9 +966,9 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.12.4"
+version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b834f2d66f734cb897113e34aaff2f1ab4719ca946f9a7358dba8f8064148701"
+checksum = "474aaa926faa1603c40b7885a9eaea29b444d1cb2850cb7c0e37bb1a4182f4fa"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1102,7 +1106,7 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=master#0f7eb6f855b80d60a7e09ac6df43b46ba69f9e9e"
+source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=master#9b84069e9f419c5369b9a313859cac7e9828d331"
 dependencies = [
  "byteorder",
  "kvm-bindings",
@@ -1116,7 +1120,7 @@ dependencies = [
 [[package]]
 name = "vhost"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vhost?branch=master#12fa07029bb4dd2293900c080d741f33b26b8698"
+source = "git+https://github.com/rust-vmm/vhost?branch=master#99fbfc969287ea87398d3755bd2613c14d77579f"
 dependencies = [
  "bitflags",
  "libc",
@@ -1237,7 +1241,7 @@ dependencies = [
 [[package]]
 name = "vm-fdt"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vm-fdt?branch=master#3c05f2dc84e7c0849c332969f831bdde329d55aa"
+source = "git+https://github.com/rust-vmm/vm-fdt?branch=master#561558a9ba9a46927a050b5210ae3870a9277f59"
 
 [[package]]
 name = "vm-memory"
