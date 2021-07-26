@@ -6,6 +6,7 @@
     - [Architectures](#architectures)
     - [Guest OS](#guest-os)
 - [2. Getting Started](#2-getting-started)
+  - [Install prerequisites](#install-prerequisites)
   - [Clone and build](#clone-and-build)
     - [Containerized builds and tests](#containerized-builds-and-tests)
   - [Run](#run)
@@ -23,6 +24,7 @@
 - [5. Community](#5-community)
   - [Contribute](#contribute)
   - [Join us](#join-us)
+  - [Security issues](#security-issues)
 
 # 1. What is Cloud Hypervisor?
 
@@ -149,7 +151,7 @@ We need to get the latest `rust-hypervisor-firmware` release and also a working 
 $ pushd $CLOUDH
 $ wget https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img
 $ qemu-img convert -p -f qcow2 -O raw focal-server-cloudimg-amd64.img focal-server-cloudimg-amd64.raw
-$ wget https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.3.1/hypervisor-fw
+$ wget https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.3.2/hypervisor-fw
 $ popd
 ```
 

@@ -27,6 +27,9 @@ checksum = "595d3cfa7a60d4555cb5067b99f07142a08ea778de5cf993f7b75c7d8fabc486"
 [[package]]
 name = "api_client"
 version = "0.1.0"
+dependencies = [
+ "vmm-sys-util",
+]
 
 [[package]]
 name = "arbitrary"
@@ -59,6 +62,7 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "vm-migration",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -112,9 +116,9 @@ checksum = "14c189c53d098945499cdfa7ecc63567cf3886b3332b312a5b4585d8d3a6a610"
 
 [[package]]
 name = "cc"
-version = "1.0.68"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a72c244c1ff497a746a7e1fb3d14bd08420ecda70c8f25c7112f2781652d787"
+checksum = "e70cc2f62c6ce1868963827bd677764c62d07c3d9a3e1fb1177ee1a9ab199eb2"
 
 [[package]]
 name = "cfg-if"
@@ -532,9 +536,9 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
 name = "syn"
-version = "1.0.73"
+version = "1.0.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f71489ff30030d2ae598524f61326b902466f72a0fb1a8564c001cc63425bcc7"
+checksum = "1873d832550d4588c3dbc20f01361ab00bfe741048f71e3fecf145a7cc18b29c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -625,8 +629,7 @@ dependencies = [
 [[package]]
 name = "versionize_derive"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "140aa9fd298f667ea50fa1cb0d8530076924079285c623b18b8f8a1c28386b4a"
+source = "git+https://github.com/cloud-hypervisor/versionize_derive?branch=ch#ae35ef7a3ddabd3371ab8ac0193a383aff6e4b1b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -645,7 +648,7 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=master#5cb8550556620546e74b9fe6d1174e0d1fc83888"
+source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=master#9b84069e9f419c5369b9a313859cac7e9828d331"
 dependencies = [
  "byteorder",
  "kvm-bindings",

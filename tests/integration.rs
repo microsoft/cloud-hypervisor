@@ -3308,6 +3308,8 @@ mod tests {
         // line (We tag the command line from cloud-hypervisor for that purpose).
         // The third device is added to validate that hotplug works correctly since
         // it is being added to the L2 VM through hotplugging mechanism.
+        // Also, we pass-through a vitio-blk device to the L2 VM to test the 32-bit
+        // vfio device support
         fn test_vfio() {
             setup_vfio_network_interfaces();
 
@@ -3333,7 +3335,7 @@ mod tests {
             )
             .expect("copying of cloud-init disk failed");
 
-            let mut vfio_disk_path = workload_path;
+            let mut vfio_disk_path = workload_path.clone();
             vfio_disk_path.push("vfio.img");
 
             // Create the vfio disk image
@@ -3348,6 +3350,9 @@ mod tests {
                 eprintln!("{}", String::from_utf8_lossy(&output.stderr));
                 panic!("mkfs.ext4 command generated an error");
             }
+
+            let mut blk_file_path = workload_path;
+            blk_file_path.push("blk.img");
 
             let vfio_tap0 = "vfio-tap0";
             let vfio_tap1 = "vfio-tap1";
@@ -3372,6 +3377,7 @@ mod tests {
                     )
                     .as_str(),
                     format!("path={}", vfio_disk_path.to_str().unwrap()).as_str(),
+                    format!("path={},iommu=on", blk_file_path.to_str().unwrap()).as_str(),
                 ])
                 .args(&[
                     "--cmdline",
@@ -3445,27 +3451,38 @@ mod tests {
                         .trim()
                         .parse::<u32>()
                         .unwrap_or_default(),
-                    7,
+                    8,
+                );
+
+                // Check both if /dev/vdc exists and if the block size is 16M in L2 VM
+                assert_eq!(
+                    guest
+                        .ssh_command_l2_1("lsblk | grep vdc | grep -c 16M")
+                        .unwrap()
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or_default(),
+                    1
                 );
 
                 // Hotplug an extra virtio-net device through L2 VM.
                 guest.ssh_command_l1(
-                    "echo 0000:00:08.0 | sudo tee /sys/bus/pci/devices/0000:00:08.0/driver/unbind",
+                    "echo 0000:00:09.0 | sudo tee /sys/bus/pci/devices/0000:00:09.0/driver/unbind",
                 ).unwrap();
                 guest
                     .ssh_command_l1(
-                        "echo 0000:00:08.0 | sudo tee /sys/bus/pci/drivers/vfio-pci/bind",
+                        "echo 0000:00:09.0 | sudo tee /sys/bus/pci/drivers/vfio-pci/bind",
                     )
                     .unwrap();
                 let vfio_hotplug_output = guest
                     .ssh_command_l1(
                         "sudo /mnt/ch-remote \
                  --api-socket=/tmp/ch_api.sock \
-                 add-device path=/sys/bus/pci/devices/0000:00:08.0,id=vfio123",
+                 add-device path=/sys/bus/pci/devices/0000:00:09.0,id=vfio123",
                     )
                     .unwrap();
                 assert!(
-                    vfio_hotplug_output.contains("{\"id\":\"vfio123\",\"bdf\":\"0000:00:07.0\"}")
+                    vfio_hotplug_output.contains("{\"id\":\"vfio123\",\"bdf\":\"0000:00:08.0\"}")
                 );
 
                 thread::sleep(std::time::Duration::new(10, 0));
@@ -3485,7 +3502,7 @@ mod tests {
 
                 // Check the amount of PCI devices appearing in L2 VM.
                 // There should be one more device than before, raising the count
-                // up to 8 PCI devices.
+                // up to 9 PCI devices.
                 assert_eq!(
                     guest
                         .ssh_command_l2_1("ls /sys/bus/pci/devices | wc -l")
@@ -3493,7 +3510,7 @@ mod tests {
                         .trim()
                         .parse::<u32>()
                         .unwrap_or_default(),
-                    8,
+                    9,
                 );
 
                 // Let's now verify that we can correctly remove the virtio-net
@@ -3509,7 +3526,7 @@ mod tests {
                 thread::sleep(std::time::Duration::new(10, 0));
 
                 // Check the amount of PCI devices appearing in L2 VM is back down
-                // to 7 devices.
+                // to 8 devices.
                 assert_eq!(
                     guest
                         .ssh_command_l2_1("ls /sys/bus/pci/devices | wc -l")
@@ -3517,7 +3534,7 @@ mod tests {
                         .trim()
                         .parse::<u32>()
                         .unwrap_or_default(),
-                    7,
+                    8,
                 );
 
                 // Perform memory hotplug in L2 and validate the memory is showing
@@ -5176,8 +5193,6 @@ mod tests {
             handle_child_output(r, &output);
         }
 
-        #[test]
-        #[cfg(not(feature = "mshv"))]
         // By design, a guest VM won't be able to connect to the host
         // machine when using a macvtap network interface (while it can
         // communicate externally). As a workaround, this integration
@@ -5187,48 +5202,37 @@ mod tests {
         // routing table, it enables the communications between the
         // guest VM and the host machine.
         // Details: https://wiki.libvirt.org/page/TroubleshootMacvtapHostFail
-        fn test_macvtap() {
+        fn _test_macvtap(hotplug: bool, guest_macvtap_name: &str, host_macvtap_name: &str) {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
+            let api_socket = temp_api_path(&guest.tmp_dir);
             let kernel_path = direct_kernel_boot_path();
             let phy_net = "eth0";
 
             // Create a macvtap interface for the guest VM to use
-            let guest_macvtap_name = "guestmacvtap0";
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!(
-                        "sudo ip link add link {} name {} type macvtap mod bridge",
-                        phy_net, guest_macvtap_name
-                    ),
-                ])
-                .status()
-                .expect("Expected 'ip link add' to work");
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!(
-                        "sudo ip link set {} address {} up",
-                        guest_macvtap_name, guest.network.guest_mac
-                    ),
-                ])
-                .status()
-                .expect("Expected 'ip link set' to work");
-            std::process::Command::new("bash")
-                .args(&["-c", &format!("sudo ip link show {}", guest_macvtap_name)])
-                .status()
-                .expect("Expected 'ip link show' to work");
+            assert!(exec_host_command_status(&format!(
+                "sudo ip link add link {} name {} type macvtap mod bridge",
+                phy_net, guest_macvtap_name
+            ))
+            .success());
+            assert!(exec_host_command_status(&format!(
+                "sudo ip link set {} address {} up",
+                guest_macvtap_name, guest.network.guest_mac
+            ))
+            .success());
+            assert!(
+                exec_host_command_status(&format!("sudo ip link show {}", guest_macvtap_name))
+                    .success()
+            );
 
             let tap_index =
                 fs::read_to_string(&format!("/sys/class/net/{}/ifindex", guest_macvtap_name))
                     .unwrap();
             let tap_device = format!("/dev/tap{}", tap_index.trim());
 
-            std::process::Command::new("bash")
-                .args(&["-c", &format!("sudo chown $UID.$UID {}", tap_device)])
-                .status()
-                .expect("Expected 'chown' to work");
+            assert!(
+                exec_host_command_status(&format!("sudo chown $UID.$UID {}", tap_device)).success()
+            );
 
             let cstr_tap_device = std::ffi::CString::new(tap_device).unwrap();
             let tap_fd = unsafe { libc::open(cstr_tap_device.as_ptr(), libc::O_RDWR) };
@@ -5236,50 +5240,56 @@ mod tests {
 
             // Create a macvtap on the same physical net interface for
             // the host machine to use
-            let host_macvtap_name = "hostmacvtap0";
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!(
-                        "sudo ip link add link {} name {} type macvtap mod bridge",
-                        phy_net, host_macvtap_name
-                    ),
-                ])
-                .status()
-                .expect("Expected 'ip link add' to work");
+            assert!(exec_host_command_status(&format!(
+                "sudo ip link add link {} name {} type macvtap mod bridge",
+                phy_net, host_macvtap_name
+            ))
+            .success());
             // Use default mask "255.255.255.0"
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!(
-                        "sudo ip address add {}/24 dev {}",
-                        guest.network.host_ip, host_macvtap_name
-                    ),
-                ])
-                .status()
-                .expect("Expected 'ip address add' to work");
-            std::process::Command::new("bash")
-                .args(&[
-                    "-c",
-                    &format!("sudo ip link set dev {} up", host_macvtap_name),
-                ])
-                .status()
-                .expect("Expected 'ip link set dev up' to work");
+            assert!(exec_host_command_status(&format!(
+                "sudo ip address add {}/24 dev {}",
+                guest.network.host_ip, host_macvtap_name
+            ))
+            .success());
+            assert!(exec_host_command_status(&format!(
+                "sudo ip link set dev {} up",
+                host_macvtap_name
+            ))
+            .success());
 
-            let mut child = GuestCommand::new(&guest)
+            let mut guest_command = GuestCommand::new(&guest);
+            guest_command
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
-                .args(&[
-                    "--net",
-                    &format!("fd={},mac={}", tap_fd, guest.network.guest_mac),
-                ])
-                .capture_output()
-                .spawn()
-                .unwrap();
+                .args(&["--api-socket", &api_socket]);
 
+            let net_params = format!("fd={},mac={}", tap_fd, guest.network.guest_mac);
+
+            if !hotplug {
+                guest_command.args(&["--net", &net_params]);
+            }
+
+            let mut child = guest_command.capture_output().spawn().unwrap();
+
+            if hotplug {
+                // Give some time to the VMM process to listen to the API
+                // socket. This is the only requirement to avoid the following
+                // call to ch-remote from failing.
+                thread::sleep(std::time::Duration::new(10, 0));
+                // Hotplug the virtio-net device
+                let (cmd_success, cmd_output) =
+                    remote_command_w_output(&api_socket, "add-net", Some(&net_params));
+                assert!(cmd_success);
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"_net2\",\"bdf\":\"0000:00:05.0\"}"));
+            }
+
+            // The functional connectivity provided by the virtio-net device
+            // gets tested through wait_vm_boot() as it expects to receive a
+            // HTTP request, and through the SSH command as well.
             let r = std::panic::catch_unwind(|| {
                 guest.wait_vm_boot(None).unwrap();
 
@@ -5296,18 +5306,25 @@ mod tests {
 
             let _ = child.kill();
 
-            std::process::Command::new("bash")
-                .args(&["-c", &format!("sudo ip link del {}", guest_macvtap_name)])
-                .status()
-                .expect("Expected 'ip link del' to work");
-            std::process::Command::new("bash")
-                .args(&["-c", &format!("sudo ip link del {}", host_macvtap_name)])
-                .status()
-                .expect("Expected 'ip link del' to work");
+            exec_host_command_status(&format!("sudo ip link del {}", guest_macvtap_name));
+            exec_host_command_status(&format!("sudo ip link del {}", host_macvtap_name));
 
             let output = child.wait_with_output().unwrap();
 
             handle_child_output(r, &output);
+        }
+
+        #[test]
+        #[cfg(not(feature = "mshv"))]
+        fn test_macvtap() {
+            _test_macvtap(false, "guestmacvtap0", "hostmacvtap0")
+        }
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "mshv"))]
+        fn test_macvtap_hotplug() {
+            _test_macvtap(true, "guestmacvtap1", "hostmacvtap1")
         }
 
         #[test]
