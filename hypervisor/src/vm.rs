@@ -168,6 +168,16 @@ pub enum HypervisorVmError {
     #[error("Failed to write to IO Bus: {0}")]
     IoBusWrite(#[source] anyhow::Error),
     ///
+    /// Start dirty log error
+    ///
+    #[error("Failed to get dirty log: {0}")]
+    StartDirtyLog(#[source] anyhow::Error),
+    ///
+    /// Stop dirty log error
+    ///
+    #[error("Failed to get dirty log: {0}")]
+    StopDirtyLog(#[source] anyhow::Error),
+    ///
     /// Get dirty log error
     ///
     #[error("Failed to get dirty log: {0}")]
@@ -196,16 +206,6 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to initialize memory region TDX: {0}")]
     InitMemRegionTdx(#[source] std::io::Error),
-    ///
-    /// Error enabling dirt page tracking
-    ///
-    #[error("Failed to enable dirty page tracking: {0}")]
-    EnableDirtyPageTracking(#[source] std::io::Error),
-    ///
-    /// Error disabling dirt page tracking
-    ///
-    #[error("Failed to disable dirty page tracking: {0}")]
-    DisableDirtyPageTracking(#[source] std::io::Error),
 }
 ///
 /// Result type for returning from a function
@@ -228,7 +228,7 @@ pub trait Vm: Send + Sync {
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding
-    fn create_vcpu(&self, id: u8, vmmops: Option<Arc<Box<dyn VmmOps>>>) -> Result<Arc<dyn Vcpu>>;
+    fn create_vcpu(&self, id: u8, vmmops: Option<Arc<dyn VmmOps>>) -> Result<Arc<dyn Vcpu>>;
     /// Registers an event to be signaled whenever a certain address is written to.
     fn register_ioevent(
         &self,
@@ -292,14 +292,12 @@ pub trait Vm: Send + Sync {
     fn state(&self) -> Result<VmState>;
     /// Set the VM state
     fn set_state(&self, state: VmState) -> Result<()>;
+    /// Start logging dirty pages
+    fn start_dirty_log(&self) -> Result<()>;
+    /// Stop logging dirty pages
+    fn stop_dirty_log(&self) -> Result<()>;
     /// Get dirty pages bitmap
-    fn get_dirty_log(
-        &self,
-        slot: u32,
-        _base_gpa: u64,
-        memory_size: u64,
-        _flags: u64,
-    ) -> Result<Vec<u64>>;
+    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
     #[cfg(feature = "tdx")]
     /// Initalize TDX on this VM
     fn tdx_init(&self, cpuid: &CpuId, max_vcpus: u32) -> Result<()>;
@@ -315,16 +313,6 @@ pub trait Vm: Send + Sync {
         size: u64,
         measure: bool,
     ) -> Result<()>;
-    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-    ///
-    /// Enable dirty page tracking by hypervisor
-    ///
-    fn enable_dirty_page_tracking(&self) -> Result<()>;
-    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-    ///
-    /// Disable dirty page tracking by hypervisor
-    ///
-    fn disable_dirty_page_tracking(&self) -> Result<()>;
 }
 
 pub trait VmmOps: Send + Sync {

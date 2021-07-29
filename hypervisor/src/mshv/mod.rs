@@ -16,7 +16,8 @@ pub use mshv_bindings::*;
 pub use mshv_ioctls::IoEventAddress;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd};
 use serde_derive::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use vm::DataMatch;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
@@ -31,8 +32,9 @@ pub use x86_64::*;
 #[cfg(target_arch = "x86_64")]
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
-use std::sync::RwLock;
 
+const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
+const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
 pub const PAGE_SHIFT: usize = 12;
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
@@ -41,6 +43,11 @@ pub struct HvState {
 }
 
 pub use HvState as VmState;
+
+struct MshvDirtyLogSlot {
+    guest_pfn: u64,
+    memory_size: u64,
+}
 
 /// Wrapper over mshv system ioctls.
 pub struct MshvHypervisor {
@@ -106,6 +113,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             msrs,
             hv_state: hv_state_init(),
             vmmops: None,
+            dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
     ///
@@ -133,7 +141,7 @@ pub struct MshvVcpu {
     cpuid: CpuId,
     msrs: MsrEntries,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
-    vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
+    vmmops: Option<Arc<dyn vm::VmmOps>>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -680,7 +688,8 @@ pub struct MshvVm {
     msrs: MsrEntries,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
-    vmmops: Option<Arc<Box<dyn vm::VmmOps>>>,
+    vmmops: Option<Arc<dyn vm::VmmOps>>,
+    dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
 }
 
 fn hv_state_init() -> Arc<RwLock<HvState>> {
@@ -742,7 +751,7 @@ impl vm::Vm for MshvVm {
     fn create_vcpu(
         &self,
         id: u8,
-        vmmops: Option<Arc<Box<dyn VmmOps>>>,
+        vmmops: Option<Arc<dyn VmmOps>>,
     ) -> vm::Result<Arc<dyn cpu::Vcpu>> {
         let vcpu_fd = self
             .fd
@@ -806,6 +815,17 @@ impl vm::Vm for MshvVm {
 
     /// Creates a guest physical memory region.
     fn create_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+        // No matter read only or not we keep track the slots.
+        // For readonly hypervisor can enable the dirty bits,
+        // but a VM exit happens before setting the dirty bits
+        self.dirty_log_slots.write().unwrap().insert(
+            user_memory_region.guest_pfn,
+            MshvDirtyLogSlot {
+                guest_pfn: user_memory_region.guest_pfn,
+                memory_size: user_memory_region.size,
+            },
+        );
+
         self.fd
             .map_user_memory(user_memory_region)
             .map_err(|e| vm::HypervisorVmError::CreateUserMemory(e.into()))?;
@@ -814,6 +834,12 @@ impl vm::Vm for MshvVm {
 
     /// Removes a guest physical memory region.
     fn remove_user_memory_region(&self, user_memory_region: MemoryRegion) -> vm::Result<()> {
+        // Remove the corresponding entry from "self.dirty_log_slots" if needed
+        self.dirty_log_slots
+            .write()
+            .unwrap()
+            .remove(&user_memory_region.guest_pfn);
+
         self.fd
             .unmap_user_memory(user_memory_region)
             .map_err(|e| vm::HypervisorVmError::RemoveUserMemory(e.into()))?;
@@ -877,34 +903,42 @@ impl vm::Vm for MshvVm {
         Ok(())
     }
     ///
-    /// Get dirty pages bitmap (one bit per page)
+    /// Start logging dirty pages
     ///
-    fn get_dirty_log(
-        &self,
-        _slot: u32,
-        _base_gpa: u64,
-        memory_size: u64,
-        _flags: u64,
-    ) -> vm::Result<Vec<u64>> {
-        self.fd
-            .get_dirty_log(_base_gpa >> PAGE_SHIFT, memory_size as usize, _flags)
-            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
-    }
-    ///
-    /// Enable dirty page tracking
-    ///
-    fn enable_dirty_page_tracking(&self) -> vm::Result<()> {
+    fn start_dirty_log(&self) -> vm::Result<()> {
         self.fd
             .enable_dirty_page_tracking()
-            .map_err(|e| vm::HypervisorVmError::EnableDirtyPageTracking(e.into()))
+            .map_err(|e| vm::HypervisorVmError::StartDirtyLog(e.into()))
     }
     ///
-    /// Disable dirty page tracking
+    /// Stop logging dirty pages
     ///
-    fn disable_dirty_page_tracking(&self) -> vm::Result<()> {
+    fn stop_dirty_log(&self) -> vm::Result<()> {
+        let dirty_log_slots = self.dirty_log_slots.read().unwrap();
+        // Before disabling the dirty page tracking we need
+        // to set the dirty bits in the Hypervisor
+        // This is a requirement from Microsoft Hypervisor
+        for (_, s) in dirty_log_slots.iter() {
+            self.fd
+                .get_dirty_log(s.guest_pfn, s.memory_size as usize, DIRTY_BITMAP_SET_DIRTY)
+                .map_err(|e| vm::HypervisorVmError::StartDirtyLog(e.into()))?;
+        }
         self.fd
             .disable_dirty_page_tracking()
-            .map_err(|e| vm::HypervisorVmError::DisableDirtyPageTracking(e.into()))
+            .map_err(|e| vm::HypervisorVmError::StartDirtyLog(e.into()))?;
+        Ok(())
+    }
+    ///
+    /// Get dirty pages bitmap (one bit per page)
+    ///
+    fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
+        self.fd
+            .get_dirty_log(
+                base_gpa >> PAGE_SHIFT,
+                memory_size as usize,
+                DIRTY_BITMAP_CLEAR_DIRTY,
+            )
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
     }
 }
 pub use hv_cpuid_entry as CpuIdEntry;

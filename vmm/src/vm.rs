@@ -523,6 +523,8 @@ pub struct Vm {
     numa_nodes: NumaNodes,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    hypervisor: Arc<dyn hypervisor::Hypervisor>,
 }
 
 impl Vm {
@@ -578,14 +580,14 @@ impl Vm {
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
         // Create the VmOps structure, which implements the VmmOps trait.
         // And send it to the hypervisor.
-        let vm_ops: Arc<Box<dyn VmmOps>> = Arc::new(Box::new(VmOps {
+        let vm_ops: Arc<dyn VmmOps> = Arc::new(VmOps {
             memory,
             #[cfg(target_arch = "x86_64")]
             io_bus,
             mmio_bus,
             #[cfg(target_arch = "x86_64")]
             timestamp: std::time::Instant::now(),
-        }));
+        });
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         #[cfg(feature = "tdx")]
@@ -597,7 +599,7 @@ impl Vm {
             vm.clone(),
             exit_evt_clone,
             reset_evt,
-            hypervisor,
+            hypervisor.clone(),
             seccomp_action.clone(),
             vm_ops,
             #[cfg(feature = "tdx")]
@@ -644,6 +646,8 @@ impl Vm {
             numa_nodes,
             seccomp_action: seccomp_action.clone(),
             exit_evt,
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            hypervisor,
         })
     }
 
@@ -2152,27 +2156,12 @@ impl Vm {
         Ok(table)
     }
 
-    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-    pub fn enable_memory_log_dirty(&self) -> std::result::Result<(), MigratableError> {
-        self.vm.enable_dirty_page_tracking().map_err(|e| {
-            MigratableError::EnableDirtyLogging(anyhow!(
-                "Error enabling dirty page tracking: {}",
-                e
-            ))
-        })
-    }
-    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-    pub fn complete_live_migration(&self) -> std::result::Result<(), MigratableError> {
-        self.memory_manager.lock().unwrap().end_memory_dirty_log()?;
-        self.vm.disable_dirty_page_tracking().map_err(|e| {
-            MigratableError::DisableDirtyLogging(anyhow!(
-                "Error disabling dirty page tracking: {}",
-                e
-            ))
-        })
-    }
     pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
         self.memory_manager.lock().unwrap().start_memory_dirty_log()
+    }
+
+    pub fn stop_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().stop_memory_dirty_log()
     }
 
     pub fn dirty_memory_range_table(
@@ -2287,6 +2276,8 @@ pub struct VmSnapshot {
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     pub clock: Option<hypervisor::ClockData>,
     pub state: Option<hypervisor::VmState>,
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    pub common_cpuid: hypervisor::CpuId,
 }
 
 pub const VM_SNAPSHOT_ID: &str = "vm";
@@ -2314,6 +2305,29 @@ impl Snapshottable for Vm {
             )));
         }
 
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        let common_cpuid = {
+            #[cfg(feature = "tdx")]
+            let tdx_enabled = self.config.lock().unwrap().tdx.is_some();
+            let phys_bits = physical_bits(
+                self.config.lock().unwrap().cpus.max_phys_bits,
+                #[cfg(feature = "tdx")]
+                tdx_enabled,
+            );
+            arch::generate_common_cpuid(
+                self.hypervisor.clone(),
+                None,
+                None,
+                phys_bits,
+                self.config.lock().unwrap().cpus.kvm_hyperv,
+                #[cfg(feature = "tdx")]
+                tdx_enabled,
+            )
+            .map_err(|e| {
+                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {:?}", e))
+            })?
+        };
+
         let mut vm_snapshot = Snapshot::new(VM_SNAPSHOT_ID);
         let vm_state = self
             .vm
@@ -2324,6 +2338,8 @@ impl Snapshottable for Vm {
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             clock: self.saved_clock,
             state: Some(vm_state),
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            common_cpuid,
         })
         .map_err(|e| MigratableError::Snapshot(e.into()))?;
 
