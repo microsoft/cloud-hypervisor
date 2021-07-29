@@ -1988,7 +1988,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_multi_cpu() {
             let bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(bionic));
@@ -2357,7 +2356,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_pci_msi() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -2885,7 +2883,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_serial_off() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -2924,7 +2921,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_serial_null() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -3039,7 +3035,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_serial_file() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -3245,7 +3240,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_console_file() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4964,7 +4958,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_counters() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -5004,7 +4997,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_watchdog() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
