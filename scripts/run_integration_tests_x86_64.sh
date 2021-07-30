@@ -214,7 +214,7 @@ ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
 service openvswitch-switch restart
 
 export RUST_BACKTRACE=1
-time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=2
+time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=1
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
