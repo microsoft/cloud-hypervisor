@@ -81,7 +81,7 @@ mod tests {
     #[cfg(not(feature = "mshv"))]
     const ENABLE_SECCOMP: &str = "true";
     #[cfg(feature = "mshv")]
-    const ENABLE_SECCOMP: &str = "false";
+    const ENABLE_SECCOMP: &str = "true";
 
     #[cfg(target_arch = "x86_64")]
     const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'IO-APIC.*ttyS0' /proc/interrupts || true";
