@@ -284,6 +284,13 @@ pub fn start_vmm_thread(
     Ok(thread)
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct VmMigrationConfig {
+    vm_config: Arc<Mutex<VmConfig>>,
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    common_cpuid: hypervisor::CpuId,
+}
+
 pub struct Vmm {
     epoll: EpollContext,
     exit_evt: EventFd,
@@ -445,6 +452,10 @@ impl Vmm {
 
         let snapshot = recv_vm_snapshot(source_url).map_err(VmError::Restore)?;
         let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
+
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        self.vm_check_cpuid_compatibility(&vm_snapshot.config, &vm_snapshot.common_cpuid)
+            .map_err(VmError::Restore)?;
 
         self.vm_config = Some(Arc::clone(&vm_snapshot.config));
 
@@ -743,9 +754,17 @@ impl Vmm {
         socket
             .read_exact(&mut data)
             .map_err(MigratableError::MigrateSocket)?;
-        let config: VmConfig = serde_json::from_slice(&data).map_err(|e| {
-            MigratableError::MigrateReceive(anyhow!("Error deserialising config: {}", e))
-        })?;
+
+        let vm_migration_config: VmMigrationConfig =
+            serde_json::from_slice(&data).map_err(|e| {
+                MigratableError::MigrateReceive(anyhow!("Error deserialising config: {}", e))
+            })?;
+
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+        self.vm_check_cpuid_compatibility(
+            &vm_migration_config.vm_config,
+            &vm_migration_config.common_cpuid,
+        )?;
 
         let exit_evt = self.exit_evt.try_clone().map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error cloning exit EventFd: {}", e))
@@ -757,7 +776,7 @@ impl Vmm {
             MigratableError::MigrateReceive(anyhow!("Error cloning activate EventFd: {}", e))
         })?;
 
-        self.vm_config = Some(Arc::new(Mutex::new(config)));
+        self.vm_config = Some(vm_migration_config.vm_config);
         let vm = Vm::new_from_migration(
             self.vm_config.clone().unwrap(),
             exit_evt,
@@ -998,7 +1017,40 @@ impl Vmm {
             }
 
             // Send config
-            let config_data = serde_json::to_vec(&vm.get_config()).unwrap();
+            let vm_config = vm.get_config();
+            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            let common_cpuid = {
+                #[cfg(feature = "tdx")]
+                let tdx_enabled = vm_config.lock().unwrap().tdx.is_some();
+                let phys_bits = vm::physical_bits(
+                    vm_config.lock().unwrap().cpus.max_phys_bits,
+                    #[cfg(feature = "tdx")]
+                    tdx_enabled,
+                );
+                arch::generate_common_cpuid(
+                    self.hypervisor.clone(),
+                    None,
+                    None,
+                    phys_bits,
+                    vm_config.lock().unwrap().cpus.kvm_hyperv,
+                    #[cfg(feature = "tdx")]
+                    tdx_enabled,
+                )
+                .map_err(|e| {
+                    MigratableError::MigrateReceive(anyhow!(
+                        "Error generating common cpuid': {:?}",
+                        e
+                    ))
+                })?
+            };
+
+            let vm_migration_config = VmMigrationConfig {
+                vm_config,
+                #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+                common_cpuid,
+            };
+
+            let config_data = serde_json::to_vec(&vm_migration_config).unwrap();
             Request::config(config_data.len() as u64).write_to(&mut socket)?;
             socket
                 .write_all(&config_data)
@@ -1013,8 +1065,6 @@ impl Vmm {
                 )));
             }
 
-            #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-            vm.enable_memory_log_dirty()?;
             // Start logging dirty pages
             vm.start_memory_dirty_log()?;
 
@@ -1051,6 +1101,9 @@ impl Vmm {
             // Send last batch of dirty pages
             Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
 
+            // Stop logging dirty pages
+            vm.stop_memory_dirty_log()?;
+
             // Capture snapshot and send it
             let vm_snapshot = vm.snapshot()?;
             let snapshot_data = serde_json::to_vec(&vm_snapshot).unwrap();
@@ -1080,13 +1133,49 @@ impl Vmm {
                 )));
             }
             info!("Migration complete");
-            // Disable dirty logging
-            #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-            vm.complete_live_migration()?;
             Ok(())
         } else {
             Err(MigratableError::MigrateSend(anyhow!("VM is not running")))
         }
+    }
+
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    fn vm_check_cpuid_compatibility(
+        &self,
+        src_vm_config: &Arc<Mutex<VmConfig>>,
+        src_vm_cpuid: &hypervisor::CpuId,
+    ) -> result::Result<(), MigratableError> {
+        // We check the `CPUID` compatibility of between the source vm and destination, which is
+        // mostly about feature compatibility and "topology/sgx" leaves are not relevant.
+        let dest_cpuid = &{
+            let vm_config = &src_vm_config.lock().unwrap();
+
+            #[cfg(feature = "tdx")]
+            let tdx_enabled = vm_config.tdx.is_some();
+            let phys_bits = vm::physical_bits(
+                vm_config.cpus.max_phys_bits,
+                #[cfg(feature = "tdx")]
+                tdx_enabled,
+            );
+            arch::generate_common_cpuid(
+                self.hypervisor.clone(),
+                None,
+                None,
+                phys_bits,
+                vm_config.cpus.kvm_hyperv,
+                #[cfg(feature = "tdx")]
+                tdx_enabled,
+            )
+            .map_err(|e| {
+                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {:?}", e))
+            })?
+        };
+        arch::CpuidFeatureEntry::check_cpuid_compatibility(src_vm_cpuid, dest_cpuid).map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!(
+                "Error checking cpu feature compatibility': {:?}",
+                e
+            ))
+        })
     }
 
     fn control_loop(&mut self, api_receiver: Arc<Receiver<ApiRequest>>) -> Result<()> {

@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::vhost_user::vu_common_ctrl::{
-    add_memory_region, connect_vhost_user, negotiate_features_vhost_user, reset_vhost_user,
-    setup_vhost_user, update_mem_table, VhostUserConfig,
-};
+use crate::vhost_user::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
 use crate::vhost_user::{Error, Inflight, Result, VhostUserEpollHandler};
 use crate::{
     ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
@@ -13,6 +10,7 @@ use crate::{
     VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1,
 };
 use crate::{GuestMemoryMmap, GuestRegionMmap};
+use anyhow::anyhow;
 use net_util::{build_net_config_space, CtrlQueue, MacAddr, VirtioNetConfig};
 use seccomp::{SeccompAction, SeccompFilter};
 use std::ops::Deref;
@@ -22,8 +20,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::vec::Vec;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost::vhost_user::{Master, MasterReqHandler, VhostUserMaster, VhostUserMasterReqHandler};
+use vhost::vhost_user::{MasterReqHandler, VhostUserMaster, VhostUserMasterReqHandler};
 use virtio_bindings::bindings::virtio_net::{
     VIRTIO_NET_F_CSUM, VIRTIO_NET_F_CTRL_VQ, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_ECN,
     VIRTIO_NET_F_GUEST_TSO4, VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO,
@@ -31,10 +31,21 @@ use virtio_bindings::bindings::virtio_net::{
     VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF,
 };
 use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshottable, Transportable};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 const DEFAULT_QUEUE_NUMBER: usize = 2;
+
+#[derive(Versionize)]
+pub struct State {
+    pub avail_features: u64,
+    pub acked_features: u64,
+    pub config: VirtioNetConfig,
+}
+
+impl VersionMapped for State {}
 
 struct SlaveReqHandler {}
 impl VhostUserMasterReqHandler for SlaveReqHandler {}
@@ -94,7 +105,7 @@ impl EpollHelperHandler for NetCtrlEpollHandler {
 pub struct Net {
     common: VirtioCommon,
     id: String,
-    vhost_user_net: Arc<Mutex<Master>>,
+    vu: Arc<Mutex<VhostUserHandle>>,
     config: VirtioNetConfig,
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     acked_protocol_features: u64,
@@ -103,6 +114,7 @@ pub struct Net {
     ctrl_queue_epoll_thread: Option<thread::JoinHandle<()>>,
     epoll_thread: Option<thread::JoinHandle<()>>,
     seccomp_action: SeccompAction,
+    vu_num_queues: usize,
 }
 
 impl Net {
@@ -136,23 +148,20 @@ impl Net {
         let mut config = VirtioNetConfig::default();
         build_net_config_space(&mut config, mac_addr, num_queues, &mut avail_features);
 
-        let mut vhost_user_net =
-            connect_vhost_user(server, &vu_cfg.socket, num_queues as u64, false)?;
+        let mut vu =
+            VhostUserHandle::connect_vhost_user(server, &vu_cfg.socket, num_queues as u64, false)?;
 
         let avail_protocol_features = VhostUserProtocolFeatures::MQ
             | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
             | VhostUserProtocolFeatures::REPLY_ACK
             | VhostUserProtocolFeatures::INFLIGHT_SHMFD;
 
-        let (mut acked_features, acked_protocol_features) = negotiate_features_vhost_user(
-            &mut vhost_user_net,
-            avail_features,
-            avail_protocol_features,
-        )?;
+        let (mut acked_features, acked_protocol_features) =
+            vu.negotiate_features_vhost_user(avail_features, avail_protocol_features)?;
 
         let backend_num_queues =
             if acked_protocol_features & VhostUserProtocolFeatures::MQ.bits() != 0 {
-                vhost_user_net
+                vu.socket_handle()
                     .get_queue_num()
                     .map_err(Error::VhostUserGetQueueMaxNum)? as usize
             } else {
@@ -167,6 +176,7 @@ impl Net {
 
         // If the control queue feature has been negotiated, let's increase
         // the number of queues.
+        let vu_num_queues = num_queues;
         if acked_features & (1 << VIRTIO_NET_F_CTRL_VQ) != 0 {
             num_queues += 1;
         }
@@ -186,7 +196,7 @@ impl Net {
                 min_queues: DEFAULT_QUEUE_NUMBER as u16,
                 ..Default::default()
             },
-            vhost_user_net: Arc::new(Mutex::new(vhost_user_net)),
+            vu: Arc::new(Mutex::new(vu)),
             config,
             guest_memory: None,
             acked_protocol_features,
@@ -195,7 +205,22 @@ impl Net {
             ctrl_queue_epoll_thread: None,
             epoll_thread: None,
             seccomp_action,
+            vu_num_queues,
         })
+    }
+
+    fn state(&self) -> State {
+        State {
+            avail_features: self.common.avail_features,
+            acked_features: self.common.acked_features,
+            config: self.config,
+        }
+    }
+
+    fn set_state(&mut self, state: &State) {
+        self.common.avail_features = state.avail_features;
+        self.common.acked_features = state.acked_features;
+        self.config = state.config;
     }
 }
 
@@ -238,7 +263,6 @@ impl VirtioDevice for Net {
         mut queue_evts: Vec<EventFd>,
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
-
         self.guest_memory = Some(mem.clone());
 
         let num_queues = queues.len();
@@ -301,24 +325,26 @@ impl VirtioDevice for Net {
                 None
             };
 
-        setup_vhost_user(
-            &mut self.vhost_user_net.lock().unwrap(),
-            &mem.memory(),
-            queues.clone(),
-            queue_evts.iter().map(|q| q.try_clone().unwrap()).collect(),
-            &interrupt_cb,
-            backend_acked_features,
-            &slave_req_handler,
-            inflight.as_mut(),
-        )
-        .map_err(ActivateError::VhostUserNetSetup)?;
+        self.vu
+            .lock()
+            .unwrap()
+            .setup_vhost_user(
+                &mem.memory(),
+                queues.clone(),
+                queue_evts.iter().map(|q| q.try_clone().unwrap()).collect(),
+                &interrupt_cb,
+                backend_acked_features,
+                &slave_req_handler,
+                inflight.as_mut(),
+            )
+            .map_err(ActivateError::VhostUserNetSetup)?;
 
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
         let mut handler: VhostUserEpollHandler<SlaveReqHandler> = VhostUserEpollHandler {
-            vu: self.vhost_user_net.clone(),
+            vu: self.vu.clone(),
             mem,
             kill_evt,
             pause_evt,
@@ -358,10 +384,12 @@ impl VirtioDevice for Net {
             self.common.resume().ok()?;
         }
 
-        if let Err(e) = reset_vhost_user(
-            &mut self.vhost_user_net.lock().unwrap(),
-            self.common.queue_sizes.len(),
-        ) {
+        if let Err(e) = self
+            .vu
+            .lock()
+            .unwrap()
+            .reset_vhost_user(self.common.queue_sizes.len())
+        {
             error!("Failed to reset vhost-user daemon: {:?}", e);
             return None;
         }
@@ -378,7 +406,7 @@ impl VirtioDevice for Net {
     }
 
     fn shutdown(&mut self) {
-        let _ = unsafe { libc::close(self.vhost_user_net.lock().unwrap().as_raw_fd()) };
+        let _ = unsafe { libc::close(self.vu.lock().unwrap().socket_handle().as_raw_fd()) };
 
         // Remove socket path if needed
         if self.server {
@@ -392,14 +420,17 @@ impl VirtioDevice for Net {
     ) -> std::result::Result<(), crate::Error> {
         if self.acked_protocol_features & VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS.bits() != 0
         {
-            add_memory_region(&mut self.vhost_user_net.lock().unwrap(), region)
+            self.vu
+                .lock()
+                .unwrap()
+                .add_memory_region(region)
                 .map_err(crate::Error::VhostUserAddMemoryRegion)
         } else if let Some(guest_memory) = &self.guest_memory {
-            update_mem_table(
-                &mut self.vhost_user_net.lock().unwrap(),
-                guest_memory.memory().deref(),
-            )
-            .map_err(crate::Error::VhostUserUpdateMemory)
+            self.vu
+                .lock()
+                .unwrap()
+                .update_mem_table(guest_memory.memory().deref())
+                .map_err(crate::Error::VhostUserUpdateMemory)
         } else {
             Ok(())
         }
@@ -408,27 +439,50 @@ impl VirtioDevice for Net {
 
 impl Pausable for Net {
     fn pause(&mut self) -> result::Result<(), MigratableError> {
+        self.vu
+            .lock()
+            .unwrap()
+            .pause_vhost_user(self.vu_num_queues)
+            .map_err(|e| {
+                MigratableError::Pause(anyhow!("Error pausing vhost-user-net backend: {:?}", e))
+            })?;
+
         self.common.pause()
     }
 
     fn resume(&mut self) -> result::Result<(), MigratableError> {
         self.common.resume()?;
 
-        if let Some(ctrl_queue_epoll_thread) = &self.ctrl_queue_epoll_thread {
-            ctrl_queue_epoll_thread.thread().unpark();
-        }
-
         if let Some(epoll_thread) = &self.epoll_thread {
             epoll_thread.thread().unpark();
         }
 
-        Ok(())
+        if let Some(ctrl_queue_epoll_thread) = &self.ctrl_queue_epoll_thread {
+            ctrl_queue_epoll_thread.thread().unpark();
+        }
+
+        self.vu
+            .lock()
+            .unwrap()
+            .resume_vhost_user(self.vu_num_queues)
+            .map_err(|e| {
+                MigratableError::Resume(anyhow!("Error resuming vhost-user-net backend: {:?}", e))
+            })
     }
 }
 
 impl Snapshottable for Net {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+        Snapshot::new_from_versioned_state(&self.id(), &self.state())
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
+        Ok(())
     }
 }
 impl Transportable for Net {}
