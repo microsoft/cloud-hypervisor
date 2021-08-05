@@ -1902,7 +1902,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_simple_launch() {
             let bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -2554,7 +2553,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_named_tap() {
             test_vhost_user_net(
                 Some("mytap0"),
@@ -2577,13 +2575,11 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_multiple_queues() {
             test_vhost_user_net(None, 4, &prepare_vhost_user_net_daemon, false, false)
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_vhost_user_net_tap_multiple_queues() {
             test_vhost_user_net(
                 Some("vunet-tap1"),
@@ -2626,7 +2622,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_split_irqchip() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -2746,7 +2741,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_virtio_pmem_discard_writes() {
             test_virtio_pmem(true, false)
         }
@@ -3079,7 +3073,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_pty_interaction() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -3567,7 +3560,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_reboot() {
             let bionic = UbuntuDiskConfig::new(BIONIC_IMAGE_NAME.to_string());
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3672,7 +3664,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         // Start cloud-hypervisor with no VM parameters, only the API server running.
         // From the API: Create a VM, boot it and check that it looks as expected.
         // Then we pause the VM, check that it's no longer available.
@@ -3751,7 +3742,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         // This test validates that it can find the virtio-iommu device at first.
         // It also verifies that both disks and the network card are attached to
         // the virtual IOMMU by looking at /sys/kernel/iommu_groups directory.
@@ -3832,7 +3822,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         // We cannot force the software running in the guest to reprogram the BAR
         // with some different addresses, but we have a reliable way of testing it
         // with a standard Linux kernel.
@@ -3929,14 +3918,12 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_memory_mergeable_off() {
             test_memory_mergeable(false)
         }
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_cpu_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4019,7 +4006,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_memory_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4434,7 +4420,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_virtio_balloon() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4604,7 +4589,6 @@ mod tests {
 
         #[test]
         #[cfg(target_arch = "x86_64")]
-        #[cfg(not(feature = "mshv"))]
         fn test_net_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4700,7 +4684,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_initramfs() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -5072,7 +5055,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_tap_from_fd() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -5266,13 +5248,11 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_macvtap() {
             _test_macvtap(false, "guestmacvtap0", "hostmacvtap0")
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         fn test_macvtap_hotplug() {
             _test_macvtap(true, "guestmacvtap1", "hostmacvtap1")
