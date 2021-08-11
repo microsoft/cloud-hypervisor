@@ -5253,7 +5253,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_macvtap_hotplug() {
             _test_macvtap(true, "guestmacvtap1", "hostmacvtap1")
         }
@@ -5876,7 +5875,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_snapshot_restore() {
             let windows_guest = WindowsGuest::new();
 
@@ -6182,7 +6180,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_disk_hotplug() {
             let windows_guest = WindowsGuest::new();
 
@@ -6276,7 +6273,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_disk_hotplug_multi() {
             let windows_guest = WindowsGuest::new();
 
