@@ -180,6 +180,7 @@ pub enum Error {
     /// Error getting supported CPUID through the hypervisor (kvm/mshv) API
     CpuidGetSupported(HypervisorError),
 
+    #[cfg(feature = "kvm")]
     /// Error populating CPUID with KVM HyperV emulation details
     CpuidKvmHyperV(vmm_sys_util::fam::Error),
 
@@ -188,6 +189,10 @@ pub enum Error {
 
     /// Error checking CPUID compatibility
     CpuidCheckCompatibility,
+
+    #[cfg(feature = "mshv")]
+    /// Error populating CPUID with MSHV emulation details
+    CpuidMshv(vmm_sys_util::fam::Error),
 }
 
 impl From<Error> for super::Error {
@@ -564,7 +569,7 @@ pub fn generate_common_cpuid(
     topology: Option<(u8, u8, u8)>,
     sgx_epc_sections: Option<Vec<SgxEpcSection>>,
     phys_bits: u8,
-    kvm_hyperv: bool,
+    #[cfg(feature = "kvm")] kvm_hyperv: bool,
     #[cfg(feature = "tdx")] tdx_enabled: bool,
 ) -> super::Result<CpuId> {
     let cpuid_patches = vec![
@@ -659,6 +664,10 @@ pub fn generate_common_cpuid(
             .map_err(Error::CpuidIdentification)?;
     }
 
+    let common_0x4000_0003_edx = 1 << 3; // CPU dynamic partitioning
+    let common_0x4000_0004_eax = 1 << 5; // Recommend relaxed timing
+
+    #[cfg(feature = "kvm")]
     if kvm_hyperv {
         // Remove conflicting entries
         cpuid.retain(|c| c.function != 0x4000_0000);
@@ -697,14 +706,14 @@ pub fn generate_common_cpuid(
                    | 1 << 2 // AccessSynicRegs
                    | 1 << 3 // AccessSyntheticTimerRegs
                    | 1 << 9, // AccessPartitionReferenceTsc
-                edx: 1 << 3, // CPU dynamic partitioning
+                edx: common_0x4000_0003_edx,
                 ..Default::default()
             })
             .map_err(Error::CpuidKvmHyperV)?;
         cpuid
             .push(CpuIdEntry {
                 function: 0x4000_0004,
-                eax: 1 << 5, // Recommend relaxed timing
+                eax: common_0x4000_0004_eax,
                 ..Default::default()
             })
             .map_err(Error::CpuidKvmHyperV)?;
@@ -716,6 +725,23 @@ pub fn generate_common_cpuid(
                 })
                 .map_err(Error::CpuidKvmHyperV)?;
         }
+    }
+    #[cfg(feature = "mshv")]
+    {
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x4000_0003,
+                edx: common_0x4000_0003_edx,
+                ..Default::default()
+            })
+            .map_err(Error::CpuidMshv)?;
+        cpuid
+            .push(CpuIdEntry {
+                function: 0x4000_0004,
+                eax: common_0x4000_0004_eax,
+                ..Default::default()
+            })
+            .map_err(Error::CpuidMshv)?;
     }
 
     Ok(cpuid)

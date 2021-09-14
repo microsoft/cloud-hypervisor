@@ -8,6 +8,8 @@ edition = "2018"
 default = []
 acpi = ["acpi_tables"]
 tdx = []
+mshv = []
+kvm = []
 
 [dependencies]
 acpi_tables = { path = "../acpi_tables", optional = true }

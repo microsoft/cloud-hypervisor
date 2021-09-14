@@ -194,6 +194,7 @@ version = "18.0.0"
 dependencies = [
  "anyhow",
  "api_client",
+ "arch",
  "clap",
  "credibility",
  "dirs",

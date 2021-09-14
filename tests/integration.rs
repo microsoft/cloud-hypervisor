@@ -6117,7 +6117,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_cpu_hotplug() {
             let windows_guest = WindowsGuest::new();
 
@@ -6191,7 +6190,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_ram_hotplug() {
             let windows_guest = WindowsGuest::new();
 
