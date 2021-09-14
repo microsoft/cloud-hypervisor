@@ -8,17 +8,17 @@ use super::{
     VirtioCommon, VirtioDevice, VirtioDeviceType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_IOMMU_PLATFORM,
     VIRTIO_F_VERSION_1,
 };
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::seccomp_filters::Thread;
+use crate::thread_helper::spawn_virtio_thread;
 use crate::GuestMemoryMmap;
 use crate::{VirtioInterrupt, VirtioInterruptType};
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::SeccompAction;
 use std::fs::File;
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier};
-use std::thread;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic};
@@ -129,6 +129,7 @@ pub struct Rng {
     id: String,
     random_file: Option<File>,
     seccomp_action: SeccompAction,
+    exit_evt: EventFd,
 }
 
 #[derive(Versionize)]
@@ -146,6 +147,7 @@ impl Rng {
         path: &str,
         iommu: bool,
         seccomp_action: SeccompAction,
+        exit_evt: EventFd,
     ) -> io::Result<Rng> {
         let random_file = File::open(path)?;
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
@@ -166,6 +168,7 @@ impl Rng {
             id,
             random_file: Some(random_file),
             seccomp_action,
+            exit_evt,
         })
     }
 
@@ -236,24 +239,18 @@ impl VirtioDevice for Rng {
             let paused = self.common.paused.clone();
             let paused_sync = self.common.paused_sync.clone();
             let mut epoll_threads = Vec::new();
-            // Retrieve seccomp filter for virtio_rng thread
-            let virtio_rng_seccomp_filter =
-                get_seccomp_filter(&self.seccomp_action, Thread::VirtioRng)
-                    .map_err(ActivateError::CreateSeccompFilter)?;
-            thread::Builder::new()
-                .name(self.id.clone())
-                .spawn(move || {
-                    if let Err(e) = SeccompFilter::apply(virtio_rng_seccomp_filter) {
-                        error!("Error applying seccomp filter: {:?}", e);
-                    } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
+            spawn_virtio_thread(
+                &self.id,
+                &self.seccomp_action,
+                Thread::VirtioRng,
+                &mut epoll_threads,
+                &self.exit_evt,
+                move || {
+                    if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                         error!("Error running worker: {:?}", e);
                     }
-                })
-                .map(|thread| epoll_threads.push(thread))
-                .map_err(|e| {
-                    error!("failed to clone the virtio-rng epoll thread: {}", e);
-                    ActivateError::BadActivate
-                })?;
+                },
+            )?;
 
             self.common.epoll_threads = Some(epoll_threads);
 

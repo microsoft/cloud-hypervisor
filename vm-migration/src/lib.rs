@@ -6,6 +6,7 @@
 #[macro_use]
 extern crate serde_derive;
 
+use crate::protocol::MemoryRangeTable;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -14,7 +15,7 @@ use versionize::{VersionMap, Versionize};
 pub mod protocol;
 
 /// Global VMM version for versioning
-const MAJOR_VERSION: u16 = 17;
+const MAJOR_VERSION: u16 = 18;
 const MINOR_VERSION: u16 = 0;
 const VMM_VERSION: u16 = MAJOR_VERSION << 12 | MINOR_VERSION & 0b1111;
 
@@ -47,11 +48,17 @@ pub enum MigratableError {
     #[error("Socket error: {0}")]
     MigrateSocket(#[source] std::io::Error),
 
-    #[error("Failed to enable dirty log tracking: {0}")]
-    EnableDirtyLogging(#[source] anyhow::Error),
+    #[error("Failed to start migration for migratable component: {0}")]
+    StartDirtyLog(#[source] anyhow::Error),
 
-    #[error("Failed to disbale dirty log tracking: {0}")]
-    DisableDirtyLogging(#[source] anyhow::Error),
+    #[error("Failed to stop migration for migratable component: {0}")]
+    StopDirtyLog(#[source] anyhow::Error),
+
+    #[error("Failed to retrieve dirty ranges for migratable component: {0}")]
+    DirtyLog(#[source] anyhow::Error),
+
+    #[error("Failed to complete migration for migratable component: {0}")]
+    CompleteMigration(#[source] anyhow::Error),
 }
 
 /// A Pausable component can be paused and resumed.
@@ -285,4 +292,20 @@ pub trait Transportable: Pausable + Snapshottable {
 /// and Snapshottable.
 /// Moreover a migratable component can be transported to a remote or local
 /// destination and thus must be Transportable.
-pub trait Migratable: Send + Pausable + Snapshottable + Transportable {}
+pub trait Migratable: Send + Pausable + Snapshottable + Transportable {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        Ok(())
+    }
+
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        Ok(())
+    }
+
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        Ok(MemoryRangeTable::default())
+    }
+
+    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+        Ok(())
+    }
+}

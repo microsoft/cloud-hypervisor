@@ -12,7 +12,7 @@ use clap::{App, Arg, ArgGroup, ArgMatches};
 use libc::EFD_NONBLOCK;
 use log::LevelFilter;
 use option_parser::OptionParser;
-use seccomp::SeccompAction;
+use seccompiler::SeccompAction;
 use signal_hook::{
     consts::SIGSYS,
     iterator::{exfiltrator::WithRawSiginfo, SignalsInfo},
@@ -26,6 +26,7 @@ use std::thread;
 use thiserror::Error;
 use vmm::config;
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::signal::block_signal;
 
 #[derive(Error, Debug)]
 enum Error {
@@ -280,6 +281,14 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
+            Arg::with_name("user-device")
+                .long("user-device")
+                .help(config::UserDeviceConfig::SYNTAX)
+                .takes_value(true)
+                .min_values(1)
+                .group("vm-config"),
+        )
+        .arg(
             Arg::with_name("vsock")
                 .long("vsock")
                 .help(config::VsockConfig::SYNTAX)
@@ -488,6 +497,13 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
             .unwrap();
     }
 
+    // Before we start any threads, mask the signals we'll be
+    // installing handlers for, to make sure they only ever run on the
+    // dedicated signal handling thread we'll start in a bit.
+    for sig in vmm::vm::HANDLED_SIGNALS {
+        block_signal(sig).unwrap();
+    }
+
     event!("vmm", "starting");
 
     let hypervisor = hypervisor::new().map_err(Error::CreateHypervisor)?;
@@ -656,6 +672,7 @@ mod unit_tests {
                     iommu: false,
                 },
                 devices: None,
+                user_devices: None,
                 vsock: None,
                 iommu: false,
                 #[cfg(target_arch = "x86_64")]

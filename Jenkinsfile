@@ -2,7 +2,7 @@ pipeline{
 	agent none
 	stages {
 		stage ('Early checks') {
-			agent { node { label 'master' } }
+			agent { node { label 'built-in' } }
 			stages {
 				stage ('Check for RFC/WIP builds') {
 					when {
@@ -14,7 +14,7 @@ pipeline{
 					}
 				}
 				stage ('Cancel older builds') {
-					when { not { branch 'master' } }
+					when { not { branch 'main' } }
 					steps {
 						cancelPreviousBuilds()
 					}
@@ -110,7 +110,7 @@ pipeline{
 					agent { node { label 'bionic-sgx' } }
 					when {
 						beforeAgent true
-						branch 'master'
+						branch 'main'
 					}
 					stages {
 						stage ('Checkout') {
@@ -146,7 +146,7 @@ pipeline{
 					agent { node { label 'bionic-vfio' } }
 					when {
 						beforeAgent true
-						branch 'master'
+						branch 'main'
 					}
 					stages {
 						stage ('Checkout') {
@@ -215,21 +215,49 @@ pipeline{
 						}
 					}
 				}
+				stage ('Worker build - Live Migration') {
+					agent { node { label 'hirsute-small' } }
+					stages {
+						stage ('Checkout') {
+							steps {
+								checkout scm
+							}
+						}
+						stage ('Run live-migration integration tests') {
+							options {
+								timeout(time: 1, unit: 'HOURS')
+							}
+							steps {
+								sh "sudo modprobe openvswitch"
+								sh "scripts/dev_cli.sh tests --integration-live-migration"
+							}
+						}
+						stage ('Run live-migration integration tests for musl') {
+							options {
+								timeout(time: 1, unit: 'HOURS')
+							}
+							steps {
+								sh "sudo modprobe openvswitch"
+								sh "scripts/dev_cli.sh tests --integration-live-migration --libc musl"
+							}
+						}
+					}
+				}
 			}
 		}
 	}
 	post {
 		regression {
 			script {
-				if (env.BRANCH_NAME == 'master') {
-					slackSend (color: '#ff0000', message: '"master" branch build is now failing')
+				if (env.BRANCH_NAME == 'main') {
+					slackSend (color: '#ff0000', message: '"main" branch build is now failing')
 				}
 			}
 		}
 		fixed {
 			script {
-				if (env.BRANCH_NAME == 'master') {
-					slackSend (color: '#00ff00', message: '"master" branch build is now fixed')
+				if (env.BRANCH_NAME == 'main') {
+					slackSend (color: '#00ff00', message: '"main" branch build is now fixed')
 				}
 			}
 		}

@@ -6,14 +6,15 @@ edition = "2018"
 
 [dependencies]
 block_util = { path = "../block_util" }
-clap = { version = "2.33.3", features=["wrap_help"] }
-epoll = ">=4.0.1"
-libc = "0.2.98"
+clap = { version = "2.33.3", features = ["wrap_help"] }
+env_logger = "0.9.0"
+epoll = "4.3.1"
+libc = "0.2.101"
 log = "0.4.14"
 option_parser = { path = "../option_parser" }
 qcow = { path = "../qcow" }
 vhost_user_backend = { path = "../vhost_user_backend" }
-vhost = { git = "https://github.com/rust-vmm/vhost", branch = "master", package = "vhost", features = ["vhost-user-slave"] }
+vhost = { version = "0.1.0", features = ["vhost-user-slave"] }
 virtio-bindings = "0.1.0"
-vm-memory = "0.5.0"
-vmm-sys-util = ">=0.3.1"
+vm-memory = "0.6.0"
+vmm-sys-util = "0.8.0"

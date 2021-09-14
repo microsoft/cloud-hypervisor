@@ -16,11 +16,12 @@ use super::{
     ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
     VirtioCommon, VirtioDevice, VirtioDeviceType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::seccomp_filters::Thread;
+use crate::thread_helper::spawn_virtio_thread;
 use crate::GuestMemoryMmap;
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use libc::EFD_NONBLOCK;
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::SeccompAction;
 use std::io;
 use std::mem::size_of;
 use std::os::unix::io::AsRawFd;
@@ -28,7 +29,6 @@ use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
-use std::thread;
 use vm_memory::GuestMemory;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
@@ -342,6 +342,7 @@ pub struct Balloon {
     resize: VirtioBalloonResize,
     config: Arc<Mutex<VirtioBalloonConfig>>,
     seccomp_action: SeccompAction,
+    exit_evt: EventFd,
 }
 
 impl Balloon {
@@ -351,6 +352,7 @@ impl Balloon {
         size: u64,
         deflate_on_oom: bool,
         seccomp_action: SeccompAction,
+        exit_evt: EventFd,
     ) -> io::Result<Self> {
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
         if deflate_on_oom {
@@ -375,6 +377,7 @@ impl Balloon {
             resize: VirtioBalloonResize::new()?,
             config: Arc::new(Mutex::new(config)),
             seccomp_action,
+            exit_evt,
         })
     }
 
@@ -460,23 +463,19 @@ impl VirtioDevice for Balloon {
         let paused = self.common.paused.clone();
         let paused_sync = self.common.paused_sync.clone();
         let mut epoll_threads = Vec::new();
-        let virtio_balloon_seccomp_filter =
-            get_seccomp_filter(&self.seccomp_action, Thread::VirtioBalloon)
-                .map_err(ActivateError::CreateSeccompFilter)?;
-        thread::Builder::new()
-            .name(self.id.clone())
-            .spawn(move || {
-                if let Err(e) = SeccompFilter::apply(virtio_balloon_seccomp_filter) {
-                    error!("Error applying seccomp filter: {:?}", e);
-                } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
+
+        spawn_virtio_thread(
+            &self.id,
+            &self.seccomp_action,
+            Thread::VirtioBalloon,
+            &mut epoll_threads,
+            &self.exit_evt,
+            move || {
+                if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                     error!("Error running worker: {:?}", e);
                 }
-            })
-            .map(|thread| epoll_threads.push(thread))
-            .map_err(|e| {
-                error!("failed to clone virtio-balloon epoll thread: {}", e);
-                ActivateError::BadActivate
-            })?;
+            },
+        )?;
         self.common.epoll_threads = Some(epoll_threads);
 
         event!("virtio-device", "activated", "id", &self.id);

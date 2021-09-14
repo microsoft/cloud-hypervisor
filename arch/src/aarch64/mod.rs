@@ -14,9 +14,7 @@ pub mod regs;
 pub mod uefi;
 
 pub use self::fdt::DeviceInfoForFdt;
-use crate::DeviceType;
-use crate::GuestMemoryMmap;
-use crate::RegionType;
+use crate::{DeviceType, GuestMemoryMmap, NumaNodes, RegionType};
 use gic::GicDevice;
 use log::{log_enabled, Level};
 use std::collections::HashMap;
@@ -135,23 +133,28 @@ pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, Region
 }
 
 /// Configures the system and should be called once per vm before starting vcpu threads.
+#[allow(clippy::too_many_arguments)]
 pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHasher>(
     guest_mem: &GuestMemoryMmap,
     cmdline_cstring: &CStr,
     vcpu_mpidr: Vec<u64>,
+    vcpu_topology: Option<(u8, u8, u8)>,
     device_info: &HashMap<(DeviceType, String), T, S>,
     initrd: &Option<super::InitramfsConfig>,
     pci_space_address: &(u64, u64),
     gic_device: &dyn GicDevice,
+    numa_nodes: &NumaNodes,
 ) -> super::Result<()> {
     let fdt_final = fdt::create_fdt(
         guest_mem,
         cmdline_cstring,
         vcpu_mpidr,
+        vcpu_topology,
         device_info,
         gic_device,
         initrd,
         pci_space_address,
+        numa_nodes,
     )
     .map_err(|_| Error::SetupFdt)?;
 

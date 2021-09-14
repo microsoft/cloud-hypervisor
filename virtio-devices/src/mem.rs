@@ -18,12 +18,13 @@ use super::{
     EpollHelperHandler, Queue, VirtioCommon, VirtioDevice, VirtioDeviceType,
     EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::seccomp_filters::Thread;
+use crate::thread_helper::spawn_virtio_thread;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 use crate::{VirtioInterrupt, VirtioInterruptType};
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::SeccompAction;
 use std::collections::BTreeMap;
 use std::io;
 use std::mem::size_of;
@@ -32,7 +33,6 @@ use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
-use std::thread;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
@@ -746,10 +746,12 @@ pub struct Mem {
     hugepages: bool,
     dma_mapping_handlers: Arc<Mutex<BTreeMap<u32, Arc<dyn ExternalDmaMapping>>>>,
     blocks_state: Arc<Mutex<BlocksState>>,
+    exit_evt: EventFd,
 }
 
 impl Mem {
     // Create a new virtio-mem device.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         region: &Arc<GuestRegionMmap>,
@@ -758,6 +760,7 @@ impl Mem {
         numa_node_id: Option<u16>,
         initial_size: u64,
         hugepages: bool,
+        exit_evt: EventFd,
     ) -> io::Result<Mem> {
         let region_len = region.len();
 
@@ -835,6 +838,7 @@ impl Mem {
                 (config.region_size / config.block_size)
                     as usize
             ]))),
+            exit_evt,
         })
     }
 
@@ -955,23 +959,19 @@ impl VirtioDevice for Mem {
         let paused = self.common.paused.clone();
         let paused_sync = self.common.paused_sync.clone();
         let mut epoll_threads = Vec::new();
-        // Retrieve seccomp filter for virtio_mem thread
-        let virtio_mem_seccomp_filter = get_seccomp_filter(&self.seccomp_action, Thread::VirtioMem)
-            .map_err(ActivateError::CreateSeccompFilter)?;
-        thread::Builder::new()
-            .name(self.id.clone())
-            .spawn(move || {
-                if let Err(e) = SeccompFilter::apply(virtio_mem_seccomp_filter) {
-                    error!("Error applying seccomp filter: {:?}", e);
-                } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
+
+        spawn_virtio_thread(
+            &self.id,
+            &self.seccomp_action,
+            Thread::VirtioMem,
+            &mut epoll_threads,
+            &self.exit_evt,
+            move || {
+                if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                     error!("Error running worker: {:?}", e);
                 }
-            })
-            .map(|thread| epoll_threads.push(thread))
-            .map_err(|e| {
-                error!("failed to clone virtio-mem epoll thread: {}", e);
-                ActivateError::BadActivate
-            })?;
+            },
+        )?;
         self.common.epoll_threads = Some(epoll_threads);
 
         event!("virtio-device", "activated", "id", &self.id);

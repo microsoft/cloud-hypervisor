@@ -4,9 +4,9 @@
 
 #![no_main]
 
-use block_util::{async_io::DiskFile, qcow_sync::QcowDiskSync};
+use block_util::{async_io::DiskFile, raw_sync::RawFileDiskSync};
 use libfuzzer_sys::fuzz_target;
-use seccomp::SeccompAction;
+use seccompiler::SeccompAction;
 use std::ffi;
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use virtio_devices::{Block, VirtioDevice, VirtioInterrupt, VirtioInterruptType};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryMmap};
 use vm_virtio::Queue;
-use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
 
 const MEM_SIZE: u64 = 256 * 1024 * 1024;
 const DESC_SIZE: u64 = 16; // Bytes in one virtio descriptor.
@@ -84,7 +84,7 @@ fuzz_target!(|bytes| {
 
     let shm = memfd_create(&ffi::CString::new("fuzz").unwrap(), 0).unwrap();
     let disk_file: File = unsafe { File::from_raw_fd(shm) };
-    let qcow_disk = Box::new(QcowDiskSync::new(disk_file, false)) as Box<dyn DiskFile>;
+    let qcow_disk = Box::new(RawFileDiskSync::new(disk_file)) as Box<dyn DiskFile>;
 
     let mut block = Block::new(
         "tmp".to_owned(),
@@ -96,6 +96,7 @@ fuzz_target!(|bytes| {
         256,
         SeccompAction::Allow,
         None,
+        EventFd::new(EFD_NONBLOCK).unwrap(),
     )
     .unwrap();
 

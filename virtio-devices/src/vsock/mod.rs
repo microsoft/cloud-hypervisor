@@ -274,7 +274,8 @@ mod tests {
                     PathBuf::from("/test/sock"),
                     TestBackend::new(),
                     false,
-                    seccomp::SeccompAction::Trap,
+                    seccompiler::SeccompAction::Trap,
+                    EventFd::new(EFD_NONBLOCK).unwrap(),
                 )
                 .unwrap(),
             }

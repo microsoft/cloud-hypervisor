@@ -32,6 +32,7 @@ pub mod net;
 mod pmem;
 mod rng;
 pub mod seccomp_filters;
+mod thread_helper;
 pub mod transport;
 pub mod vhost_user;
 pub mod vsock;
@@ -79,8 +80,12 @@ pub enum ActivateError {
     BadActivate,
     /// Queue number is not correct
     BadQueueNum,
-    /// Failed to clone Kill event
+    /// Failed to clone Kill event fd
     CloneKillEventFd,
+    /// Failed to clone exit event fd
+    CloneExitEventFd(std::io::Error),
+    // Failed to spawn thread
+    ThreadSpawn(std::io::Error),
     /// Failed to create Vhost-user interrupt eventfd
     VhostIrqCreate,
     /// Failed to setup vhost-user-fs daemon.
@@ -92,7 +97,7 @@ pub enum ActivateError {
     /// Failed to reset vhost-user daemon.
     VhostUserReset(vhost_user::Error),
     /// Cannot create seccomp filter
-    CreateSeccompFilter(seccomp::SeccompError),
+    CreateSeccompFilter(seccompiler::Error),
     /// Cannot create rate limiter
     CreateRateLimiter(std::io::Error),
 }
@@ -109,7 +114,7 @@ pub enum Error {
     VhostUserAddMemoryRegion(vhost_user::Error),
     SetShmRegionsNotSupported,
     NetQueuePair(::net_util::NetQueuePairError),
-    ApplySeccompFilter(seccomp::Error),
+    ApplySeccompFilter(seccompiler::Error),
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]

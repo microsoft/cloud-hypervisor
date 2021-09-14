@@ -5,7 +5,6 @@
 use crate::cpu::CpuManager;
 use crate::device_manager::DeviceManager;
 use crate::memory_manager::MemoryManager;
-use crate::vm::NumaNodes;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{aml::Aml, rsdp::Rsdp, sdt::Sdt};
@@ -13,6 +12,8 @@ use acpi_tables::{aml::Aml, rsdp::Rsdp, sdt::Sdt};
 use arch::aarch64::DeviceInfoForFdt;
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+use arch::NumaNodes;
 
 use bitflags::bitflags;
 use std::sync::{Arc, Mutex};
@@ -250,7 +251,7 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
     for (node_id, node) in numa_nodes.iter() {
         let proximity_domain = *node_id as u32;
 
-        for region in node.memory_regions() {
+        for region in &node.memory_regions {
             srat.append(MemoryAffinity::from_region(
                 region,
                 proximity_domain,
@@ -258,7 +259,7 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
             ))
         }
 
-        for region in node.hotplug_regions() {
+        for region in &node.hotplug_regions {
             srat.append(MemoryAffinity::from_region(
                 region,
                 proximity_domain,
@@ -267,7 +268,7 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
         }
 
         #[cfg(target_arch = "x86_64")]
-        for section in node.sgx_epc_sections() {
+        for section in &node.sgx_epc_sections {
             srat.append(MemoryAffinity::from_range(
                 section.start().raw_value(),
                 section.size(),
@@ -276,7 +277,7 @@ fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
             ))
         }
 
-        for cpu in node.cpus() {
+        for cpu in &node.cpus {
             let x2apic_id = *cpu as u32;
 
             // Flags
@@ -315,7 +316,7 @@ fn create_slit_table(numa_nodes: &NumaNodes) -> Sdt {
 
     let existing_nodes: Vec<u32> = numa_nodes.keys().cloned().collect();
     for (node_id, node) in numa_nodes.iter() {
-        let distances = node.distances();
+        let distances = &node.distances;
         for i in existing_nodes.iter() {
             let dist: u8 = if *node_id == *i {
                 10
@@ -507,6 +508,19 @@ pub fn create_acpi_tables(
     tables.push(madt_offset.0);
     prev_tbl_len = madt.len() as u64;
     prev_tbl_off = madt_offset;
+
+    // PPTT
+    #[cfg(target_arch = "aarch64")]
+    {
+        let pptt = cpu_manager.lock().unwrap().create_pptt();
+        let pptt_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
+        guest_mem
+            .write_slice(pptt.as_slice(), pptt_offset)
+            .expect("Error writing PPTT table");
+        tables.push(pptt_offset.0);
+        prev_tbl_len = pptt.len() as u64;
+        prev_tbl_off = pptt_offset;
+    }
 
     // GTDT
     #[cfg(target_arch = "aarch64")]

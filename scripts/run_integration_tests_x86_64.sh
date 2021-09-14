@@ -107,7 +107,7 @@ LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
 if [ ! -f "$VMLINUX_IMAGE" ]; then
     SRCDIR=$PWD
     pushd $WORKLOADS_DIR
-    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.13-rc5" $LINUX_CUSTOM_DIR
+    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.14" $LINUX_CUSTOM_DIR
     cp $SRCDIR/resources/linux-config-x86_64 $LINUX_CUSTOM_DIR/.config
     popd
 fi
@@ -206,12 +206,6 @@ sudo bash -c "echo 1 > /sys/kernel/mm/ksm/run"
 # Both test_vfio and ovs-dpdk rely on hugepages
 echo 6144 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
-
-# Setup ovs-dpdk
-service openvswitch-switch start
-ovs-vsctl init
-ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
-service openvswitch-switch restart
 
 export RUST_BACKTRACE=1
 time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=1

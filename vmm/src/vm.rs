@@ -11,13 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-#[cfg(feature = "acpi")]
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::{
-    DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig, ValidationError,
-    VmConfig, VsockConfig,
+    ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
+    UserDeviceConfig, ValidationError, VmConfig, VsockConfig,
 };
-use crate::cpu;
 use crate::device_manager::{
     self, get_win_size, Console, DeviceManager, DeviceManagerError, PtyPair,
 };
@@ -25,7 +24,8 @@ use crate::device_tree::DeviceTree;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::migration::{get_vm_snapshot, url_to_path, VM_SNAPSHOT_FILE};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::{GuestMemoryMmap, GuestRegionMmap};
+use crate::GuestMemoryMmap;
+use crate::{cpu, EpollDispatch};
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
@@ -33,9 +33,9 @@ use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
 #[cfg(feature = "tdx")]
 use arch::x86_64::tdx::TdvfSection;
-#[cfg(target_arch = "x86_64")]
-use arch::x86_64::SgxEpcSection;
 use arch::EntryPoint;
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+use arch::{NumaNode, NumaNodes};
 use devices::AcpiNotificationFlags;
 use hypervisor::vm::{HypervisorVmError, VmmOps};
 use linux_loader::cmdline::Cmdline;
@@ -44,14 +44,16 @@ use linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent;
 #[cfg(target_arch = "aarch64")]
 use linux_loader::loader::pe::Error::InvalidImageMagicNumber;
 use linux_loader::loader::KernelLoader;
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::{apply_filter, SeccompAction};
 use signal_hook::{
     consts::{SIGINT, SIGTERM, SIGWINCH},
     iterator::backend::Handle,
     iterator::Signals,
 };
 use std::cmp;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::CString;
 #[cfg(target_arch = "x86_64")]
@@ -61,6 +63,7 @@ use std::io::{self, Read, Write};
 use std::io::{Seek, SeekFrom};
 use std::num::Wrapping;
 use std::ops::Deref;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
 use vm_device::Bus;
@@ -74,6 +77,7 @@ use vm_migration::{
     Transportable,
 };
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::terminal::Terminal;
 
 #[cfg(target_arch = "aarch64")]
@@ -214,10 +218,10 @@ pub enum Error {
     InvalidNumaConfig,
 
     /// Cannot create seccomp filter
-    CreateSeccompFilter(seccomp::SeccompError),
+    CreateSeccompFilter(seccompiler::Error),
 
     /// Cannot apply seccomp filter
-    ApplySeccompFilter(seccomp::Error),
+    ApplySeccompFilter(seccompiler::Error),
 
     /// Failed resizing a memory zone.
     ResizeZone,
@@ -263,46 +267,6 @@ pub enum Error {
     FinalizeTdx(hypervisor::HypervisorVmError),
 }
 pub type Result<T> = result::Result<T, Error>;
-
-#[derive(Clone, Default)]
-pub struct NumaNode {
-    memory_regions: Vec<Arc<GuestRegionMmap>>,
-    hotplug_regions: Vec<Arc<GuestRegionMmap>>,
-    cpus: Vec<u8>,
-    distances: BTreeMap<u32, u8>,
-    memory_zones: Vec<String>,
-    #[cfg(target_arch = "x86_64")]
-    sgx_epc_sections: Vec<SgxEpcSection>,
-}
-
-impl NumaNode {
-    pub fn memory_regions(&self) -> &Vec<Arc<GuestRegionMmap>> {
-        &self.memory_regions
-    }
-
-    pub fn hotplug_regions(&self) -> &Vec<Arc<GuestRegionMmap>> {
-        &self.hotplug_regions
-    }
-
-    pub fn cpus(&self) -> &Vec<u8> {
-        &self.cpus
-    }
-
-    pub fn distances(&self) -> &BTreeMap<u32, u8> {
-        &self.distances
-    }
-
-    pub fn memory_zones(&self) -> &Vec<String> {
-        &self.memory_zones
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub fn sgx_epc_sections(&self) -> &Vec<SgxEpcSection> {
-        &self.sgx_epc_sections
-    }
-}
-
-pub type NumaNodes = BTreeMap<u32, NumaNode>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum VmState {
@@ -503,6 +467,8 @@ pub fn physical_bits(max_phys_bits: Option<u8>, #[cfg(feature = "tdx")] tdx_enab
     cmp::min(host_phys_bits, max_phys_bits.unwrap_or(host_phys_bits))
 }
 
+pub const HANDLED_SIGNALS: [i32; 3] = [SIGWINCH, SIGTERM, SIGINT];
+
 pub struct Vm {
     kernel: Option<File>,
     initramfs: Option<File>,
@@ -519,7 +485,7 @@ pub struct Vm {
     vm: Arc<dyn hypervisor::Vm>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     saved_clock: Option<hypervisor::ClockData>,
-    #[cfg(feature = "acpi")]
+    #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
     numa_nodes: NumaNodes,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
@@ -541,6 +507,7 @@ impl Vm {
             hypervisor::ClockData,
         >,
         activate_evt: EventFd,
+        restoring: bool,
     ) -> Result<Self> {
         config
             .lock()
@@ -551,7 +518,7 @@ impl Vm {
         info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
-        #[cfg(feature = "acpi")]
+        #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
 
@@ -567,10 +534,11 @@ impl Vm {
             &exit_evt,
             &reset_evt,
             seccomp_action.clone(),
-            #[cfg(feature = "acpi")]
+            #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
             numa_nodes.clone(),
             &activate_evt,
             force_iommu,
+            restoring,
         )
         .map_err(Error::DeviceManager)?;
 
@@ -604,7 +572,7 @@ impl Vm {
             vm_ops,
             #[cfg(feature = "tdx")]
             tdx_enabled,
-            #[cfg(feature = "acpi")]
+            #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
             &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
@@ -642,7 +610,7 @@ impl Vm {
             vm,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             saved_clock: _saved_clock,
-            #[cfg(feature = "acpi")]
+            #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
             numa_nodes,
             seccomp_action: seccomp_action.clone(),
             exit_evt,
@@ -651,7 +619,7 @@ impl Vm {
         })
     }
 
-    #[cfg(feature = "acpi")]
+    #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
     fn create_numa_nodes(
         configs: Option<Vec<NumaConfig>>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
@@ -796,6 +764,7 @@ impl Vm {
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             None,
             activate_evt,
+            false,
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -865,6 +834,7 @@ impl Vm {
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             vm_snapshot.clock,
             activate_evt,
+            true,
         )
     }
 
@@ -907,6 +877,7 @@ impl Vm {
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             None,
             activate_evt,
+            true,
         )
     }
 
@@ -1072,6 +1043,7 @@ impl Vm {
     fn configure_system(&mut self) -> Result<()> {
         let cmdline_cstring = self.get_cmdline()?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
+        let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
         let initramfs_config = match self.initramfs {
             Some(_) => Some(self.load_initramfs(&mem)?),
@@ -1129,10 +1101,12 @@ impl Vm {
             &mem,
             &cmdline_cstring,
             vcpu_mpidrs,
+            vcpu_topology,
             device_info,
             &initramfs_config,
             &pci_space,
             &*gic_device,
+            &self.numa_nodes,
         )
         .map_err(Error::ConfigureSystem)?;
 
@@ -1375,6 +1349,37 @@ impl Vm {
         Ok(pci_device_info)
     }
 
+    pub fn add_user_device(&mut self, mut device_cfg: UserDeviceConfig) -> Result<PciDeviceInfo> {
+        {
+            // Validate on a clone of the config
+            let mut config = self.config.lock().unwrap().clone();
+            Self::add_to_config(&mut config.user_devices, device_cfg.clone());
+            config.validate().map_err(Error::ConfigValidation)?;
+        }
+
+        let pci_device_info = self
+            .device_manager
+            .lock()
+            .unwrap()
+            .add_user_device(&mut device_cfg)
+            .map_err(Error::DeviceManager)?;
+
+        // Update VmConfig by adding the new device. This is important to
+        // ensure the device would be created in case of a reboot.
+        {
+            let mut config = self.config.lock().unwrap();
+            Self::add_to_config(&mut config.user_devices, device_cfg);
+        }
+
+        self.device_manager
+            .lock()
+            .unwrap()
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(pci_device_info)
+    }
+
     pub fn remove_device(&mut self, _id: String) -> Result<()> {
         self.device_manager
             .lock()
@@ -1588,8 +1593,12 @@ impl Vm {
         mut signals: Signals,
         console_input_clone: Arc<Console>,
         on_tty: bool,
-        exit_evt: EventFd,
+        exit_evt: &EventFd,
     ) {
+        for sig in HANDLED_SIGNALS {
+            unblock_signal(sig).unwrap();
+        }
+
         for signal in signals.forever() {
             match signal {
                 SIGWINCH => {
@@ -1792,6 +1801,58 @@ impl Vm {
         Ok(())
     }
 
+    fn setup_signal_handler(&mut self) -> Result<()> {
+        let console = self.device_manager.lock().unwrap().console().clone();
+        let signals = Signals::new(&HANDLED_SIGNALS);
+        match signals {
+            Ok(signals) => {
+                self.signals = Some(signals.handle());
+                let exit_evt = self.exit_evt.try_clone().map_err(Error::EventFdClone)?;
+                let on_tty = self.on_tty;
+                let signal_handler_seccomp_filter =
+                    get_seccomp_filter(&self.seccomp_action, Thread::SignalHandler)
+                        .map_err(Error::CreateSeccompFilter)?;
+                self.threads.push(
+                    thread::Builder::new()
+                        .name("signal_handler".to_string())
+                        .spawn(move || {
+                            if !signal_handler_seccomp_filter.is_empty() {
+                                if let Err(e) = apply_filter(&signal_handler_seccomp_filter)
+                                    .map_err(Error::ApplySeccompFilter)
+                                {
+                                    error!("Error applying seccomp filter: {:?}", e);
+                                    exit_evt.write(1).ok();
+                                    return;
+                                }
+                            }
+                            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                Vm::os_signal_handler(signals, console, on_tty, &exit_evt);
+                            }))
+                            .map_err(|_| {
+                                error!("signal_handler thead panicked");
+                                exit_evt.write(1).ok()
+                            })
+                            .ok();
+                        })
+                        .map_err(Error::SignalHandlerSpawn)?,
+                );
+            }
+            Err(e) => error!("Signal not found {}", e),
+        }
+        Ok(())
+    }
+
+    fn setup_tty(&self) -> Result<()> {
+        if self.on_tty {
+            io::stdin()
+                .lock()
+                .set_raw_mode()
+                .map_err(Error::SetTerminalRaw)?;
+        }
+
+        Ok(())
+    }
+
     pub fn boot(&mut self) -> Result<()> {
         info!("Booting VM");
         event!("vm", "booting");
@@ -1858,49 +1919,8 @@ impl Vm {
             .start_boot_vcpus()
             .map_err(Error::CpuManager)?;
 
-        if self
-            .device_manager
-            .lock()
-            .unwrap()
-            .console()
-            .input_enabled()
-        {
-            let console = self.device_manager.lock().unwrap().console().clone();
-            let signals = Signals::new(&[SIGWINCH, SIGINT, SIGTERM]);
-            match signals {
-                Ok(signals) => {
-                    self.signals = Some(signals.handle());
-                    let exit_evt = self.exit_evt.try_clone().map_err(Error::EventFdClone)?;
-                    let on_tty = self.on_tty;
-                    let signal_handler_seccomp_filter =
-                        get_seccomp_filter(&self.seccomp_action, Thread::SignalHandler)
-                            .map_err(Error::CreateSeccompFilter)?;
-                    self.threads.push(
-                        thread::Builder::new()
-                            .name("signal_handler".to_string())
-                            .spawn(move || {
-                                if let Err(e) = SeccompFilter::apply(signal_handler_seccomp_filter)
-                                    .map_err(Error::ApplySeccompFilter)
-                                {
-                                    error!("Error applying seccomp filter: {:?}", e);
-                                    return;
-                                }
-
-                                Vm::os_signal_handler(signals, console, on_tty, exit_evt);
-                            })
-                            .map_err(Error::SignalHandlerSpawn)?,
-                    );
-                }
-                Err(e) => error!("Signal not found {}", e),
-            }
-
-            if self.on_tty {
-                io::stdin()
-                    .lock()
-                    .set_raw_mode()
-                    .map_err(Error::SetTerminalRaw)?;
-            }
-        }
+        self.setup_signal_handler()?;
+        self.setup_tty()?;
 
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
         *state = new_state;
@@ -1908,28 +1928,21 @@ impl Vm {
         Ok(())
     }
 
-    pub fn handle_pty(&self) -> Result<()> {
+    pub fn handle_pty(&self, event: EpollDispatch) -> Result<()> {
         // Could be a little dangerous, picks up a lock on device_manager
         // and goes into a blocking read. If the epoll loops starts to be
         // services by multiple threads likely need to revist this.
         let dm = self.device_manager.lock().unwrap();
-        let mut out = [0u8; 64];
-        if let Some(mut pty) = dm.serial_pty() {
-            let count = pty.main.read(&mut out).map_err(Error::PtyConsole)?;
-            let console = dm.console();
-            if console.input_enabled() {
+
+        if matches!(event, EpollDispatch::SerialPty) {
+            if let Some(mut pty) = dm.serial_pty() {
+                let mut out = [0u8; 64];
+                let count = pty.main.read(&mut out).map_err(Error::PtyConsole)?;
+                let console = dm.console();
                 console
                     .queue_input_bytes_serial(&out[..count])
                     .map_err(Error::Console)?;
-            }
-        };
-        let count = match dm.console_pty() {
-            Some(mut pty) => pty.main.read(&mut out).map_err(Error::PtyConsole)?,
-            None => return Ok(()),
-        };
-        let console = dm.console();
-        if console.input_enabled() {
-            console.queue_input_bytes_console(&out[..count])
+            };
         }
 
         Ok(())
@@ -1947,18 +1960,15 @@ impl Vm {
             out[0] = 0x0d;
         }
 
-        if self
-            .device_manager
-            .lock()
-            .unwrap()
-            .console()
-            .input_enabled()
-        {
+        if matches!(
+            self.config.lock().unwrap().serial.mode,
+            ConsoleOutputMode::Tty
+        ) {
             self.device_manager
                 .lock()
                 .unwrap()
                 .console()
-                .queue_input_bytes(&out[..count])
+                .queue_input_bytes_serial(&out[..count])
                 .map_err(Error::Console)?;
         }
 
@@ -2014,13 +2024,18 @@ impl Vm {
             .set_gicr_typers(&saved_vcpu_states);
 
         vm_snapshot.add_snapshot(
-            gic_device
+            if let Some(gicv3_its) = gic_device
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
                 .downcast_mut::<KvmGicV3Its>()
-                .unwrap()
-                .snapshot()?,
+            {
+                gicv3_its.snapshot()?
+            } else {
+                return Err(MigratableError::Snapshot(anyhow!(
+                    "GicDevice downcast to KvmGicV3Its failed when snapshotting VM!"
+                )));
+            },
         );
 
         Ok(())
@@ -2058,13 +2073,18 @@ impl Vm {
 
         // Restore GIC states.
         if let Some(gicv3_its_snapshot) = vm_snapshot.snapshots.get(GIC_V3_ITS_SNAPSHOT_ID) {
-            gic_device
+            if let Some(gicv3_its) = gic_device
                 .lock()
                 .unwrap()
                 .as_any_concrete_mut()
                 .downcast_mut::<KvmGicV3Its>()
-                .unwrap()
-                .restore(*gicv3_its_snapshot.clone())?;
+            {
+                gicv3_its.restore(*gicv3_its_snapshot.clone())?;
+            } else {
+                return Err(MigratableError::Restore(anyhow!(
+                    "GicDevice downcast to KvmGicV3Its failed when restoring VM!"
+                )));
+            };
         } else {
             return Err(MigratableError::Restore(anyhow!(
                 "Missing GicV3Its snapshot"
@@ -2154,23 +2174,6 @@ impl Vm {
         }
 
         Ok(table)
-    }
-
-    pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
-        self.memory_manager.lock().unwrap().start_memory_dirty_log()
-    }
-
-    pub fn stop_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
-        self.memory_manager.lock().unwrap().stop_memory_dirty_log()
-    }
-
-    pub fn dirty_memory_range_table(
-        &self,
-    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
-        self.memory_manager
-            .lock()
-            .unwrap()
-            .dirty_memory_range_table()
     }
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
@@ -2427,66 +2430,11 @@ impl Snapshottable for Vm {
                 MigratableError::Restore(anyhow!("Cannot start restored vCPUs: {:#?}", e))
             })?;
 
-        if self
-            .device_manager
-            .lock()
-            .unwrap()
-            .console()
-            .input_enabled()
-        {
-            let console = self.device_manager.lock().unwrap().console().clone();
-            let signals = Signals::new(&[SIGWINCH, SIGINT, SIGTERM]);
-            match signals {
-                Ok(signals) => {
-                    self.signals = Some(signals.handle());
-
-                    let on_tty = self.on_tty;
-                    let signal_handler_seccomp_filter =
-                        get_seccomp_filter(&self.seccomp_action, Thread::SignalHandler).map_err(
-                            |e| {
-                                MigratableError::Restore(anyhow!(
-                                    "Could not create seccomp filter: {:#?}",
-                                    Error::CreateSeccompFilter(e)
-                                ))
-                            },
-                        )?;
-                    let exit_evt = self.exit_evt.try_clone().map_err(|e| {
-                        MigratableError::Restore(anyhow!("Could not clone exit event fd: {:?}", e))
-                    })?;
-
-                    self.threads.push(
-                        thread::Builder::new()
-                            .name("signal_handler".to_string())
-                            .spawn(move || {
-                                if let Err(e) = SeccompFilter::apply(signal_handler_seccomp_filter)
-                                    .map_err(Error::ApplySeccompFilter)
-                                {
-                                    error!("Error applying seccomp filter: {:?}", e);
-                                    return;
-                                }
-
-                                Vm::os_signal_handler(signals, console, on_tty, exit_evt)
-                            })
-                            .map_err(|e| {
-                                MigratableError::Restore(anyhow!(
-                                    "Could not start console signal thread: {:#?}",
-                                    e
-                                ))
-                            })?,
-                    );
-                }
-                Err(e) => error!("Signal not found {}", e),
-            }
-
-            if self.on_tty {
-                io::stdin().lock().set_raw_mode().map_err(|e| {
-                    MigratableError::Restore(anyhow!(
-                        "Could not set terminal in raw mode: {:#?}",
-                        e
-                    ))
-                })?;
-            }
-        }
+        self.setup_signal_handler().map_err(|e| {
+            MigratableError::Restore(anyhow!("Could not setup signal handler: {:#?}", e))
+        })?;
+        self.setup_tty()
+            .map_err(|e| MigratableError::Restore(anyhow!("Could not setup tty: {:#?}", e)))?;
 
         let mut state = self
             .state
@@ -2539,7 +2487,30 @@ impl Transportable for Vm {
         Ok(())
     }
 }
-impl Migratable for Vm {}
+
+impl Migratable for Vm {
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().start_dirty_log()?;
+        self.device_manager.lock().unwrap().start_dirty_log()
+    }
+
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().stop_dirty_log()?;
+        self.device_manager.lock().unwrap().stop_dirty_log()
+    }
+
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        Ok(MemoryRangeTable::new_from_tables(vec![
+            self.memory_manager.lock().unwrap().dirty_log()?,
+            self.device_manager.lock().unwrap().dirty_log()?,
+        ]))
+    }
+
+    fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {
+        self.memory_manager.lock().unwrap().complete_migration()?;
+        self.device_manager.lock().unwrap().complete_migration()
+    }
+}
 
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[cfg(test)]
@@ -2652,10 +2623,12 @@ mod tests {
             &mem,
             &CString::new("console=tty0").unwrap(),
             vec![0],
+            Some((0, 0, 0)),
             &dev_info,
             &*gic,
             &None,
             &(0x1_0000_0000, 0x1_0000),
+            &BTreeMap::new(),
         )
         .is_ok())
     }
