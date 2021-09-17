@@ -8,6 +8,7 @@ use net_util::MacAddr;
 use option_parser::{
     ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, TupleTwoIntegers,
 };
+use std::collections::HashMap;
 use std::convert::From;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -90,6 +91,10 @@ pub enum Error {
     #[cfg(feature = "tdx")]
     // No TDX firmware
     FirmwarePathMissing,
+    /// Failed to parse userspace device
+    ParseUserDevice(OptionParserError),
+    /// Missing socket for userspace device
+    ParseUserDeviceSocketMissing,
 }
 
 #[derive(Debug)]
@@ -122,18 +127,22 @@ pub enum ValidationError {
     VnetQueueFdMismatch,
     /// Using reserved fd
     VnetReservedFd,
-    // Hugepages not turned on
+    /// Hugepages not turned on
     HugePageSizeWithoutHugePages,
-    // Huge page size is not power of 2
+    /// Huge page size is not power of 2
     InvalidHugePageSize(u64),
-    // CPU Hotplug not permitted with TDX
+    /// CPU Hotplug not permitted with TDX
     #[cfg(feature = "tdx")]
     TdxNoCpuHotplug,
-    // Specifying kernel not permitted with TDX
+    /// Specifying kernel not permitted with TDX
     #[cfg(feature = "tdx")]
     TdxKernelSpecified,
-    // Insuffient vCPUs for queues
+    /// Insuffient vCPUs for queues
     TooManyQueues,
+    /// Need shared memory for vfio-user
+    UserDevicesRequireSharedMemory,
+    /// Memory zone is reused across NUMA nodes
+    MemoryZoneReused(String, u32, u32),
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -181,6 +190,16 @@ impl fmt::Display for ValidationError {
             TooManyQueues => {
                 write!(f, "Number of vCPUs is insufficient for number of queues")
             }
+            UserDevicesRequireSharedMemory => {
+                write!(f, "Using user devices requires using shared memory")
+            }
+            MemoryZoneReused(s, u1, u2) => {
+                write!(
+                    f,
+                    "Memory zone: {} belongs to multiple NUMA nodes {} and {}",
+                    s, u1, u2
+                )
+            }
         }
     }
 }
@@ -224,6 +243,10 @@ impl fmt::Display for Error {
             ParseRestoreSourceUrlMissing => {
                 write!(f, "Error parsing --restore: source_url missing")
             }
+            ParseUserDeviceSocketMissing => {
+                write!(f, "Error parsing --user-device: socket missing")
+            }
+            ParseUserDevice(o) => write!(f, "Error parsing --user-device: {}", o),
             Validation(v) => write!(f, "Error validating configuration: {}", v),
             #[cfg(feature = "tdx")]
             ParseTdx(o) => write!(f, "Error parsing --tdx: {}", o),
@@ -251,6 +274,7 @@ pub struct VmParams<'a> {
     pub serial: &'a str,
     pub console: &'a str,
     pub devices: Option<Vec<&'a str>>,
+    pub user_devices: Option<Vec<&'a str>>,
     pub vsock: Option<&'a str>,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
@@ -280,6 +304,7 @@ impl<'a> VmParams<'a> {
         let fs: Option<Vec<&str>> = args.values_of("fs").map(|x| x.collect());
         let pmem: Option<Vec<&str>> = args.values_of("pmem").map(|x| x.collect());
         let devices: Option<Vec<&str>> = args.values_of("device").map(|x| x.collect());
+        let user_devices: Option<Vec<&str>> = args.values_of("user-device").map(|x| x.collect());
         let vsock: Option<&str> = args.value_of("vsock");
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
@@ -303,6 +328,7 @@ impl<'a> VmParams<'a> {
             serial,
             console,
             devices,
+            user_devices,
             vsock,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
@@ -1426,12 +1452,6 @@ pub enum ConsoleOutputMode {
     Null,
 }
 
-impl ConsoleOutputMode {
-    pub fn input_enabled(&self) -> bool {
-        matches!(self, ConsoleOutputMode::Tty | ConsoleOutputMode::Pty)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ConsoleConfig {
     #[serde(default = "default_consoleconfig_file")]
@@ -1533,6 +1553,30 @@ impl DeviceConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+pub struct UserDeviceConfig {
+    pub socket: PathBuf,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+impl UserDeviceConfig {
+    pub const SYNTAX: &'static str = "Userspace device socket=<socket_path>,id=<device_id>\"";
+    pub fn parse(user_device: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser.add("socket").add("id");
+        parser.parse(user_device).map_err(Error::ParseUserDevice)?;
+
+        let socket = parser
+            .get("socket")
+            .map(PathBuf::from)
+            .ok_or(Error::ParseUserDeviceSocketMissing)?;
+
+        let id = parser.get("id");
+
+        Ok(UserDeviceConfig { socket, id })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub struct VsockConfig {
     pub cid: u64,
@@ -1764,6 +1808,7 @@ pub struct VmConfig {
     #[serde(default = "ConsoleConfig::default_console")]
     pub console: ConsoleConfig,
     pub devices: Option<Vec<DeviceConfig>>,
+    pub user_devices: Option<Vec<UserDeviceConfig>>,
     pub vsock: Option<VsockConfig>,
     #[serde(default)]
     pub iommu: bool,
@@ -1869,6 +1914,32 @@ impl VmConfig {
             }
         }
 
+        if let Some(user_devices) = &self.user_devices {
+            if !user_devices.is_empty() && !self.memory.shared {
+                return Err(ValidationError::UserDevicesRequireSharedMemory);
+            }
+        }
+
+        if let Some(numa) = &self.numa {
+            let mut used_numa_node_memory_zones = HashMap::new();
+            for numa_node in numa.iter() {
+                for memory_zone in numa_node.memory_zones.clone().unwrap().iter() {
+                    if !used_numa_node_memory_zones.contains_key(memory_zone) {
+                        used_numa_node_memory_zones
+                            .insert(memory_zone.to_string(), numa_node.guest_numa_id);
+                    } else {
+                        return Err(ValidationError::MemoryZoneReused(
+                            memory_zone.to_string(),
+                            *used_numa_node_memory_zones
+                                .get(&memory_zone.to_string())
+                                .unwrap(),
+                            numa_node.guest_numa_id,
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1952,6 +2023,16 @@ impl VmConfig {
             devices = Some(device_config_list);
         }
 
+        let mut user_devices: Option<Vec<UserDeviceConfig>> = None;
+        if let Some(user_device_list) = &vm_params.user_devices {
+            let mut user_device_config_list = Vec::new();
+            for item in user_device_list.iter() {
+                let user_device_config = UserDeviceConfig::parse(item)?;
+                user_device_config_list.push(user_device_config);
+            }
+            user_devices = Some(user_device_config_list);
+        }
+
         let mut vsock: Option<VsockConfig> = None;
         if let Some(vs) = &vm_params.vsock {
             let vsock_config = VsockConfig::parse(vs)?;
@@ -2017,6 +2098,7 @@ impl VmConfig {
             serial,
             console,
             devices,
+            user_devices,
             vsock,
             iommu,
             #[cfg(target_arch = "x86_64")]
@@ -2625,6 +2707,7 @@ mod tests {
                 iommu: false,
             },
             devices: None,
+            user_devices: None,
             vsock: None,
             iommu: false,
             #[cfg(target_arch = "x86_64")]

@@ -317,7 +317,7 @@ pub struct PciConfiguration {
 }
 
 /// See pci_regs.h in kernel
-#[derive(Copy, Clone, PartialEq, Versionize)]
+#[derive(Copy, Clone, PartialEq, Versionize, Debug)]
 pub enum PciBarRegionType {
     Memory32BitRegion = 0,
     IoRegion = 0x01,
@@ -794,9 +794,9 @@ impl PciConfiguration {
                     return None;
                 }
 
-                debug!(
-                    "DETECT BAR REPROG: current 0x{:x}, new 0x{:x}",
-                    self.registers[reg_idx], value
+                info!(
+                    "Detected BAR reprogramming: (BAR {}) 0x{:x}->0x{:x}",
+                    reg_idx, self.registers[reg_idx], value
                 );
                 let old_base = u64::from(self.bars[bar_idx].addr & mask);
                 let new_base = u64::from(value & mask);
@@ -820,9 +820,9 @@ impl PciConfiguration {
                     != (self.bars[bar_idx - 1].addr & self.writable_bits[reg_idx - 1])
                     || (value & mask) != (self.bars[bar_idx].addr & mask))
             {
-                debug!(
-                    "DETECT BAR REPROG: current 0x{:x}, new 0x{:x}",
-                    self.registers[reg_idx], value
+                info!(
+                    "Detected BAR reprogramming: (BAR {}) 0x{:x}->0x{:x}",
+                    reg_idx, self.registers[reg_idx], value
                 );
                 let old_base = u64::from(self.bars[bar_idx].addr & mask) << 32
                     | u64::from(self.bars[bar_idx - 1].addr & self.writable_bits[reg_idx - 1]);
@@ -850,9 +850,9 @@ impl PciConfiguration {
                 return None;
             }
 
-            debug!(
-                "DETECT ROM BAR REPROG: current 0x{:x}, new 0x{:x}",
-                self.registers[reg_idx], value
+            info!(
+                "Detected ROM BAR reprogramming: (BAR {}) 0x{:x}->0x{:x}",
+                reg_idx, self.registers[reg_idx], value
             );
             let old_base = u64::from(self.rom_bar_addr & mask);
             let new_base = u64::from(value & mask);

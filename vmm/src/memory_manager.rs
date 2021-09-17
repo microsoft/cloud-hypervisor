@@ -41,9 +41,8 @@ use vm_memory::{
     GuestUsize, MmapRegion,
 };
 use vm_migration::{
-    protocol::{MemoryRange, MemoryRangeTable},
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
-    Transportable, VersionMapped,
+    protocol::MemoryRangeTable, Migratable, MigratableError, Pausable, Snapshot,
+    SnapshotDataSection, Snapshottable, Transportable, VersionMapped,
 };
 
 #[cfg(feature = "acpi")]
@@ -316,7 +315,7 @@ impl BusDevice for MemoryManager {
                 }
                 STATUS_OFFSET => {
                     // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
-                    data.copy_from_slice(&[0; 8][0..data.len()]);
+                    data.fill(0);
                     if state.active {
                         data[0] |= 1 << ENABLE_FLAG;
                     }
@@ -334,6 +333,8 @@ impl BusDevice for MemoryManager {
                     );
                 }
             }
+        } else {
+            warn!("Out of range memory slot: {}", self.selected_slot);
         }
     }
 
@@ -343,18 +344,22 @@ impl BusDevice for MemoryManager {
                 self.selected_slot = usize::from(data[0]);
             }
             STATUS_OFFSET => {
-                let state = &mut self.hotplug_slots[self.selected_slot];
-                // The ACPI code writes back a 1 to acknowledge the insertion
-                if (data[0] & (1 << INSERTING_FLAG) == 1 << INSERTING_FLAG) && state.inserting {
-                    state.inserting = false;
-                }
-                // Ditto for removal
-                if (data[0] & (1 << REMOVING_FLAG) == 1 << REMOVING_FLAG) && state.removing {
-                    state.removing = false;
-                }
-                // Trigger removal of "DIMM"
-                if data[0] & (1 << EJECT_FLAG) == 1 << EJECT_FLAG {
-                    warn!("Ejection of memory not currently supported");
+                if self.selected_slot < self.hotplug_slots.len() {
+                    let state = &mut self.hotplug_slots[self.selected_slot];
+                    // The ACPI code writes back a 1 to acknowledge the insertion
+                    if (data[0] & (1 << INSERTING_FLAG) == 1 << INSERTING_FLAG) && state.inserting {
+                        state.inserting = false;
+                    }
+                    // Ditto for removal
+                    if (data[0] & (1 << REMOVING_FLAG) == 1 << REMOVING_FLAG) && state.removing {
+                        state.removing = false;
+                    }
+                    // Trigger removal of "DIMM"
+                    if data[0] & (1 << EJECT_FLAG) == 1 << EJECT_FLAG {
+                        warn!("Ejection of memory not currently supported");
+                    }
+                } else {
+                    warn!("Out of range memory slot: {}", self.selected_slot);
                 }
             }
             _ => {
@@ -879,11 +884,9 @@ impl MemoryManager {
             }
 
             mm.lock().unwrap().fill_saved_regions(saved_regions)?;
-
-            Ok(mm)
-        } else {
-            Ok(mm)
         }
+
+        Ok(mm)
     }
 
     fn memfd_create(name: &ffi::CStr, flags: u32) -> Result<RawFd, io::Error> {
@@ -1493,97 +1496,6 @@ impl MemoryManager {
     pub fn memory_zones(&self) -> &MemoryZones {
         &self.memory_zones
     }
-
-    // Generate a table for the pages that are dirty. The dirty pages are collapsed
-    // together in the table if they are contiguous.
-    pub fn dirty_memory_range_table(
-        &self,
-    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
-        let page_size = 4096; // TODO: Does this need to vary?
-        let mut table = MemoryRangeTable::default();
-        for r in &self.guest_ram_mappings {
-            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
-                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
-            })?;
-            let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
-            {
-                Some(region) => {
-                    assert!(region.start_addr().raw_value() == r.gpa);
-                    assert!(region.len() == r.size);
-                    region.bitmap().get_and_reset()
-                }
-                None => {
-                    return Err(MigratableError::MigrateSend(anyhow!(
-                        "Error finding 'guest memory region' with address {:x}",
-                        r.gpa
-                    )))
-                }
-            };
-
-            let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
-                .iter()
-                .zip(vmm_dirty_bitmap.iter())
-                .map(|(x, y)| x | y)
-                .collect();
-
-            let mut entry: Option<MemoryRange> = None;
-            for (i, block) in dirty_bitmap.iter().enumerate() {
-                for j in 0..64 {
-                    let is_page_dirty = ((block >> j) & 1u64) != 0u64;
-                    let page_offset = ((i * 64) + j) as u64 * page_size;
-                    if is_page_dirty {
-                        if let Some(entry) = &mut entry {
-                            entry.length += page_size;
-                        } else {
-                            entry = Some(MemoryRange {
-                                gpa: r.gpa + page_offset,
-                                length: page_size,
-                            });
-                        }
-                    } else if let Some(entry) = entry.take() {
-                        table.push(entry);
-                    }
-                }
-            }
-            if let Some(entry) = entry.take() {
-                table.push(entry);
-            }
-
-            if table.regions().is_empty() {
-                info!("Dirty Memory Range Table is empty");
-            } else {
-                info!("Dirty Memory Range Table:");
-                for range in table.regions() {
-                    info!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
-                }
-            }
-        }
-        Ok(table)
-    }
-
-    // Start the dirty log in the hypervisor (kvm/mshv).
-    // Also, reset the dirty bitmap logged by the vmm.
-    // Just before we do a bulk copy we want to start/clear the dirty log so that
-    // pages touched during our bulk copy are tracked.
-    pub fn start_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
-        self.vm.start_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {}", e))
-        })?;
-
-        for r in self.guest_memory.memory().iter() {
-            r.bitmap().reset();
-        }
-
-        Ok(())
-    }
-
-    pub fn stop_memory_dirty_log(&self) -> std::result::Result<(), MigratableError> {
-        self.vm.stop_dirty_log().map_err(|e| {
-            MigratableError::MigrateSend(anyhow!("Error stopping VM dirty log {}", e))
-        })?;
-
-        Ok(())
-    }
 }
 
 #[cfg(feature = "acpi")]
@@ -2076,4 +1988,74 @@ impl Transportable for MemoryManager {
         Ok(())
     }
 }
-impl Migratable for MemoryManager {}
+
+impl Migratable for MemoryManager {
+    // Start the dirty log in the hypervisor (kvm/mshv).
+    // Also, reset the dirty bitmap logged by the vmm.
+    // Just before we do a bulk copy we want to start/clear the dirty log so that
+    // pages touched during our bulk copy are tracked.
+    fn start_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        self.vm.start_dirty_log().map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error starting VM dirty log {}", e))
+        })?;
+
+        for r in self.guest_memory.memory().iter() {
+            r.bitmap().reset();
+        }
+
+        Ok(())
+    }
+
+    fn stop_dirty_log(&mut self) -> std::result::Result<(), MigratableError> {
+        self.vm.stop_dirty_log().map_err(|e| {
+            MigratableError::MigrateSend(anyhow!("Error stopping VM dirty log {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    // Generate a table for the pages that are dirty. The dirty pages are collapsed
+    // together in the table if they are contiguous.
+    fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        let mut table = MemoryRangeTable::default();
+        for r in &self.guest_ram_mappings {
+            let vm_dirty_bitmap = self.vm.get_dirty_log(r.slot, r.gpa, r.size).map_err(|e| {
+                MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
+            })?;
+            let vmm_dirty_bitmap = match self.guest_memory.memory().find_region(GuestAddress(r.gpa))
+            {
+                Some(region) => {
+                    assert!(region.start_addr().raw_value() == r.gpa);
+                    assert!(region.len() == r.size);
+                    region.bitmap().get_and_reset()
+                }
+                None => {
+                    return Err(MigratableError::MigrateSend(anyhow!(
+                        "Error finding 'guest memory region' with address {:x}",
+                        r.gpa
+                    )))
+                }
+            };
+
+            let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
+                .iter()
+                .zip(vmm_dirty_bitmap.iter())
+                .map(|(x, y)| x | y)
+                .collect();
+
+            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa);
+
+            if sub_table.regions().is_empty() {
+                info!("Dirty Memory Range Table is empty");
+            } else {
+                info!("Dirty Memory Range Table:");
+                for range in sub_table.regions() {
+                    info!("GPA: {:x} size: {} (KiB)", range.gpa, range.length / 1024);
+                }
+            }
+
+            table.extend(sub_table);
+        }
+        Ok(table)
+    }
+}

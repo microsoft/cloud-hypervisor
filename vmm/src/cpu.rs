@@ -17,14 +17,14 @@ use crate::memory_manager::MemoryManager;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 #[cfg(target_arch = "x86_64")]
 use crate::vm::physical_bits;
-#[cfg(feature = "acpi")]
-use crate::vm::NumaNodes;
 use crate::GuestMemoryMmap;
 use crate::CPU_MANAGER_SNAPSHOT_ID;
 #[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml, sdt::Sdt};
 use anyhow::anyhow;
 use arch::EntryPoint;
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+use arch::NumaNodes;
 use devices::interrupt_controller::InterruptController;
 #[cfg(target_arch = "aarch64")]
 use hypervisor::kvm::kvm_bindings;
@@ -32,7 +32,7 @@ use hypervisor::kvm::kvm_bindings;
 use hypervisor::CpuId;
 use hypervisor::{vm::VmmOps, CpuState, HypervisorCpuError, VmExit};
 use libc::{c_void, siginfo_t};
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::{apply_filter, SeccompAction};
 #[cfg(feature = "acpi")]
 use std::collections::BTreeMap;
 use std::os::unix::thread::JoinHandleExt;
@@ -88,10 +88,10 @@ pub enum Error {
     DesiredVCpuCountExceedsMax,
 
     /// Cannot create seccomp filter
-    CreateSeccompFilter(seccomp::SeccompError),
+    CreateSeccompFilter(seccompiler::Error),
 
     /// Cannot apply seccomp filter
-    ApplySeccompFilter(seccomp::Error),
+    ApplySeccompFilter(seccompiler::Error),
 
     /// Error starting vCPU after restore
     StartRestoreVcpu(anyhow::Error),
@@ -189,6 +189,19 @@ struct GicIts {
     pub translation_id: u32,
     pub base_address: u64,
     pub reserved1: u32,
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+#[allow(dead_code)]
+#[repr(packed)]
+struct ProcessorHierarchyNode {
+    pub r#type: u8,
+    pub length: u8,
+    pub reserved: u16,
+    pub flags: u32,
+    pub parent: u32,
+    pub acpi_processor_id: u32,
+    pub num_private_resources: u32,
 }
 
 #[allow(dead_code)]
@@ -393,14 +406,14 @@ const CPU_SELECTION_OFFSET: u64 = 0;
 impl BusDevice for CpuManager {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         // The Linux kernel, quite reasonably, doesn't zero the memory it gives us.
-        data.copy_from_slice(&[0; 8][0..data.len()]);
+        data.fill(0);
 
         match offset {
             CPU_SELECTION_OFFSET => {
                 data[0] = self.selected_cpu;
             }
             CPU_STATUS_OFFSET => {
-                if self.selected_cpu < self.present_vcpus() {
+                if self.selected_cpu < self.max_vcpus() {
                     let state = &self.vcpu_states[usize::from(self.selected_cpu)];
                     if state.active() {
                         data[0] |= 1 << CPU_ENABLE_FLAG;
@@ -411,6 +424,8 @@ impl BusDevice for CpuManager {
                     if state.removing {
                         data[0] |= 1 << CPU_REMOVING_FLAG;
                     }
+                } else {
+                    warn!("Out of range vCPU id: {}", self.selected_cpu);
                 }
             }
             _ => {
@@ -428,23 +443,28 @@ impl BusDevice for CpuManager {
                 self.selected_cpu = data[0];
             }
             CPU_STATUS_OFFSET => {
-                let state = &mut self.vcpu_states[usize::from(self.selected_cpu)];
-                // The ACPI code writes back a 1 to acknowledge the insertion
-                if (data[0] & (1 << CPU_INSERTING_FLAG) == 1 << CPU_INSERTING_FLAG)
-                    && state.inserting
-                {
-                    state.inserting = false;
-                }
-                // Ditto for removal
-                if (data[0] & (1 << CPU_REMOVING_FLAG) == 1 << CPU_REMOVING_FLAG) && state.removing
-                {
-                    state.removing = false;
-                }
-                // Trigger removal of vCPU
-                if data[0] & (1 << CPU_EJECT_FLAG) == 1 << CPU_EJECT_FLAG {
-                    if let Err(e) = self.remove_vcpu(self.selected_cpu) {
-                        error!("Error removing vCPU: {:?}", e);
+                if self.selected_cpu < self.max_vcpus() {
+                    let state = &mut self.vcpu_states[usize::from(self.selected_cpu)];
+                    // The ACPI code writes back a 1 to acknowledge the insertion
+                    if (data[0] & (1 << CPU_INSERTING_FLAG) == 1 << CPU_INSERTING_FLAG)
+                        && state.inserting
+                    {
+                        state.inserting = false;
                     }
+                    // Ditto for removal
+                    if (data[0] & (1 << CPU_REMOVING_FLAG) == 1 << CPU_REMOVING_FLAG)
+                        && state.removing
+                    {
+                        state.removing = false;
+                    }
+                    // Trigger removal of vCPU
+                    if data[0] & (1 << CPU_EJECT_FLAG) == 1 << CPU_EJECT_FLAG {
+                        if let Err(e) = self.remove_vcpu(self.selected_cpu) {
+                            error!("Error removing vCPU: {:?}", e);
+                        }
+                    }
+                } else {
+                    warn!("Out of range vCPU id: {}", self.selected_cpu);
                 }
             }
             _ => {
@@ -518,7 +538,7 @@ impl CpuManager {
         seccomp_action: SeccompAction,
         vmmops: Arc<dyn VmmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
-        #[cfg(feature = "acpi")] numa_nodes: &NumaNodes,
+        #[cfg(any(target_arch = "aarch64", feature = "acpi"))] numa_nodes: &NumaNodes,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let guest_memory = memory_manager.lock().unwrap().guest_memory();
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
@@ -566,7 +586,7 @@ impl CpuManager {
         let proximity_domain_per_cpu: BTreeMap<u8, u32> = {
             let mut cpu_list = Vec::new();
             for (proximity_domain, numa_node) in numa_nodes.iter() {
-                for cpu in numa_node.cpus().iter() {
+                for cpu in numa_node.cpus.iter() {
                     cpu_list.push((*cpu, *proximity_domain))
                 }
             }
@@ -687,6 +707,7 @@ impl CpuManager {
         let cpu_id = vcpu.lock().unwrap().id;
         let reset_evt = self.reset_evt.try_clone().unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
+        let panic_exit_evt = self.exit_evt.try_clone().unwrap();
         let vcpu_kill_signalled = self.vcpus_kill_signalled.clone();
         let vcpu_pause_signalled = self.vcpus_pause_signalled.clone();
 
@@ -694,6 +715,7 @@ impl CpuManager {
         let vcpu_run_interrupted = self.vcpu_states[usize::from(cpu_id)]
             .vcpu_run_interrupted
             .clone();
+        let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
 
         info!("Starting vCPU: cpu_id = {}", cpu_id);
 
@@ -709,97 +731,109 @@ impl CpuManager {
                 .name(format!("vcpu{}", cpu_id))
                 .spawn(move || {
                     // Apply seccomp filter for vcpu thread.
-                    if let Err(e) =
-                        SeccompFilter::apply(vcpu_seccomp_filter).map_err(Error::ApplySeccompFilter)
-                    {
-                        error!("Error applying seccomp filter: {:?}", e);
-                        return;
+                    if !vcpu_seccomp_filter.is_empty() {
+                        if let Err(e) =
+                            apply_filter(&vcpu_seccomp_filter).map_err(Error::ApplySeccompFilter)
+                        {
+                            error!("Error applying seccomp filter: {:?}", e);
+                            return;
+                        }
                     }
-
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
                     // This uses an async signal safe handler to kill the vcpu handles.
                     register_signal_handler(SIGRTMIN(), handle_signal)
                         .expect("Failed to register vcpu signal handler");
-
                     // Block until all CPUs are ready.
                     vcpu_thread_barrier.wait();
 
-                    loop {
-                        // If we are being told to pause, we park the thread
-                        // until the pause boolean is toggled.
-                        // The resume operation is responsible for toggling
-                        // the boolean and unpark the thread.
-                        // We enter a loop because park() could spuriously
-                        // return. We will then park() again unless the
-                        // pause boolean has been toggled.
+                    std::panic::catch_unwind(move || {
+                        loop {
+                            // If we are being told to pause, we park the thread
+                            // until the pause boolean is toggled.
+                            // The resume operation is responsible for toggling
+                            // the boolean and unpark the thread.
+                            // We enter a loop because park() could spuriously
+                            // return. We will then park() again unless the
+                            // pause boolean has been toggled.
 
-                        // Need to use Ordering::SeqCst as we have multiple
-                        // loads and stores to different atomics and we need
-                        // to see them in a consistent order in all threads
+                            // Need to use Ordering::SeqCst as we have multiple
+                            // loads and stores to different atomics and we need
+                            // to see them in a consistent order in all threads
 
-                        if vcpu_pause_signalled.load(Ordering::SeqCst) {
-                            vcpu_run_interrupted.store(true, Ordering::SeqCst);
-                            while vcpu_pause_signalled.load(Ordering::SeqCst) {
-                                thread::park();
+                            if vcpu_pause_signalled.load(Ordering::SeqCst) {
+                                vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                while vcpu_pause_signalled.load(Ordering::SeqCst) {
+                                    thread::park();
+                                }
+                                vcpu_run_interrupted.store(false, Ordering::SeqCst);
                             }
-                            vcpu_run_interrupted.store(false, Ordering::SeqCst);
-                        }
 
-                        // We've been told to terminate
-                        if vcpu_kill_signalled.load(Ordering::SeqCst)
-                            || vcpu_kill.load(Ordering::SeqCst)
-                        {
-                            vcpu_run_interrupted.store(true, Ordering::SeqCst);
-                            break;
-                        }
+                            // We've been told to terminate
+                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                                || vcpu_kill.load(Ordering::SeqCst)
+                            {
+                                vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                break;
+                            }
 
-                        // vcpu.run() returns false on a triple-fault so trigger a reset
-                        match vcpu.lock().unwrap().run() {
-                            Ok(run) => match run {
-                                #[cfg(target_arch = "x86_64")]
-                                VmExit::IoapicEoi(vector) => {
-                                    if let Some(interrupt_controller) = &interrupt_controller_clone
-                                    {
-                                        interrupt_controller
-                                            .lock()
-                                            .unwrap()
-                                            .end_of_interrupt(vector);
+                            // vcpu.run() returns false on a triple-fault so trigger a reset
+                            match vcpu.lock().unwrap().run() {
+                                Ok(run) => match run {
+                                    #[cfg(target_arch = "x86_64")]
+                                    VmExit::IoapicEoi(vector) => {
+                                        if let Some(interrupt_controller) =
+                                            &interrupt_controller_clone
+                                        {
+                                            interrupt_controller
+                                                .lock()
+                                                .unwrap()
+                                                .end_of_interrupt(vector);
+                                        }
                                     }
-                                }
-                                VmExit::Ignore => {}
-                                VmExit::Hyperv => {}
-                                VmExit::Reset => {
-                                    debug!("VmExit::Reset");
-                                    vcpu_run_interrupted.store(true, Ordering::SeqCst);
-                                    reset_evt.write(1).unwrap();
-                                    break;
-                                }
-                                VmExit::Shutdown => {
-                                    debug!("VmExit::Shutdown");
-                                    vcpu_run_interrupted.store(true, Ordering::SeqCst);
-                                    exit_evt.write(1).unwrap();
-                                    break;
-                                }
-                                _ => {
-                                    error!("VCPU generated error: {:?}", Error::UnexpectedVmExit);
-                                    break;
-                                }
-                            },
+                                    VmExit::Ignore => {}
+                                    VmExit::Hyperv => {}
+                                    VmExit::Reset => {
+                                        info!("VmExit::Reset");
+                                        vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                        reset_evt.write(1).unwrap();
+                                        break;
+                                    }
+                                    VmExit::Shutdown => {
+                                        info!("VmExit::Shutdown");
+                                        vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                                        exit_evt.write(1).unwrap();
+                                        break;
+                                    }
+                                    _ => {
+                                        error!(
+                                            "VCPU generated error: {:?}",
+                                            Error::UnexpectedVmExit
+                                        );
+                                        break;
+                                    }
+                                },
 
-                            Err(e) => {
-                                error!("VCPU generated error: {:?}", Error::VcpuRun(e.into()));
+                                Err(e) => {
+                                    error!("VCPU generated error: {:?}", Error::VcpuRun(e.into()));
+                                    break;
+                                }
+                            }
+
+                            // We've been told to terminate
+                            if vcpu_kill_signalled.load(Ordering::SeqCst)
+                                || vcpu_kill.load(Ordering::SeqCst)
+                            {
+                                vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                 break;
                             }
                         }
-
-                        // We've been told to terminate
-                        if vcpu_kill_signalled.load(Ordering::SeqCst)
-                            || vcpu_kill.load(Ordering::SeqCst)
-                        {
-                            vcpu_run_interrupted.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
+                    })
+                    .or_else(|_| {
+                        panic_vcpu_run_interrupted.store(true, Ordering::SeqCst);
+                        error!("vCPU thread panicked");
+                        panic_exit_evt.write(1)
+                    })
+                    .ok();
                 })
                 .map_err(Error::VcpuSpawn)?,
         );
@@ -978,6 +1012,14 @@ impl CpuManager {
             .collect()
     }
 
+    #[cfg(target_arch = "aarch64")]
+    pub fn get_vcpu_topology(&self) -> Option<(u8, u8, u8)> {
+        self.config
+            .topology
+            .clone()
+            .map(|t| (t.threads_per_core, t.cores_per_die, t.packages))
+    }
+
     #[cfg(feature = "acpi")]
     pub fn create_madt(&self) -> Sdt {
         use crate::acpi;
@@ -1106,6 +1148,81 @@ impl CpuManager {
         }
 
         madt
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+    pub fn create_pptt(&self) -> Sdt {
+        let pptt_start = 0;
+        let mut cpus = 0;
+        let mut uid = 0;
+        let threads_per_core = self.get_vcpu_topology().unwrap_or_default().0 as u8;
+        let cores_per_package = self.get_vcpu_topology().unwrap_or_default().1 as u8;
+        let packages = self.get_vcpu_topology().unwrap_or_default().2 as u8;
+
+        let mut pptt = Sdt::new(*b"PPTT", 36, 2, *b"CLOUDH", *b"CHPPTT  ", 1);
+
+        for cluster_idx in 0..packages {
+            if cpus < self.config.boot_vcpus as usize {
+                let cluster_offset = pptt.len() - pptt_start;
+                let cluster_hierarchy_node = ProcessorHierarchyNode {
+                    r#type: 0,
+                    length: 20,
+                    reserved: 0,
+                    flags: 0x2,
+                    parent: 0,
+                    acpi_processor_id: cluster_idx as u32,
+                    num_private_resources: 0,
+                };
+                pptt.append(cluster_hierarchy_node);
+
+                for core_idx in 0..cores_per_package {
+                    let core_offset = pptt.len() - pptt_start;
+
+                    if threads_per_core > 1 {
+                        let core_hierarchy_node = ProcessorHierarchyNode {
+                            r#type: 0,
+                            length: 20,
+                            reserved: 0,
+                            flags: 0x2,
+                            parent: cluster_offset as u32,
+                            acpi_processor_id: core_idx as u32,
+                            num_private_resources: 0,
+                        };
+                        pptt.append(core_hierarchy_node);
+
+                        for _thread_idx in 0..threads_per_core {
+                            let thread_hierarchy_node = ProcessorHierarchyNode {
+                                r#type: 0,
+                                length: 20,
+                                reserved: 0,
+                                flags: 0xE,
+                                parent: core_offset as u32,
+                                acpi_processor_id: uid as u32,
+                                num_private_resources: 0,
+                            };
+                            pptt.append(thread_hierarchy_node);
+                            uid += 1;
+                        }
+                    } else {
+                        let thread_hierarchy_node = ProcessorHierarchyNode {
+                            r#type: 0,
+                            length: 20,
+                            reserved: 0,
+                            flags: 0xA,
+                            parent: cluster_offset as u32,
+                            acpi_processor_id: uid as u32,
+                            num_private_resources: 0,
+                        };
+                        pptt.append(thread_hierarchy_node);
+                        uid += 1;
+                    }
+                }
+                cpus += (cores_per_package * threads_per_core) as usize;
+            }
+        }
+
+        pptt.update_checksum();
+        pptt
     }
 }
 
@@ -1495,7 +1612,7 @@ impl Snapshottable for CpuManager {
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
         for (cpu_id, snapshot) in snapshot.snapshots.iter() {
-            debug!("Restoring VCPU {}", cpu_id);
+            info!("Restoring VCPU {}", cpu_id);
             self.create_vcpu(cpu_id.parse::<u8>().unwrap(), None, Some(*snapshot.clone()))
                 .map_err(|e| MigratableError::Restore(anyhow!("Could not create vCPU {:?}", e)))?;
         }

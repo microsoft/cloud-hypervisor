@@ -8,11 +8,11 @@ edition = "2018"
 default = []
 
 [dependencies]
-epoll = ">=4.0.1"
-libc = "0.2.98"
+epoll = "4.3.1"
+libc = "0.2.101"
 log = "0.4.14"
 virtio-bindings = "0.1.0"
-vm-memory = { version = "0.5.0", features = ["backend-bitmap"] }
+vm-memory = { version = "0.6.0", features = ["backend-bitmap"] }
 vm-virtio = { path = "../vm-virtio" }
-vmm-sys-util = ">=0.3.1"
-vhost = { git = "https://github.com/rust-vmm/vhost", branch = "master", package = "vhost", features = ["vhost-user-slave"] }
+vmm-sys-util = "0.8.0"
+vhost = { version = "0.1.0", features = ["vhost-user-slave"] }

@@ -4,14 +4,14 @@
 
 use super::Error as DeviceError;
 use super::{
-    ActivateError, ActivateResult, DescriptorChain, EpollHelper, EpollHelperError,
-    EpollHelperHandler, Queue, VirtioCommon, VirtioDevice, VirtioDeviceType,
-    EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
+    ActivateResult, DescriptorChain, EpollHelper, EpollHelperError, EpollHelperHandler, Queue,
+    VirtioCommon, VirtioDevice, VirtioDeviceType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
 };
-use crate::seccomp_filters::{get_seccomp_filter, Thread};
+use crate::seccomp_filters::Thread;
+use crate::thread_helper::spawn_virtio_thread;
 use crate::GuestMemoryMmap;
 use crate::{DmaRemapping, VirtioInterrupt, VirtioInterruptType};
-use seccomp::{SeccompAction, SeccompFilter};
+use seccompiler::SeccompAction;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 use std::io;
@@ -21,7 +21,6 @@ use std::os::unix::io::AsRawFd;
 use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
-use std::thread;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_device::dma_mapping::ExternalDmaMapping;
@@ -702,6 +701,7 @@ pub struct Iommu {
     mapping: Arc<IommuMapping>,
     ext_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
     seccomp_action: SeccompAction,
+    exit_evt: EventFd,
 }
 
 #[derive(Versionize)]
@@ -715,7 +715,11 @@ struct IommuState {
 impl VersionMapped for IommuState {}
 
 impl Iommu {
-    pub fn new(id: String, seccomp_action: SeccompAction) -> io::Result<(Self, Arc<IommuMapping>)> {
+    pub fn new(
+        id: String,
+        seccomp_action: SeccompAction,
+        exit_evt: EventFd,
+    ) -> io::Result<(Self, Arc<IommuMapping>)> {
         let config = VirtioIommuConfig {
             page_size_mask: VIRTIO_IOMMU_PAGE_SIZE_MASK,
             probe_size: PROBE_PROP_SIZE,
@@ -743,6 +747,7 @@ impl Iommu {
                 mapping: mapping.clone(),
                 ext_mapping: BTreeMap::new(),
                 seccomp_action,
+                exit_evt,
             },
             mapping,
         ))
@@ -843,24 +848,18 @@ impl VirtioDevice for Iommu {
         let paused = self.common.paused.clone();
         let paused_sync = self.common.paused_sync.clone();
         let mut epoll_threads = Vec::new();
-        // Retrieve seccomp filter for virtio_iommu thread
-        let virtio_iommu_seccomp_filter =
-            get_seccomp_filter(&self.seccomp_action, Thread::VirtioIommu)
-                .map_err(ActivateError::CreateSeccompFilter)?;
-        thread::Builder::new()
-            .name(self.id.clone())
-            .spawn(move || {
-                if let Err(e) = SeccompFilter::apply(virtio_iommu_seccomp_filter) {
-                    error!("Error applying seccomp filter: {:?}", e);
-                } else if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
+        spawn_virtio_thread(
+            &self.id,
+            &self.seccomp_action,
+            Thread::VirtioIommu,
+            &mut epoll_threads,
+            &self.exit_evt,
+            move || {
+                if let Err(e) = handler.run(paused, paused_sync.unwrap()) {
                     error!("Error running worker: {:?}", e);
                 }
-            })
-            .map(|thread| epoll_threads.push(thread))
-            .map_err(|e| {
-                error!("failed to clone the virtio-iommu epoll thread: {}", e);
-                ActivateError::BadActivate
-            })?;
+            },
+        )?;
 
         self.common.epoll_threads = Some(epoll_threads);
 

@@ -1,5 +1,3 @@
-[![Build Status](https://travis-ci.com/cloud-hypervisor/cloud-hypervisor.svg?branch=master)](https://travis-ci.com/cloud-hypervisor/cloud-hypervisor)
-
 - [1. What is Cloud Hypervisor?](#1-what-is-cloud-hypervisor)
   - [Objectives](#objectives)
     - [High Level](#high-level)
@@ -182,7 +180,7 @@ To build the kernel:
 
 # Clone the Cloud Hypervisor Linux branch
 $ pushd $CLOUDH
-$ git clone --depth 1 https://github.com/cloud-hypervisor/linux.git -b ch-5.13-rc5 linux-cloud-hypervisor
+$ git clone --depth 1 https://github.com/cloud-hypervisor/linux.git -b ch-5.14 linux-cloud-hypervisor
 $ pushd linux-cloud-hypervisor
 
 # Use the cloud-hypervisor kernel config to build your kernel
