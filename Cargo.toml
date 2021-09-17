@@ -90,3 +90,10 @@ members = [
     "vm-virtio"
 ]
 exclude = ["test_infra"]
+
+[patch."https://github.com/rust-vmm/mshv"]
+mshv-bindings = { path = "../mshv/mshv-bindings" }
+mshv-ioctls = { path = "../mshv/mshv-ioctls" }
+
+[patch."https://github.com/rust-vmm/vfio-ioctls"]
+vfio-ioctls = { path = "../vfio-ioctls" }
