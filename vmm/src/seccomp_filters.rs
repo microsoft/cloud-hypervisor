@@ -131,6 +131,7 @@ mod mshv {
     pub const MSHV_SET_PARTITION_PROPERTY: u64 = 0x4010_b80c;
     pub const MSHV_GET_GPA_ACCESS_STATES: u64 = 0xc01c_b812;
     pub const MSHV_VP_TRANSLATE_GVA: u64 = 0xc020_b80e;
+    pub const MSHV_VP_REGISTER_INTERCEPT_RESULT_CPUID: u64 = 0x4030_b817;
 }
 #[cfg(feature = "mshv")]
 use mshv::*;
@@ -159,6 +160,7 @@ fn create_vmm_ioctl_seccomp_rule_common_mshv() -> Result<Vec<SeccompRule>, Backe
         )?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_GET_GPA_ACCESS_STATES)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_VP_TRANSLATE_GVA)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_VP_REGISTER_INTERCEPT_RESULT_CPUID)?],
     ])
 }
 
@@ -509,6 +511,7 @@ fn create_vcpu_ioctl_seccomp_rule_mshv() -> Result<Vec<SeccompRule>, BackendErro
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_MAP_GUEST_MEMORY)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_UNMAP_GUEST_MEMORY)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_VP_TRANSLATE_GVA)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_VP_REGISTER_INTERCEPT_RESULT_CPUID)?],
     ])
 }
 
