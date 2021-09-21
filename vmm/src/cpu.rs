@@ -566,6 +566,7 @@ impl CpuManager {
                     .map(|t| (t.threads_per_core, t.cores_per_die, t.dies_per_package)),
                 sgx_epc_sections,
                 phys_bits,
+                #[cfg(feature = "kvm")]
                 config.kvm_hyperv,
                 #[cfg(feature = "tdx")]
                 tdx_enabled,

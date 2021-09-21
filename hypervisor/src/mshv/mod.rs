@@ -130,6 +130,9 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// Get the supported CpuID
     ///
     fn get_cpuid(&self) -> hypervisor::Result<CpuId> {
+        /* XXX Implement HvCallGetVpCpuidValues to be delivered here.
+               This will receive the full bitmask for the initial
+               values in generate_common_cpuid(). */
         Ok(CpuId::new(1).unwrap())
     }
     #[cfg(target_arch = "x86_64")]
@@ -450,8 +453,10 @@ impl cpu::Vcpu for MshvVcpu {
     ///
     /// X86 specific call to setup the CPUID registers.
     ///
-    fn set_cpuid2(&self, _cpuid: &CpuId) -> cpu::Result<()> {
-        Ok(())
+    fn set_cpuid2(&self, cpuid: &CpuId) -> cpu::Result<()> {
+        self.fd
+            .register_intercept_result_cpuid(cpuid)
+            .map_err(|e| cpu::HypervisorCpuError::SetCpuid(e.into()))
     }
     #[cfg(target_arch = "x86_64")]
     ///
