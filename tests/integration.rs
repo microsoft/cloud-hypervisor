@@ -6032,6 +6032,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_windows_guest_snapshot_restore() {
             let windows_guest = WindowsGuest::new();
 
