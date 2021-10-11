@@ -131,8 +131,9 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     ///
     fn get_cpuid(&self) -> hypervisor::Result<CpuId> {
         /* XXX Implement HvCallGetVpCpuidValues to be delivered here.
-               This will receive the full bitmask for the initial
-               values in generate_common_cpuid(). */
+        This will receive the full bitmask for the initial
+        values in generate_common_cpuid().
+        */
         Ok(CpuId::new(1).unwrap())
     }
     #[cfg(target_arch = "x86_64")]
@@ -291,9 +292,7 @@ impl cpu::Vcpu for MshvVcpu {
     }
     #[allow(non_upper_case_globals)]
     fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
-        // Safe because this is just only done during initialization.
-        // TODO don't zero it everytime we enter this function.
-        let hv_message: hv_message = unsafe { std::mem::zeroed() };
+        let hv_message: hv_message = hv_message::default();
         match self.fd.run(hv_message) {
             Ok(x) => match x.header.message_type {
                 hv_message_type_HVMSG_X64_HALT => {
@@ -516,8 +515,8 @@ impl cpu::Vcpu for MshvVcpu {
         // This registers are global and needed to be set only for first VCPU
         if self.vp_index == 0 {
             self.fd
-            .set_misc_regs(&state.misc)
-            .map_err(|e| cpu::HypervisorCpuError::SetMiscRegs(e.into()))?;
+                .set_misc_regs(&state.misc)
+                .map_err(|e| cpu::HypervisorCpuError::SetMiscRegs(e.into()))?;
         }
         self.fd
             .set_debug_regs(&state.dbg)

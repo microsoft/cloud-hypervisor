@@ -10,13 +10,13 @@ cargo-fuzz = true
 
 [dependencies]
 block_util = { path = "../block_util" }
-libc = "0.2.101"
+libc = "0.2.103"
 libfuzzer-sys = "0.4.2"
 qcow = { path = "../qcow" }
-seccompiler = { git = "https://github.com/rust-vmm/seccompiler"}
+seccompiler = "0.2.0"
 vhdx = { path = "../vhdx" }
 virtio-devices = { path = "../virtio-devices" }
-vmm-sys-util = "0.8.0"
+vmm-sys-util = "0.9.0"
 vm-virtio = { path = "../vm-virtio" }
 vm-memory = "0.6.0"
 
@@ -24,8 +24,7 @@ vm-memory = "0.6.0"
 path = ".."
 
 [patch.crates-io]
-kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.4.0", features = ["with-serde", "fam-wrappers"] }
-vm-memory = { git = "https://github.com/rust-vmm/vm-memory", rev = "5bd7138758183a73ac0da27ce40c004d95f1a7e9"}
+kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.5.0", features = ["with-serde", "fam-wrappers"] }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
 # Prevent this from interfering with workspaces

@@ -18,11 +18,11 @@ pub use {
     mshv_bindings::mshv_user_mem_region as MemoryRegion, mshv_bindings::msr_entry as MsrEntry,
     mshv_bindings::CpuId, mshv_bindings::DebugRegisters,
     mshv_bindings::FloatingPointUnit as FpuState, mshv_bindings::LapicState,
-    mshv_bindings::MiscRegs as MiscRegisters,
-    mshv_bindings::MsrList, mshv_bindings::Msrs as MsrEntries, mshv_bindings::Msrs,
-    mshv_bindings::SegmentRegister, mshv_bindings::SpecialRegisters,
-    mshv_bindings::StandardRegisters, mshv_bindings::SuspendRegisters, mshv_bindings::VcpuEvents,
-    mshv_bindings::XSave as Xsave, mshv_bindings::Xcrs as ExtendedControlRegisters,
+    mshv_bindings::MiscRegs as MiscRegisters, mshv_bindings::MsrList,
+    mshv_bindings::Msrs as MsrEntries, mshv_bindings::Msrs, mshv_bindings::SegmentRegister,
+    mshv_bindings::SpecialRegisters, mshv_bindings::StandardRegisters,
+    mshv_bindings::SuspendRegisters, mshv_bindings::VcpuEvents, mshv_bindings::XSave as Xsave,
+    mshv_bindings::Xcrs as ExtendedControlRegisters,
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuMshvState {

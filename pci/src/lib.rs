@@ -26,7 +26,7 @@ pub use self::device::{
 pub use self::msi::{msi_num_enabled_vectors, MsiCap, MsiConfig};
 pub use self::msix::{MsixCap, MsixConfig, MsixTableEntry, MSIX_TABLE_ENTRY_SIZE};
 pub use self::vfio::{VfioPciDevice, VfioPciError};
-pub use self::vfio_user::{VfioUserPciDevice, VfioUserPciDeviceError};
+pub use self::vfio_user::{VfioUserDmaMapping, VfioUserPciDevice, VfioUserPciDeviceError};
 
 /// PCI has four interrupt pins A->D.
 #[derive(Copy, Clone)]
@@ -42,3 +42,8 @@ impl PciInterruptPin {
         self as u32
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+pub const PCI_CONFIG_IO_PORT: u64 = 0xcf8;
+#[cfg(target_arch = "x86_64")]
+pub const PCI_CONFIG_IO_PORT_SIZE: u64 = 0x8;

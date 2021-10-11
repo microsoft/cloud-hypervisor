@@ -30,25 +30,28 @@ use std::result;
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
+use virtio_devices::BlocksState;
 #[cfg(target_arch = "x86_64")]
 use vm_allocator::GsiApic;
 use vm_allocator::SystemAllocator;
 use vm_device::BusDevice;
+use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::guest_memory::FileOffset;
 use vm_memory::{
     mmap::MmapRegionError, Address, Bytes, Error as MmapError, GuestAddress, GuestAddressSpace,
-    GuestMemory, GuestMemoryAtomic, GuestMemoryError, GuestMemoryLoadGuard, GuestMemoryRegion,
-    GuestUsize, MmapRegion,
+    GuestMemory, GuestMemoryAtomic, GuestMemoryError, GuestMemoryRegion, GuestUsize, MmapRegion,
 };
 use vm_migration::{
-    protocol::MemoryRangeTable, Migratable, MigratableError, Pausable, Snapshot,
-    SnapshotDataSection, Snapshottable, Transportable, VersionMapped,
+    protocol::MemoryRange, protocol::MemoryRangeTable, Migratable, MigratableError, Pausable,
+    Snapshot, SnapshotDataSection, Snapshottable, Transportable, VersionMapped,
 };
 
 #[cfg(feature = "acpi")]
 pub const MEMORY_MANAGER_ACPI_SIZE: usize = 0x18;
 
 const DEFAULT_MEMORY_ZONE: &str = "mem0";
+
+const SNAPSHOT_FILENAME: &str = "memory-ranges";
 
 #[cfg(target_arch = "x86_64")]
 const X86_64_IRQ_BASE: u32 = 5;
@@ -60,7 +63,7 @@ const MPOL_BIND: u32 = 2;
 const MPOL_MF_STRICT: u32 = 1;
 const MPOL_MF_MOVE: u32 = 1 << 1;
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize, Versionize)]
 struct HotPlugState {
     base: u64,
     length: u64,
@@ -74,6 +77,7 @@ pub struct VirtioMemZone {
     resize_handler: virtio_devices::Resize,
     hotplugged_size: u64,
     hugepages: bool,
+    blocks_state: Arc<Mutex<BlocksState>>,
 }
 
 impl VirtioMemZone {
@@ -88,6 +92,15 @@ impl VirtioMemZone {
     }
     pub fn hugepages(&self) -> bool {
         self.hugepages
+    }
+    pub fn blocks_state(&self) -> &Arc<Mutex<BlocksState>> {
+        &self.blocks_state
+    }
+    pub fn plugged_ranges(&self) -> MemoryRangeTable {
+        self.blocks_state
+            .lock()
+            .unwrap()
+            .memory_ranges(self.region.start_addr().raw_value(), true)
     }
 }
 
@@ -108,10 +121,21 @@ impl MemoryZone {
 
 pub type MemoryZones = HashMap<String, MemoryZone>;
 
+#[derive(Clone, Serialize, Deserialize, Versionize)]
 struct GuestRamMapping {
     slot: u32,
     gpa: u64,
     size: u64,
+    zone_id: String,
+    virtio_mem: bool,
+    file_offset: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Versionize)]
+struct ArchMemRegion {
+    base: u64,
+    size: usize,
+    r_type: RegionType,
 }
 
 pub struct MemoryManager {
@@ -129,16 +153,17 @@ pub struct MemoryManager {
     boot_ram: u64,
     current_ram: u64,
     next_hotplug_slot: usize,
-    snapshot: Mutex<Option<GuestMemoryLoadGuard<GuestMemoryMmap>>>,
     shared: bool,
     hugepages: bool,
     hugepage_size: Option<u64>,
+    prefault: bool,
     #[cfg(target_arch = "x86_64")]
     sgx_epc_region: Option<SgxEpcRegion>,
     user_provided_zones: bool,
-    snapshot_memory_regions: Vec<MemoryRegion>,
+    snapshot_memory_ranges: MemoryRangeTable,
     memory_zones: MemoryZones,
     log_dirty: bool, // Enable dirty logging for created RAM regions
+    arch_mem_regions: Vec<ArchMemRegion>,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -192,6 +217,9 @@ pub enum Error {
 
     /// Cannot restore VM
     Restore(MigratableError),
+
+    /// Cannot restore VM because source URL is missing
+    RestoreMissingSourceUrl,
 
     /// Cannot create the system allocator
     CreateSystemAllocator,
@@ -388,7 +416,7 @@ impl MemoryManager {
     fn create_memory_regions_from_zones(
         ram_regions: &[(GuestAddress, usize)],
         zones: &[MemoryZoneConfig],
-        prefault: bool,
+        prefault: Option<bool>,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut zones = zones.to_owned();
         let mut mem_regions = Vec::new();
@@ -436,7 +464,10 @@ impl MemoryManager {
                     file_offset,
                     region_start,
                     region_size,
-                    prefault,
+                    match prefault {
+                        Some(pf) => pf,
+                        None => zone.prefault,
+                    },
                     zone.shared,
                     zone.hugepages,
                     zone.hugepage_size,
@@ -487,40 +518,111 @@ impl MemoryManager {
         Ok((mem_regions, memory_zones))
     }
 
-    fn fill_saved_regions(&mut self, saved_regions: Vec<MemoryRegion>) -> Result<(), Error> {
-        for region in saved_regions {
-            if let Some(content) = region.content {
-                // Open (read only) the snapshot file for the given region.
-                let mut memory_region_file = OpenOptions::new()
-                    .read(true)
-                    .open(content)
-                    .map_err(Error::SnapshotOpen)?;
+    // Restore both GuestMemory regions along with MemoryZone zones.
+    fn restore_memory_regions_and_zones(
+        guest_ram_mappings: &[GuestRamMapping],
+        zones_config: &[MemoryZoneConfig],
+        prefault: Option<bool>,
+    ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
+        let mut memory_regions = Vec::new();
+        let mut memory_zones = HashMap::new();
 
-                self.guest_memory
-                    .memory()
-                    .read_exact_from(
-                        GuestAddress(region.start_addr),
-                        &mut memory_region_file,
-                        region.size as usize,
+        for zone_config in zones_config {
+            memory_zones.insert(zone_config.id.clone(), MemoryZone::default());
+        }
+
+        for guest_ram_mapping in guest_ram_mappings {
+            for zone_config in zones_config {
+                if guest_ram_mapping.zone_id == zone_config.id {
+                    let region = MemoryManager::create_ram_region(
+                        &zone_config.file,
+                        guest_ram_mapping.file_offset,
+                        GuestAddress(guest_ram_mapping.gpa),
+                        guest_ram_mapping.size as usize,
+                        match prefault {
+                            Some(pf) => pf,
+                            None => zone_config.prefault,
+                        },
+                        zone_config.shared,
+                        zone_config.hugepages,
+                        zone_config.hugepage_size,
+                        zone_config.host_numa_node,
+                    )?;
+                    memory_regions.push(Arc::clone(&region));
+                    if let Some(memory_zone) = memory_zones.get_mut(&guest_ram_mapping.zone_id) {
+                        if guest_ram_mapping.virtio_mem {
+                            let hotplugged_size = zone_config.hotplugged_size.unwrap_or(0);
+                            let region_size = region.len();
+                            memory_zone.virtio_mem_zone = Some(VirtioMemZone {
+                                region,
+                                resize_handler: virtio_devices::Resize::new(hotplugged_size)
+                                    .map_err(Error::EventFdFail)?,
+                                hotplugged_size,
+                                hugepages: zone_config.hugepages,
+                                blocks_state: Arc::new(Mutex::new(BlocksState::new(region_size))),
+                            });
+                        } else {
+                            memory_zone.regions.push(region);
+                        }
+                    }
+                }
+            }
+        }
+
+        memory_regions.sort_by_key(|x| x.start_addr());
+
+        Ok((memory_regions, memory_zones))
+    }
+
+    fn fill_saved_regions(
+        &mut self,
+        file_path: PathBuf,
+        saved_regions: MemoryRangeTable,
+    ) -> Result<(), Error> {
+        if saved_regions.is_empty() {
+            return Ok(());
+        }
+
+        // Open (read only) the snapshot file.
+        let mut memory_file = OpenOptions::new()
+            .read(true)
+            .open(file_path)
+            .map_err(Error::SnapshotOpen)?;
+
+        let guest_memory = self.guest_memory.memory();
+        for range in saved_regions.regions() {
+            let mut offset: u64 = 0;
+            // Here we are manually handling the retry in case we can't write
+            // the whole region at once because we can't use the implementation
+            // from vm-memory::GuestMemory of read_exact_from() as it is not
+            // following the correct behavior. For more info about this issue
+            // see: https://github.com/rust-vmm/vm-memory/issues/174
+            loop {
+                let bytes_read = guest_memory
+                    .read_from(
+                        GuestAddress(range.gpa + offset),
+                        &mut memory_file,
+                        (range.length - offset) as usize,
                     )
                     .map_err(Error::SnapshotCopy)?;
+                offset += bytes_read as u64;
+
+                if offset == range.length {
+                    break;
+                }
             }
         }
 
         Ok(())
     }
 
-    pub fn new(
-        vm: Arc<dyn hypervisor::Vm>,
+    fn validate_memory_config(
         config: &MemoryConfig,
-        prefault: bool,
-        phys_bits: u8,
-        #[cfg(feature = "tdx")] tdx_enabled: bool,
-    ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
-        let user_provided_zones = config.size == 0;
-        let mut allow_mem_hotplug: bool = false;
+        user_provided_zones: bool,
+    ) -> Result<(u64, Vec<MemoryZoneConfig>, bool), Error> {
+        let mut allow_mem_hotplug = false;
 
-        let (ram_size, zones) = if !user_provided_zones {
+        if !user_provided_zones {
             if config.zones.is_some() {
                 error!(
                     "User defined memory regions can't be provided if the \
@@ -571,9 +673,10 @@ impl MemoryManager {
                 host_numa_node: None,
                 hotplug_size: config.hotplug_size,
                 hotplugged_size: config.hotplugged_size,
+                prefault: config.prefault,
             }];
 
-            (config.size, zones)
+            Ok((config.size, zones, allow_mem_hotplug))
         } else {
             if config.zones.is_none() {
                 error!(
@@ -634,25 +737,91 @@ impl MemoryManager {
                 }
             }
 
-            (total_ram_size, zones)
-        };
+            Ok((total_ram_size, zones, allow_mem_hotplug))
+        }
+    }
 
-        // Init guest memory
-        let arch_mem_regions = arch::arch_memory_regions(ram_size);
+    fn allocate_address_space(&mut self) -> Result<(), Error> {
+        let mut list = Vec::new();
 
-        let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
-            .iter()
-            .filter(|r| r.2 == RegionType::Ram)
-            .map(|r| (r.0, r.1))
-            .collect();
+        for (zone_id, memory_zone) in self.memory_zones.iter() {
+            let mut regions: Vec<(Arc<vm_memory::GuestRegionMmap<AtomicBitmap>>, bool)> =
+                memory_zone
+                    .regions()
+                    .iter()
+                    .map(|r| (r.clone(), false))
+                    .collect();
 
-        let (mem_regions, mut memory_zones) =
-            Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault)?;
+            if let Some(virtio_mem_zone) = memory_zone.virtio_mem_zone() {
+                regions.push((virtio_mem_zone.region().clone(), true));
+            }
 
-        let guest_memory =
-            GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
+            list.push((zone_id.clone(), regions));
+        }
 
-        let boot_guest_memory = guest_memory.clone();
+        for (zone_id, regions) in list {
+            for (region, virtio_mem) in regions {
+                let slot = self.create_userspace_mapping(
+                    region.start_addr().raw_value(),
+                    region.len() as u64,
+                    region.as_ptr() as u64,
+                    self.mergeable,
+                    false,
+                    self.log_dirty,
+                )?;
+
+                let file_offset = if let Some(file_offset) = region.file_offset() {
+                    file_offset.start()
+                } else {
+                    0
+                };
+
+                self.guest_ram_mappings.push(GuestRamMapping {
+                    gpa: region.start_addr().raw_value(),
+                    size: region.len(),
+                    slot,
+                    zone_id: zone_id.clone(),
+                    virtio_mem,
+                    file_offset,
+                });
+                self.allocator
+                    .lock()
+                    .unwrap()
+                    .allocate_mmio_addresses(Some(region.start_addr()), region.len(), None)
+                    .ok_or(Error::MemoryRangeAllocation)?;
+            }
+        }
+
+        // Allocate SubRegion and Reserved address ranges.
+        for region in self.arch_mem_regions.iter() {
+            if region.r_type == RegionType::Ram {
+                // Ignore the RAM type since ranges have already been allocated
+                // based on the GuestMemory regions.
+                continue;
+            }
+            self.allocator
+                .lock()
+                .unwrap()
+                .allocate_mmio_addresses(
+                    Some(GuestAddress(region.base)),
+                    region.size as GuestUsize,
+                    None,
+                )
+                .ok_or(Error::MemoryRangeAllocation)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn new(
+        vm: Arc<dyn hypervisor::Vm>,
+        config: &MemoryConfig,
+        prefault: Option<bool>,
+        phys_bits: u8,
+        #[cfg(feature = "tdx")] tdx_enabled: bool,
+        restore_data: Option<&MemoryManagerSnapshotData>,
+    ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
+        let user_provided_zones = config.size == 0;
 
         let mmio_address_space_size = mmio_address_space_size(phys_bits);
         debug_assert_eq!(
@@ -661,67 +830,154 @@ impl MemoryManager {
         );
         let end_of_device_area = GuestAddress(mmio_address_space_size - 1);
 
-        let mut start_of_device_area =
-            MemoryManager::start_addr(guest_memory.last_addr(), allow_mem_hotplug)?;
-        let mut virtio_mem_regions: Vec<Arc<GuestRegionMmap>> = Vec::new();
+        let (ram_size, zones, allow_mem_hotplug) =
+            Self::validate_memory_config(config, user_provided_zones)?;
 
-        // Update list of memory zones for resize.
-        for zone in zones {
-            if let Some(memory_zone) = memory_zones.get_mut(&zone.id) {
-                if let Some(hotplug_size) = zone.hotplug_size {
-                    if hotplug_size == 0 {
-                        error!("'hotplug_size' can't be 0");
-                        return Err(Error::InvalidHotplugSize);
+        let (
+            start_of_device_area,
+            boot_ram,
+            current_ram,
+            arch_mem_regions,
+            memory_zones,
+            guest_memory,
+            boot_guest_memory,
+            hotplug_slots,
+            next_memory_slot,
+            selected_slot,
+            next_hotplug_slot,
+        ) = if let Some(data) = restore_data {
+            let (regions, memory_zones) =
+                Self::restore_memory_regions_and_zones(&data.guest_ram_mappings, &zones, prefault)?;
+            let guest_memory =
+                GuestMemoryMmap::from_arc_regions(regions).map_err(Error::GuestMemory)?;
+            let boot_guest_memory = guest_memory.clone();
+            (
+                GuestAddress(data.start_of_device_area),
+                data.boot_ram,
+                data.current_ram,
+                data.arch_mem_regions.clone(),
+                memory_zones,
+                guest_memory,
+                boot_guest_memory,
+                data.hotplug_slots.clone(),
+                data.next_memory_slot,
+                data.selected_slot,
+                data.next_hotplug_slot,
+            )
+        } else {
+            // Init guest memory
+            let arch_mem_regions = arch::arch_memory_regions(ram_size);
+
+            let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
+                .iter()
+                .filter(|r| r.2 == RegionType::Ram)
+                .map(|r| (r.0, r.1))
+                .collect();
+
+            let arch_mem_regions: Vec<ArchMemRegion> = arch_mem_regions
+                .iter()
+                .map(|(a, b, c)| ArchMemRegion {
+                    base: a.0,
+                    size: *b,
+                    r_type: *c,
+                })
+                .collect();
+
+            let (mem_regions, mut memory_zones) =
+                Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault)?;
+
+            let mut guest_memory =
+                GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
+
+            let boot_guest_memory = guest_memory.clone();
+
+            let mut start_of_device_area =
+                MemoryManager::start_addr(guest_memory.last_addr(), allow_mem_hotplug)?;
+
+            // Update list of memory zones for resize.
+            for zone in zones.iter() {
+                if let Some(memory_zone) = memory_zones.get_mut(&zone.id) {
+                    if let Some(hotplug_size) = zone.hotplug_size {
+                        if hotplug_size == 0 {
+                            error!("'hotplug_size' can't be 0");
+                            return Err(Error::InvalidHotplugSize);
+                        }
+
+                        if !user_provided_zones && config.hotplug_method == HotplugMethod::Acpi {
+                            start_of_device_area = start_of_device_area
+                                .checked_add(hotplug_size)
+                                .ok_or(Error::GuestAddressOverFlow)?;
+                        } else {
+                            // Alignment must be "natural" i.e. same as size of block
+                            let start_addr = GuestAddress(
+                                (start_of_device_area.0 + virtio_devices::VIRTIO_MEM_ALIGN_SIZE
+                                    - 1)
+                                    / virtio_devices::VIRTIO_MEM_ALIGN_SIZE
+                                    * virtio_devices::VIRTIO_MEM_ALIGN_SIZE,
+                            );
+
+                            // When `prefault` is set by vm_restore, memory manager
+                            // will create ram region with `prefault` option in
+                            // restore config rather than same option in zone
+                            let region = MemoryManager::create_ram_region(
+                                &None,
+                                0,
+                                start_addr,
+                                hotplug_size as usize,
+                                match prefault {
+                                    Some(pf) => pf,
+                                    None => zone.prefault,
+                                },
+                                zone.shared,
+                                zone.hugepages,
+                                zone.hugepage_size,
+                                zone.host_numa_node,
+                            )?;
+
+                            guest_memory = guest_memory
+                                .insert_region(Arc::clone(&region))
+                                .map_err(Error::GuestMemory)?;
+
+                            let hotplugged_size = zone.hotplugged_size.unwrap_or(0);
+                            let region_size = region.len();
+                            memory_zone.virtio_mem_zone = Some(VirtioMemZone {
+                                region,
+                                resize_handler: virtio_devices::Resize::new(hotplugged_size)
+                                    .map_err(Error::EventFdFail)?,
+                                hotplugged_size,
+                                hugepages: zone.hugepages,
+                                blocks_state: Arc::new(Mutex::new(BlocksState::new(region_size))),
+                            });
+
+                            start_of_device_area = start_addr
+                                .checked_add(hotplug_size)
+                                .ok_or(Error::GuestAddressOverFlow)?;
+                        }
                     }
-
-                    if !user_provided_zones && config.hotplug_method == HotplugMethod::Acpi {
-                        start_of_device_area = start_of_device_area
-                            .checked_add(hotplug_size)
-                            .ok_or(Error::GuestAddressOverFlow)?;
-                    } else {
-                        // Alignment must be "natural" i.e. same as size of block
-                        let start_addr = GuestAddress(
-                            (start_of_device_area.0 + virtio_devices::VIRTIO_MEM_ALIGN_SIZE - 1)
-                                / virtio_devices::VIRTIO_MEM_ALIGN_SIZE
-                                * virtio_devices::VIRTIO_MEM_ALIGN_SIZE,
-                        );
-
-                        let region = MemoryManager::create_ram_region(
-                            &None,
-                            0,
-                            start_addr,
-                            hotplug_size as usize,
-                            false,
-                            zone.shared,
-                            zone.hugepages,
-                            zone.hugepage_size,
-                            zone.host_numa_node,
-                        )?;
-
-                        virtio_mem_regions.push(region.clone());
-
-                        memory_zone.virtio_mem_zone = Some(VirtioMemZone {
-                            region,
-                            resize_handler: virtio_devices::Resize::new()
-                                .map_err(Error::EventFdFail)?,
-                            hotplugged_size: zone.hotplugged_size.unwrap_or(0),
-                            hugepages: zone.hugepages,
-                        });
-
-                        start_of_device_area = start_addr
-                            .checked_add(hotplug_size)
-                            .ok_or(Error::GuestAddressOverFlow)?;
-                    }
+                } else {
+                    return Err(Error::MissingZoneIdentifier);
                 }
-            } else {
-                return Err(Error::MissingZoneIdentifier);
             }
-        }
+
+            let mut hotplug_slots = Vec::with_capacity(HOTPLUG_COUNT);
+            hotplug_slots.resize_with(HOTPLUG_COUNT, HotPlugState::default);
+
+            (
+                start_of_device_area,
+                ram_size,
+                ram_size,
+                arch_mem_regions,
+                memory_zones,
+                guest_memory,
+                boot_guest_memory,
+                hotplug_slots,
+                0,
+                0,
+                0,
+            )
+        };
 
         let guest_memory = GuestMemoryAtomic::new(guest_memory);
-
-        let mut hotplug_slots = Vec::with_capacity(HOTPLUG_COUNT);
-        hotplug_slots.resize_with(HOTPLUG_COUNT, HotPlugState::default);
 
         // Both MMIO and PIO address spaces start at address 0.
         let allocator = Arc::new(Mutex::new(
@@ -759,87 +1015,40 @@ impl MemoryManager {
         #[cfg(feature = "tdx")]
         let log_dirty = !tdx_enabled; // Cannot log dirty pages on a TD
 
-        let memory_manager = Arc::new(Mutex::new(MemoryManager {
+        let mut memory_manager = MemoryManager {
             boot_guest_memory,
-            guest_memory: guest_memory.clone(),
-            next_memory_slot: 0,
+            guest_memory,
+            next_memory_slot,
             start_of_device_area,
             end_of_device_area,
             vm,
             hotplug_slots,
-            selected_slot: 0,
+            selected_slot,
             mergeable: config.mergeable,
-            allocator: allocator.clone(),
+            allocator,
             hotplug_method: config.hotplug_method.clone(),
-            boot_ram: ram_size,
-            current_ram: ram_size,
-            next_hotplug_slot: 0,
-            snapshot: Mutex::new(None),
+            boot_ram,
+            current_ram,
+            next_hotplug_slot,
             shared: config.shared,
             hugepages: config.hugepages,
             hugepage_size: config.hugepage_size,
+            prefault: config.prefault,
             #[cfg(target_arch = "x86_64")]
             sgx_epc_region: None,
             user_provided_zones,
-            snapshot_memory_regions: Vec::new(),
+            snapshot_memory_ranges: MemoryRangeTable::default(),
             memory_zones,
             guest_ram_mappings: Vec::new(),
             #[cfg(feature = "acpi")]
             acpi_address,
             log_dirty,
-        }));
+            arch_mem_regions,
+        };
 
-        for region in guest_memory.memory().iter() {
-            let mut mm = memory_manager.lock().unwrap();
-            let slot = mm.create_userspace_mapping(
-                region.start_addr().raw_value(),
-                region.len() as u64,
-                region.as_ptr() as u64,
-                config.mergeable,
-                false,
-                log_dirty,
-            )?;
-            mm.guest_ram_mappings.push(GuestRamMapping {
-                gpa: region.start_addr().raw_value(),
-                size: region.len(),
-                slot,
-            });
-        }
+        memory_manager.allocate_address_space()?;
 
-        for region in virtio_mem_regions.drain(..) {
-            let mut mm = memory_manager.lock().unwrap();
-            let slot = mm.create_userspace_mapping(
-                region.start_addr().raw_value(),
-                region.len() as u64,
-                region.as_ptr() as u64,
-                config.mergeable,
-                false,
-                log_dirty,
-            )?;
-
-            mm.guest_ram_mappings.push(GuestRamMapping {
-                gpa: region.start_addr().raw_value(),
-                size: region.len(),
-                slot,
-            });
-            allocator
-                .lock()
-                .unwrap()
-                .allocate_mmio_addresses(Some(region.start_addr()), region.len(), None)
-                .ok_or(Error::MemoryRangeAllocation)?;
-            mm.add_region(region)?;
-        }
-
-        // Allocate RAM and Reserved address ranges.
-        for region in arch_mem_regions.iter() {
-            allocator
-                .lock()
-                .unwrap()
-                .allocate_mmio_addresses(Some(region.0), region.1 as GuestUsize, None)
-                .ok_or(Error::MemoryRangeAllocation)?;
-        }
-
-        Ok(memory_manager)
+        Ok(Arc::new(Mutex::new(memory_manager)))
     }
 
     pub fn new_from_snapshot(
@@ -850,43 +1059,32 @@ impl MemoryManager {
         prefault: bool,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
-        let mm = MemoryManager::new(
-            vm,
-            config,
-            prefault,
-            phys_bits,
-            #[cfg(feature = "tdx")]
-            false,
-        )?;
-
         if let Some(source_url) = source_url {
-            let vm_snapshot_path = url_to_path(source_url).map_err(Error::Restore)?;
+            let mut memory_file_path = url_to_path(source_url).map_err(Error::Restore)?;
+            memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
             let mem_snapshot: MemoryManagerSnapshotData = snapshot
                 .to_versioned_state(MEMORY_MANAGER_SNAPSHOT_ID)
                 .map_err(Error::Restore)?;
 
-            // Here we turn the content file name into a content file path as
-            // this will be needed to copy the content of the saved memory
-            // region into the newly created memory region.
-            // We simply ignore the content files that are None, as they
-            // represent regions that have been directly saved by the user, with
-            // no need for saving into a dedicated external file. For these
-            // files, the VmConfig already contains the information on where to
-            // find them.
-            let mut saved_regions = mem_snapshot.memory_regions;
-            for region in saved_regions.iter_mut() {
-                if let Some(content) = &mut region.content {
-                    let mut memory_region_path = vm_snapshot_path.clone();
-                    memory_region_path.push(content.clone());
-                    *content = memory_region_path.to_str().unwrap().to_owned();
-                }
-            }
+            let mm = MemoryManager::new(
+                vm,
+                config,
+                Some(prefault),
+                phys_bits,
+                #[cfg(feature = "tdx")]
+                false,
+                Some(&mem_snapshot),
+            )?;
 
-            mm.lock().unwrap().fill_saved_regions(saved_regions)?;
+            mm.lock()
+                .unwrap()
+                .fill_saved_regions(memory_file_path, mem_snapshot.memory_ranges)?;
+
+            Ok(mm)
+        } else {
+            Err(Error::RestoreMissingSourceUrl)
         }
-
-        Ok(mm)
     }
 
     fn memfd_create(name: &ffi::CStr, flags: u32) -> Result<RawFd, io::Error> {
@@ -1107,7 +1305,7 @@ impl MemoryManager {
             0,
             start_addr,
             size,
-            false,
+            self.prefault,
             self.shared,
             self.hugepages,
             self.hugepage_size,
@@ -1127,6 +1325,9 @@ impl MemoryManager {
             gpa: region.start_addr().raw_value(),
             size: region.len(),
             slot,
+            zone_id: DEFAULT_MEMORY_ZONE.to_string(),
+            virtio_mem: false,
+            file_offset: 0,
         });
 
         self.add_region(Arc::clone(&region))?;
@@ -1319,11 +1520,14 @@ impl MemoryManager {
 
     pub fn virtio_mem_resize(&mut self, id: &str, size: u64) -> Result<(), Error> {
         if let Some(memory_zone) = self.memory_zones.get_mut(id) {
-            if let Some(virtio_mem_zone) = memory_zone.virtio_mem_zone() {
+            if let Some(virtio_mem_zone) = &mut memory_zone.virtio_mem_zone {
                 virtio_mem_zone
                     .resize_handler()
                     .work(size)
                     .map_err(Error::VirtioMemResizeFail)?;
+
+                // Keep the hotplugged_size up to date.
+                virtio_mem_zone.hotplugged_size = size;
             } else {
                 error!("Failed resizing virtio-mem region: No virtio-mem handler");
                 return Err(Error::MissingVirtioMemHandler);
@@ -1495,6 +1699,62 @@ impl MemoryManager {
 
     pub fn memory_zones(&self) -> &MemoryZones {
         &self.memory_zones
+    }
+
+    pub fn memory_range_table(
+        &self,
+        snapshot: bool,
+    ) -> std::result::Result<MemoryRangeTable, MigratableError> {
+        let mut table = MemoryRangeTable::default();
+
+        for memory_zone in self.memory_zones.values() {
+            if let Some(virtio_mem_zone) = memory_zone.virtio_mem_zone() {
+                table.extend(virtio_mem_zone.plugged_ranges());
+            }
+
+            for region in memory_zone.regions() {
+                if snapshot {
+                    if let Some(file_offset) = region.file_offset() {
+                        if (region.flags() & libc::MAP_SHARED == libc::MAP_SHARED)
+                            && Self::is_hardlink(file_offset.file())
+                        {
+                            // In this very specific case, we know the memory
+                            // region is backed by a file on the host filesystem
+                            // that can be accessed by the user, and additionally
+                            // the mapping is shared, which means that modifications
+                            // to the content are written to the actual file.
+                            // When meeting these conditions, we can skip the
+                            // copy of the memory content for this specific region,
+                            // as we can assume the user will have it saved through
+                            // the backing file already.
+                            continue;
+                        }
+                    }
+                }
+
+                table.push(MemoryRange {
+                    gpa: region.start_addr().raw_value(),
+                    length: region.len() as u64,
+                });
+            }
+        }
+
+        Ok(table)
+    }
+
+    pub fn snapshot_data(&self) -> MemoryManagerSnapshotData {
+        MemoryManagerSnapshotData {
+            memory_ranges: self.snapshot_memory_ranges.clone(),
+            guest_ram_mappings: self.guest_ram_mappings.clone(),
+            start_of_device_area: self.start_of_device_area.0,
+            boot_ram: self.boot_ram,
+            current_ram: self.current_ram,
+            arch_mem_regions: self.arch_mem_regions.clone(),
+            hotplug_slots: self.hotplug_slots.clone(),
+            next_memory_slot: self.next_memory_slot,
+            selected_slot: self.selected_slot,
+            next_hotplug_slot: self.next_hotplug_slot,
+        }
     }
 }
 
@@ -1876,16 +2136,18 @@ impl Aml for MemoryManager {
 
 impl Pausable for MemoryManager {}
 
-#[derive(Clone, Versionize)]
-pub struct MemoryRegion {
-    content: Option<String>,
-    start_addr: u64,
-    size: u64,
-}
-
-#[derive(Versionize)]
+#[derive(Clone, Serialize, Deserialize, Versionize)]
 pub struct MemoryManagerSnapshotData {
-    memory_regions: Vec<MemoryRegion>,
+    memory_ranges: MemoryRangeTable,
+    guest_ram_mappings: Vec<GuestRamMapping>,
+    start_of_device_area: u64,
+    boot_ram: u64,
+    current_ram: u64,
+    arch_mem_regions: Vec<ArchMemRegion>,
+    hotplug_slots: Vec<HotPlugState>,
+    next_memory_slot: u32,
+    selected_slot: usize,
+    next_hotplug_slot: usize,
 }
 
 impl VersionMapped for MemoryManagerSnapshotData {}
@@ -1897,57 +2159,23 @@ impl Snapshottable for MemoryManager {
 
     fn snapshot(&mut self) -> result::Result<Snapshot, MigratableError> {
         let mut memory_manager_snapshot = Snapshot::new(MEMORY_MANAGER_SNAPSHOT_ID);
-        let guest_memory = self.guest_memory.memory();
 
-        let mut memory_regions: Vec<MemoryRegion> = Vec::new();
+        let memory_ranges = self.memory_range_table(true)?;
 
-        for (index, region) in guest_memory.iter().enumerate() {
-            if region.len() == 0 {
-                return Err(MigratableError::Snapshot(anyhow!("Zero length region")));
-            }
-
-            let mut content = Some(PathBuf::from(format!("memory-region-{}", index)));
-            if let Some(file_offset) = region.file_offset() {
-                if (region.flags() & libc::MAP_SHARED == libc::MAP_SHARED)
-                    && Self::is_hardlink(file_offset.file())
-                {
-                    // In this very specific case, we know the memory region
-                    // is backed by a file on the host filesystem that can be
-                    // accessed by the user, and additionally the mapping is
-                    // shared, which means that modifications to the content
-                    // are written to the actual file.
-                    // When meeting these conditions, we can skip the copy of
-                    // the memory content for this specific region, as we can
-                    // assume the user will have it saved through the backing
-                    // file already.
-                    content = None;
-                }
-            }
-
-            memory_regions.push(MemoryRegion {
-                content: content.map(|p| p.to_str().unwrap().to_owned()),
-                start_addr: region.start_addr().0,
-                size: region.len(),
-            });
-        }
-
-        // Store locally this list of regions as it will be used through the
+        // Store locally this list of ranges as it will be used through the
         // Transportable::send() implementation. The point is to avoid the
         // duplication of code regarding the creation of the path for each
         // region. The 'snapshot' step creates the list of memory regions,
         // including information about the need to copy a memory region or
         // not. This saves the 'send' step having to go through the same
         // process, and instead it can directly proceed with storing the
-        // memory region content for the regions requiring it.
-        self.snapshot_memory_regions = memory_regions.clone();
+        // memory range content for the ranges requiring it.
+        self.snapshot_memory_ranges = memory_ranges;
 
         memory_manager_snapshot.add_data_section(SnapshotDataSection::new_from_versioned_state(
             MEMORY_MANAGER_SNAPSHOT_ID,
-            &MemoryManagerSnapshotData { memory_regions },
+            &self.snapshot_data(),
         )?);
-
-        let mut memory_snapshot = self.snapshot.lock().unwrap();
-        *memory_snapshot = Some(guest_memory);
 
         Ok(memory_manager_snapshot)
     }
@@ -1959,29 +2187,42 @@ impl Transportable for MemoryManager {
         _snapshot: &Snapshot,
         destination_url: &str,
     ) -> result::Result<(), MigratableError> {
-        let vm_memory_snapshot_path = url_to_path(destination_url)?;
+        if self.snapshot_memory_ranges.is_empty() {
+            return Ok(());
+        }
 
-        if let Some(guest_memory) = &*self.snapshot.lock().unwrap() {
-            for region in self.snapshot_memory_regions.iter() {
-                if let Some(content) = &region.content {
-                    let mut memory_region_path = vm_memory_snapshot_path.clone();
-                    memory_region_path.push(content);
+        let mut memory_file_path = url_to_path(destination_url)?;
+        memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
-                    // Create the snapshot file for the region
-                    let mut memory_region_file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create_new(true)
-                        .open(memory_region_path)
-                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        // Create the snapshot file for the entire memory
+        let mut memory_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(memory_file_path)
+            .map_err(|e| MigratableError::MigrateSend(e.into()))?;
 
-                    guest_memory
-                        .write_all_to(
-                            GuestAddress(region.start_addr),
-                            &mut memory_region_file,
-                            region.size as usize,
-                        )
-                        .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+        let guest_memory = self.guest_memory.memory();
+
+        for range in self.snapshot_memory_ranges.regions() {
+            let mut offset: u64 = 0;
+            // Here we are manually handling the retry in case we can't read
+            // the whole region at once because we can't use the implementation
+            // from vm-memory::GuestMemory of write_all_to() as it is not
+            // following the correct behavior. For more info about this issue
+            // see: https://github.com/rust-vmm/vm-memory/issues/174
+            loop {
+                let bytes_written = guest_memory
+                    .write_to(
+                        GuestAddress(range.gpa + offset),
+                        &mut memory_file,
+                        (range.length - offset) as usize,
+                    )
+                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+                offset += bytes_written as u64;
+
+                if offset == range.length {
+                    break;
                 }
             }
         }
@@ -2043,7 +2284,7 @@ impl Migratable for MemoryManager {
                 .map(|(x, y)| x | y)
                 .collect();
 
-            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa);
+            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, 4096);
 
             if sub_table.regions().is_empty() {
                 info!("Dirty Memory Range Table is empty");

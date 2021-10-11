@@ -20,6 +20,12 @@ use virtio_devices::{RateLimiterConfig, TokenBucketConfig};
 
 pub const DEFAULT_VCPUS: u8 = 1;
 pub const DEFAULT_MEMORY_MB: u64 = 512;
+
+// When booting with PVH boot the maximum physical addressable size
+// is a 46 bit address space even when the host supports with 5-level
+// paging.
+pub const DEFAULT_MAX_PHYS_BITS: u8 = 46;
+
 pub const DEFAULT_RNG_SOURCE: &str = "/dev/urandom";
 pub const DEFAULT_NUM_QUEUES_VUNET: usize = 2;
 pub const DEFAULT_QUEUE_SIZE_VUNET: u16 = 256;
@@ -410,6 +416,10 @@ impl FromStr for CpuTopology {
     }
 }
 
+fn default_cpuconfig_max_phys_bits() -> u8 {
+    DEFAULT_MAX_PHYS_BITS
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct CpusConfig {
     pub boot_vcpus: u8,
@@ -418,8 +428,8 @@ pub struct CpusConfig {
     pub topology: Option<CpuTopology>,
     #[serde(default)]
     pub kvm_hyperv: bool,
-    #[serde(default)]
-    pub max_phys_bits: Option<u8>,
+    #[serde(default = "default_cpuconfig_max_phys_bits")]
+    pub max_phys_bits: u8,
 }
 
 impl CpusConfig {
@@ -449,7 +459,8 @@ impl CpusConfig {
             .0;
         let max_phys_bits = parser
             .convert::<u8>("max_phys_bits")
-            .map_err(Error::ParseCpus)?;
+            .map_err(Error::ParseCpus)?
+            .unwrap_or(DEFAULT_MAX_PHYS_BITS);
 
         Ok(CpusConfig {
             boot_vcpus,
@@ -468,7 +479,7 @@ impl Default for CpusConfig {
             max_vcpus: DEFAULT_VCPUS,
             topology: None,
             kvm_hyperv: false,
-            max_phys_bits: None,
+            max_phys_bits: DEFAULT_MAX_PHYS_BITS,
         }
     }
 }
@@ -491,6 +502,8 @@ pub struct MemoryZoneConfig {
     pub hotplug_size: Option<u64>,
     #[serde(default)]
     pub hotplugged_size: Option<u64>,
+    #[serde(default)]
+    pub prefault: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -511,6 +524,8 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub hugepage_size: Option<u64>,
     #[serde(default)]
+    pub prefault: bool,
+    #[serde(default)]
     pub zones: Option<Vec<MemoryZoneConfig>>,
 }
 
@@ -526,7 +541,8 @@ impl MemoryConfig {
             .add("hotplugged_size")
             .add("shared")
             .add("hugepages")
-            .add("hugepage_size");
+            .add("hugepage_size")
+            .add("prefault");
         parser.parse(memory).map_err(Error::ParseMemory)?;
 
         let size = parser
@@ -565,6 +581,11 @@ impl MemoryConfig {
             .convert::<ByteSized>("hugepage_size")
             .map_err(Error::ParseMemory)?
             .map(|v| v.0);
+        let prefault = parser
+            .convert::<Toggle>("prefault")
+            .map_err(Error::ParseMemory)?
+            .unwrap_or(Toggle(false))
+            .0;
 
         let zones: Option<Vec<MemoryZoneConfig>> = if let Some(memory_zones) = &memory_zones {
             let mut zones = Vec::new();
@@ -579,7 +600,8 @@ impl MemoryConfig {
                     .add("hugepage_size")
                     .add("host_numa_node")
                     .add("hotplug_size")
-                    .add("hotplugged_size");
+                    .add("hotplugged_size")
+                    .add("prefault");
                 parser.parse(memory_zone).map_err(Error::ParseMemoryZone)?;
 
                 let id = parser.get("id").ok_or(Error::ParseMemoryZoneIdMissing)?;
@@ -615,6 +637,11 @@ impl MemoryConfig {
                     .convert::<ByteSized>("hotplugged_size")
                     .map_err(Error::ParseMemoryZone)?
                     .map(|v| v.0);
+                let prefault = parser
+                    .convert::<Toggle>("prefault")
+                    .map_err(Error::ParseMemoryZone)?
+                    .unwrap_or(Toggle(false))
+                    .0;
 
                 zones.push(MemoryZoneConfig {
                     id,
@@ -626,6 +653,7 @@ impl MemoryConfig {
                     host_numa_node,
                     hotplug_size,
                     hotplugged_size,
+                    prefault,
                 });
             }
             Some(zones)
@@ -642,6 +670,7 @@ impl MemoryConfig {
             shared,
             hugepages,
             hugepage_size,
+            prefault,
             zones,
         })
     }
@@ -676,6 +705,7 @@ impl Default for MemoryConfig {
             shared: false,
             hugepages: false,
             hugepage_size: None,
+            prefault: false,
             zones: None,
         }
     }
@@ -2678,6 +2708,7 @@ mod tests {
                 shared: false,
                 hugepages: false,
                 hugepage_size: None,
+                prefault: false,
                 zones: None,
             },
             kernel: Some(KernelConfig {

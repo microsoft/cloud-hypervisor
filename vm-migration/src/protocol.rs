@@ -3,7 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::MigratableError;
+use crate::{MigratableError, VersionMapped};
+use std::io::{Read, Write};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_memory::ByteValued;
 
 // Migration protocol
@@ -27,8 +30,6 @@ use vm_memory::ByteValued;
 
 // The destination can at any time send an "error response" to cancel
 // The source can at any time send an "abandon request" to cancel
-
-use std::io::{Read, Write};
 
 #[repr(u16)]
 #[derive(Copy, Clone)]
@@ -173,19 +174,21 @@ impl Response {
 unsafe impl ByteValued for Response {}
 
 #[repr(C)]
+#[derive(Clone, Serialize, Deserialize, Versionize)]
 pub struct MemoryRange {
     pub gpa: u64,
     pub length: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize, Versionize)]
 pub struct MemoryRangeTable {
     data: Vec<MemoryRange>,
 }
 
+impl VersionMapped for MemoryRangeTable {}
+
 impl MemoryRangeTable {
-    pub fn from_bitmap(bitmap: Vec<u64>, start_addr: u64) -> Self {
-        let page_size = 4096;
+    pub fn from_bitmap(bitmap: Vec<u64>, start_addr: u64, page_size: u64) -> Self {
         let mut table = MemoryRangeTable::default();
         let mut entry: Option<MemoryRange> = None;
         for (i, block) in bitmap.iter().enumerate() {

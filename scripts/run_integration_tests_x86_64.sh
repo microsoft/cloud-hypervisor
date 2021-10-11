@@ -123,25 +123,12 @@ if [ -d "$LINUX_CUSTOM_DIR" ]; then
     rm -rf $LINUX_CUSTOM_DIR
 fi
 
-VIRTIOFSD="$WORKLOADS_DIR/virtiofsd"
-QEMU_DIR="qemu_build"
-if [ ! -f "$VIRTIOFSD" ]; then
-    pushd $WORKLOADS_DIR
-    git clone --depth 1 "https://gitlab.com/virtio-fs/qemu.git" -b "qemu5.0-virtiofs-dax" $QEMU_DIR
-    pushd $QEMU_DIR
-    time ./configure --prefix=$PWD --target-list=x86_64-softmmu
-    time make virtiofsd -j `nproc`
-    cp virtiofsd $VIRTIOFSD || exit 1
-    popd
-    rm -rf $QEMU_DIR
-    popd
-fi
-
 VIRTIOFSD_RS="$WORKLOADS_DIR/virtiofsd-rs"
 VIRTIOFSD_RS_DIR="virtiofsd_rs_build"
 if [ ! -f "$VIRTIOFSD_RS" ]; then
     pushd $WORKLOADS_DIR
-    git clone --depth 1 "https://gitlab.com/virtio-fs/virtiofsd-rs.git" $VIRTIOFSD_RS_DIR
+    git clone "https://gitlab.com/virtio-fs/virtiofsd-rs.git" $VIRTIOFSD_RS_DIR
+    git checkout c847ab63acabed2ed6e6913b9c76bb5099a1d4cb
     pushd $VIRTIOFSD_RS_DIR
     time cargo build --release
     cp target/release/virtiofsd-rs $VIRTIOFSD_RS || exit 1
