@@ -52,41 +52,44 @@ mod tests {
     impl std::panic::RefUnwindSafe for Guest {}
 
     #[cfg(target_arch = "x86_64")]
-    const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-amd64.raw";
+    mod x86_64 {
+        pub const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-amd64.raw";
+        pub const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210609-0.raw";
+        pub const FOCAL_SGX_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-sgx.raw";
+        pub const HIRSUTE_NVIDIA_IMAGE_NAME: &str = "hirsute-server-cloudimg-amd64-nvidia.raw";
+        pub const FOCAL_IMAGE_NAME_QCOW2: &str =
+            "focal-server-cloudimg-amd64-custom-20210609-0.qcow2";
+        pub const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210609-0.vhd";
+        pub const FOCAL_IMAGE_NAME_VHDX: &str =
+            "focal-server-cloudimg-amd64-custom-20210609-0.vhdx";
+        pub const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
+        pub const OVMF_NAME: &str = "OVMF-4b47d0c6c8.fd";
+        pub const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'IO-APIC.*ttyS0' /proc/interrupts || true";
+    }
+
     #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-custom-20210609-0.raw";
-    #[cfg(target_arch = "x86_64")]
-    const FOCAL_SGX_IMAGE_NAME: &str = "focal-server-cloudimg-amd64-sgx.raw";
-    #[cfg(target_arch = "x86_64")]
-    const HIRSUTE_NVIDIA_IMAGE_NAME: &str = "hirsute-server-cloudimg-amd64-nvidia.raw";
+    use x86_64::*;
+
     #[cfg(target_arch = "aarch64")]
-    const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-arm64.raw";
+    mod aarch64 {
+        pub const BIONIC_IMAGE_NAME: &str = "bionic-server-cloudimg-arm64.raw";
+        pub const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64-custom-20210929-0.raw";
+        pub const FOCAL_IMAGE_UPDATE_KERNEL_NAME: &str =
+            "focal-server-cloudimg-arm64-custom-20210929-0-update-kernel.raw";
+        pub const FOCAL_IMAGE_NAME_QCOW2: &str =
+            "focal-server-cloudimg-arm64-custom-20210929-0.qcow2";
+        pub const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-arm64-custom-20210929-0.vhd";
+        pub const FOCAL_IMAGE_NAME_VHDX: &str =
+            "focal-server-cloudimg-arm64-custom-20210929-0.vhdx";
+        pub const GREP_SERIAL_IRQ_CMD: &str =
+            "grep -c 'GICv3.*uart-pl011' /proc/interrupts || true";
+    }
+
     #[cfg(target_arch = "aarch64")]
-    const FOCAL_IMAGE_NAME: &str = "focal-server-cloudimg-arm64-custom.raw";
-    #[cfg(target_arch = "aarch64")]
-    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-arm64-custom.qcow2";
-    #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_QCOW2: &str = "focal-server-cloudimg-amd64-custom-20210609-0.qcow2";
-    #[cfg(target_arch = "aarch64")]
-    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-arm64-custom.vhd";
-    #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_VHD: &str = "focal-server-cloudimg-amd64-custom-20210609-0.vhd";
-    #[cfg(target_arch = "aarch64")]
-    const FOCAL_IMAGE_NAME_VHDX: &str = "focal-server-cloudimg-arm64-custom.vhdx";
-    #[cfg(target_arch = "x86_64")]
-    const FOCAL_IMAGE_NAME_VHDX: &str = "focal-server-cloudimg-amd64-custom-20210609-0.vhdx";
-    #[cfg(target_arch = "x86_64")]
-    const WINDOWS_IMAGE_NAME: &str = "windows-server-2019.raw";
-    #[cfg(target_arch = "x86_64")]
-    const OVMF_NAME: &str = "OVMF-4b47d0c6c8.fd";
+    use aarch64::*;
 
     const DIRECT_KERNEL_BOOT_CMDLINE: &str =
         "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
-
-    #[cfg(target_arch = "x86_64")]
-    const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'IO-APIC.*ttyS0' /proc/interrupts || true";
-    #[cfg(target_arch = "aarch64")]
-    const GREP_SERIAL_IRQ_CMD: &str = "grep -c 'GICv3.*uart-pl011' /proc/interrupts || true";
 
     const PIPE_SIZE: i32 = 32 << 20;
 
@@ -104,18 +107,11 @@ mod tests {
         shared_dir: &str,
         cache: &str,
     ) -> (std::process::Child, String) {
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
-
-        let mut virtiofsd_path = workload_path;
-        virtiofsd_path.push("virtiofsd");
-        let virtiofsd_path = String::from(virtiofsd_path.to_str().unwrap());
-
         let virtiofsd_socket_path =
             String::from(tmp_dir.as_path().join("virtiofs.sock").to_str().unwrap());
 
         // Start the daemon
-        let child = Command::new(virtiofsd_path.as_str())
+        let child = Command::new("virtiofsd")
             .args(&[format!("--socket-path={}", virtiofsd_socket_path).as_str()])
             .args(&["-o", format!("source={}", shared_dir).as_str()])
             .args(&["-o", format!("cache={}", cache).as_str()])
@@ -127,10 +123,10 @@ mod tests {
         (child, virtiofsd_socket_path)
     }
 
-    fn prepare_virtofsd_rs_daemon(
+    fn prepare_virtiofsd_rs_daemon(
         tmp_dir: &TempDir,
         shared_dir: &str,
-        _cache: &str,
+        cache: &str,
     ) -> (std::process::Child, String) {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
@@ -146,6 +142,7 @@ mod tests {
         let child = Command::new(virtiofsd_path.as_str())
             .args(&["--shared-dir", shared_dir])
             .args(&["--socket", virtiofsd_socket_path.as_str()])
+            .args(&["--cache", cache])
             .spawn()
             .unwrap();
 
@@ -550,6 +547,7 @@ mod tests {
             )
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn ssh_command_l1(&self, command: &str) -> Result<String, SshCommandError> {
             ssh_command_ip(
                 command,
@@ -559,6 +557,7 @@ mod tests {
             )
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn ssh_command_l2_1(&self, command: &str) -> Result<String, SshCommandError> {
             ssh_command_ip(
                 command,
@@ -568,6 +567,7 @@ mod tests {
             )
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn ssh_command_l2_2(&self, command: &str) -> Result<String, SshCommandError> {
             ssh_command_ip(
                 command,
@@ -577,6 +577,7 @@ mod tests {
             )
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn ssh_command_l2_3(&self, command: &str) -> Result<String, SshCommandError> {
             ssh_command_ip(
                 command,
@@ -587,7 +588,7 @@ mod tests {
         }
 
         fn api_create_body(&self, cpu_count: u8) -> String {
-            #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+            #[cfg(all(target_arch = "x86_64", not(feature = "mshv")))]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
                      cpu_count,
@@ -597,18 +598,8 @@ mod tests {
                      self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
                      self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
             }
-            #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-            format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
-                     cpu_count,
-                     cpu_count,
-                     direct_kernel_boot_path().to_str().unwrap(),
-                     DIRECT_KERNEL_BOOT_CMDLINE,
-                     self.network.host_ip,
-                     self.network.guest_mac,
-                     self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
-                     self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
-            }
-            #[cfg(target_arch = "aarch64")]
+
+            #[cfg(any(target_arch = "aarch64", feature = "mshv"))]
             format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"kernel\":{{\"path\":\"{}\"}},\"cmdline\":{{\"args\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
                      cpu_count,
                      cpu_count,
@@ -628,6 +619,7 @@ mod tests {
                 .map_err(Error::Parsing)
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn get_initial_apicid(&self) -> Result<u32, Error> {
             self.ssh_command("grep \"initial apicid\" /proc/cpuinfo | grep -o \"[0-9]*\"")?
                 .trim()
@@ -642,6 +634,7 @@ mod tests {
                 .map_err(Error::Parsing)
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn get_total_memory_l2(&self) -> Result<u32, Error> {
             self.ssh_command_l2_1("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"")?
                 .trim()
@@ -723,6 +716,7 @@ mod tests {
             }
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn check_sgx_support(&self) -> Result<(), Error> {
             self.ssh_command(
                 "cpuid -l 0x7 -s 0 | tr -s [:space:] | grep -q 'SGX: \
@@ -863,6 +857,7 @@ mod tests {
             );
         }
 
+        #[cfg(target_arch = "x86_64")]
         fn check_nvidia_gpu(&self) {
             // Run CUDA sample to validate it can find the device
             let device_query_result = self
@@ -1613,7 +1608,15 @@ mod tests {
         prepare_daemon: &dyn Fn(&TempDir, &str, &str) -> (std::process::Child, String),
         hotplug: bool,
     ) {
-        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        #[cfg(target_arch = "aarch64")]
+        let focal_image = if hotplug {
+            FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string()
+        } else {
+            FOCAL_IMAGE_NAME.to_string()
+        };
+        #[cfg(target_arch = "x86_64")]
+        let focal_image = FOCAL_IMAGE_NAME.to_string();
+        let focal = UbuntuDiskConfig::new(focal_image);
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -1623,7 +1626,14 @@ mod tests {
         let mut shared_dir = workload_path;
         shared_dir.push("shared_dir");
 
+        #[cfg(target_arch = "x86_64")]
         let kernel_path = direct_kernel_boot_path();
+        #[cfg(target_arch = "aarch64")]
+        let kernel_path = if hotplug {
+            edk2_path()
+        } else {
+            direct_kernel_boot_path()
+        };
 
         let (dax_vmm_param, dax_mount_param) = if dax { ("on", "-o dax") } else { ("off", "") };
         let cache_size_vmm_param = if let Some(cache) = cache_size {
@@ -1865,7 +1875,14 @@ mod tests {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
+        #[cfg(target_arch = "x86_64")]
         let kernel_path = direct_kernel_boot_path();
+        #[cfg(target_arch = "aarch64")]
+        let kernel_path = if hotplug {
+            edk2_path()
+        } else {
+            direct_kernel_boot_path()
+        };
 
         let socket = temp_vsock_path(&guest.tmp_dir);
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -1908,16 +1925,10 @@ mod tests {
 
             // Validate vsock works as expected.
             guest.check_vsock(socket.as_str());
+            guest.reboot_linux(0, None);
+            // Validate vsock still works after a reboot.
+            guest.check_vsock(socket.as_str());
 
-            // AArch64 currently does not support reboot, and therefore we
-            // skip the reboot test here.
-            #[cfg(target_arch = "x86_64")]
-            {
-                guest.reboot_linux(0, None);
-
-                // Validate vsock still works after a reboot.
-                guest.check_vsock(socket.as_str());
-            }
             if hotplug {
                 assert!(remote_command(&api_socket, "remove-device", Some("test0")));
             }
@@ -2145,6 +2156,7 @@ mod tests {
 
     // VFIO test network setup.
     // We reserve a different IP class for it: 172.18.0.0/24.
+    #[cfg(target_arch = "x86_64")]
     fn setup_vfio_network_interfaces() {
         // 'vfio-br0'
         assert!(exec_host_command_status("sudo ip link add name vfio-br0 type bridge").success());
@@ -2169,6 +2181,7 @@ mod tests {
     }
 
     // Tear VFIO test network down
+    #[cfg(target_arch = "x86_64")]
     fn cleanup_vfio_network_interfaces() {
         assert!(exec_host_command_status("sudo ip link del vfio-br0").success());
         assert!(exec_host_command_status("sudo ip link del vfio-tap0").success());
@@ -2191,6 +2204,117 @@ mod tests {
             .parse::<u64>()
             .unwrap();
         total_mem - actual_mem
+    }
+
+    // This test validates that it can find the virtio-iommu device at first.
+    // It also verifies that both disks and the network card are attached to
+    // the virtual IOMMU by looking at /sys/kernel/iommu_groups directory.
+    // The last interesting part of this test is that it exercises the network
+    // interface attached to the virtual IOMMU since this is the one used to
+    // send all commands through SSH.
+    fn _test_virtio_iommu(acpi: bool) {
+        // Virtio-iommu support is ready in recent kernel (v5.14). But the kernel in
+        // Focal image is still old.
+        // So if ACPI is enabled on AArch64, we use a modified Focal image in which
+        // the kernel binary has been updated.
+        #[cfg(target_arch = "aarch64")]
+        let focal_image = FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string();
+        #[cfg(target_arch = "x86_64")]
+        let focal_image = FOCAL_IMAGE_NAME.to_string();
+        let focal = UbuntuDiskConfig::new(focal_image);
+        let guest = Guest::new(Box::new(focal));
+
+        #[cfg(target_arch = "x86_64")]
+        let kernel_path = direct_kernel_boot_path();
+        #[cfg(target_arch = "aarch64")]
+        let kernel_path = if acpi {
+            edk2_path()
+        } else {
+            direct_kernel_boot_path()
+        };
+
+        let mut child = GuestCommand::new(&guest)
+            .args(&["--cpus", "boot=1"])
+            .args(&["--memory", "size=512M"])
+            .args(&["--kernel", kernel_path.to_str().unwrap()])
+            .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(&[
+                "--disk",
+                format!(
+                    "path={},iommu=on",
+                    guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
+                )
+                .as_str(),
+                format!(
+                    "path={},iommu=on",
+                    guest.disk_config.disk(DiskType::CloudInit).unwrap()
+                )
+                .as_str(),
+            ])
+            .args(&["--net", guest.default_net_string_w_iommu().as_str()])
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            // Verify the virtio-iommu device is present.
+            assert!(guest
+                .does_device_vendor_pair_match("0x1057", "0x1af4")
+                .unwrap_or_default());
+
+            // On AArch64, if the guest system boots from FDT, the behavior of IOMMU is a bit
+            // different with ACPI.
+            // All devices on the PCI bus will be attached to the virtual IOMMU, except the
+            // virtio-iommu device itself. So these devices will all be added to IOMMU groups,
+            // and appear under folder '/sys/kernel/iommu_groups/'.
+            // The result is, in the case of FDT, IOMMU group '0' contains "0000:00:01.0"
+            // which is the console. The first disk "0000:00:02.0" is in group '1'.
+            // While on ACPI, console device is not attached to IOMMU. So the IOMMU group '0'
+            // contains "0000:00:02.0" which is the first disk.
+            //
+            // Verify the iommu group of the first disk.
+            let iommu_group = if acpi { 0 } else { 1 };
+            assert_eq!(
+                guest
+                    .ssh_command(
+                        format!("ls /sys/kernel/iommu_groups/{}/devices", iommu_group).as_str()
+                    )
+                    .unwrap()
+                    .trim(),
+                "0000:00:02.0"
+            );
+
+            // Verify the iommu group of the second disk.
+            let iommu_group = if acpi { 1 } else { 2 };
+            assert_eq!(
+                guest
+                    .ssh_command(
+                        format!("ls /sys/kernel/iommu_groups/{}/devices", iommu_group).as_str()
+                    )
+                    .unwrap()
+                    .trim(),
+                "0000:00:03.0"
+            );
+
+            // Verify the iommu group of the network card.
+            let iommu_group = if acpi { 2 } else { 3 };
+            assert_eq!(
+                guest
+                    .ssh_command(
+                        format!("ls /sys/kernel/iommu_groups/{}/devices", iommu_group).as_str()
+                    )
+                    .unwrap()
+                    .trim(),
+                "0000:00:04.0"
+            );
+        });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
     }
 
     mod parallel {
@@ -2954,7 +3078,7 @@ mod tests {
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, false)
+            test_virtio_fs(true, None, "never", &prepare_virtiofsd_rs_daemon, false)
         }
 
         #[test]
@@ -2963,41 +3087,37 @@ mod tests {
             test_virtio_fs(
                 true,
                 Some(0x4000_0000),
-                "none",
-                &prepare_virtofsd_rs_daemon,
+                "never",
+                &prepare_virtiofsd_rs_daemon,
                 false,
             )
         }
 
         #[test]
         fn test_virtio_fs_dax_off_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(false, None, "none", &prepare_virtofsd_rs_daemon, false)
+            test_virtio_fs(false, None, "never", &prepare_virtiofsd_rs_daemon, false)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on() {
             test_virtio_fs(true, None, "none", &prepare_virtiofsd, true)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_off() {
             test_virtio_fs(false, None, "none", &prepare_virtiofsd, true)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(true, None, "none", &prepare_virtofsd_rs_daemon, true)
+            test_virtio_fs(true, None, "never", &prepare_virtiofsd_rs_daemon, true)
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_fs_hotplug_dax_off_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(false, None, "none", &prepare_virtofsd_rs_daemon, true)
+            test_virtio_fs(false, None, "never", &prepare_virtiofsd_rs_daemon, true)
         }
 
         #[test]
@@ -3875,7 +3995,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_vsock_hotplug() {
             _test_virtio_vsock(true);
         }
@@ -4005,87 +4124,11 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
-        // This test validates that it can find the virtio-iommu device at first.
-        // It also verifies that both disks and the network card are attached to
-        // the virtual IOMMU by looking at /sys/kernel/iommu_groups directory.
-        // The last interesting part of this test is that it exercises the network
-        // interface attached to the virtual IOMMU since this is the one used to
-        // send all commands through SSH.
         fn test_virtio_iommu() {
-            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-            let guest = Guest::new(Box::new(focal));
-
-            let kernel_path = direct_kernel_boot_path();
-
-            let mut child = GuestCommand::new(&guest)
-                .args(&["--cpus", "boot=1"])
-                .args(&["--memory", "size=512M"])
-                .args(&["--kernel", kernel_path.to_str().unwrap()])
-                .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-                .args(&[
-                    "--disk",
-                    format!(
-                        "path={},iommu=on",
-                        guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
-                    )
-                    .as_str(),
-                    format!(
-                        "path={},iommu=on",
-                        guest.disk_config.disk(DiskType::CloudInit).unwrap()
-                    )
-                    .as_str(),
-                ])
-                .args(&["--seccomp", "false"])
-                .args(&["--net", guest.default_net_string_w_iommu().as_str()])
-                .capture_output()
-                .spawn()
-                .unwrap();
-
-            let r = std::panic::catch_unwind(|| {
-                guest.wait_vm_boot(None).unwrap();
-
-                // Verify the virtio-iommu device is present.
-                assert!(guest
-                    .does_device_vendor_pair_match("0x1057", "0x1af4")
-                    .unwrap_or_default());
-
-                // Verify the first disk is located under IOMMU group 0.
-                assert_eq!(
-                    guest
-                        .ssh_command("ls /sys/kernel/iommu_groups/0/devices")
-                        .unwrap()
-                        .trim(),
-                    "0000:00:02.0"
-                );
-
-                // Verify the second disk is located under IOMMU group 1.
-                assert_eq!(
-                    guest
-                        .ssh_command("ls /sys/kernel/iommu_groups/1/devices")
-                        .unwrap()
-                        .trim(),
-                    "0000:00:03.0"
-                );
-
-                // Verify the network card is located under IOMMU group 2.
-                assert_eq!(
-                    guest
-                        .ssh_command("ls /sys/kernel/iommu_groups/2/devices")
-                        .unwrap()
-                        .trim(),
-                    "0000:00:04.0"
-                );
-            });
-
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
-
-            handle_child_output(r, &output);
+            _test_virtio_iommu(cfg!(target_arch = "x86_64"))
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         // We cannot force the software running in the guest to reprogram the BAR
         // with some different addresses, but we have a reliable way of testing it
         // with a standard Linux kernel.
@@ -4098,10 +4141,16 @@ mod tests {
         fn test_pci_bar_reprogramming() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
+
+            #[cfg(target_arch = "x86_64")]
+            let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
+
             let mut child = GuestCommand::new(&guest)
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
-                .args(&["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .args(&["--seccomp", "false"])
                 .default_disks()
@@ -4269,12 +4318,18 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_memory_hotplug() {
-            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            #[cfg(target_arch = "aarch64")]
+            let focal_image = FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string();
+            #[cfg(target_arch = "x86_64")]
+            let focal_image = FOCAL_IMAGE_NAME.to_string();
+            let focal = UbuntuDiskConfig::new(focal_image);
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
 
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
 
             let mut child = GuestCommand::new(&guest)
@@ -4526,12 +4581,14 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_disk_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -4682,7 +4739,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_virtio_balloon() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -4742,12 +4798,18 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_pmem_hotplug() {
-            let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+            #[cfg(target_arch = "aarch64")]
+            let focal_image = FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string();
+            #[cfg(target_arch = "x86_64")]
+            let focal_image = FOCAL_IMAGE_NAME.to_string();
+            let focal = UbuntuDiskConfig::new(focal_image);
             let guest = Guest::new(Box::new(focal));
 
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -4851,12 +4913,14 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_arch = "x86_64")]
         fn test_net_hotplug() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -4882,8 +4946,13 @@ mod tests {
                     Some(guest.default_net_string().as_str()),
                 );
                 assert!(cmd_success);
+
+                #[cfg(target_arch = "x86_64")]
                 assert!(String::from_utf8_lossy(&cmd_output)
                     .contains("{\"id\":\"_net2\",\"bdf\":\"0000:00:05.0\"}"));
+                #[cfg(target_arch = "aarch64")]
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"_net0\",\"bdf\":\"0000:00:05.0\"}"));
 
                 thread::sleep(std::time::Duration::new(5, 0));
 
@@ -4899,7 +4968,14 @@ mod tests {
                 );
 
                 // Remove network
-                assert!(remote_command(&api_socket, "remove-device", Some("_net2")));
+                assert!(remote_command(
+                    &api_socket,
+                    "remove-device",
+                    #[cfg(target_arch = "x86_64")]
+                    Some("_net2"),
+                    #[cfg(target_arch = "aarch64")]
+                    Some("_net0")
+                ));
                 thread::sleep(std::time::Duration::new(5, 0));
 
                 // Add network again
@@ -4909,8 +4985,12 @@ mod tests {
                     Some(guest.default_net_string().as_str()),
                 );
                 assert!(cmd_success);
+                #[cfg(target_arch = "x86_64")]
                 assert!(String::from_utf8_lossy(&cmd_output)
                     .contains("{\"id\":\"_net3\",\"bdf\":\"0000:00:05.0\"}"));
+                #[cfg(target_arch = "aarch64")]
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"_net1\",\"bdf\":\"0000:00:05.0\"}"));
 
                 thread::sleep(std::time::Duration::new(5, 0));
 
@@ -4953,7 +5033,10 @@ mod tests {
             let mut workload_path = dirs::home_dir().unwrap();
             workload_path.push("workloads");
 
+            #[cfg(target_arch = "x86_64")]
             let mut kernels = vec![direct_kernel_boot_path()];
+            #[cfg(target_arch = "aarch64")]
+            let kernels = vec![direct_kernel_boot_path()];
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -4996,6 +5079,7 @@ mod tests {
         // through each ssh command. There's no need to perform a dedicated test to
         // verify the migration went well for virtio-net.
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_snapshot_restore() {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
@@ -5019,7 +5103,11 @@ mod tests {
             let mut child = GuestCommand::new(&guest)
                 .args(&["--api-socket", &api_socket])
                 .args(&["--cpus", "boot=4"])
-                .args(&["--memory", "size=4G"])
+                .args(&[
+                    "--memory",
+                    "size=4G,hotplug_method=virtio-mem,hotplug_size=32G",
+                ])
+                .args(&["--balloon", "size=0"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&[
                     "--disk",
@@ -5048,6 +5136,16 @@ mod tests {
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
                 // Check the guest RAM
                 assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                // Increase guest RAM with virtio-mem
+                resize_command(&api_socket, None, Some(6 << 30), None);
+                thread::sleep(std::time::Duration::new(5, 0));
+                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                // Use balloon to remove RAM from the VM
+                resize_command(&api_socket, None, None, Some(1 << 30));
+                thread::sleep(std::time::Duration::new(5, 0));
+                let total_memory = guest.get_total_memory().unwrap_or_default();
+                assert!(total_memory > 4_800_000);
+                assert!(total_memory < 5_760_000);
                 // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
                 guest.check_devices_common(Some(&socket), Some(&console_text));
 
@@ -5124,7 +5222,20 @@ mod tests {
 
                 // Perform same checks to validate VM has been properly restored
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
-                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                let total_memory = guest.get_total_memory().unwrap_or_default();
+                assert!(total_memory > 4_800_000);
+                assert!(total_memory < 5_760_000);
+                // Deflate balloon to restore entire RAM to the VM
+                resize_command(&api_socket, None, None, Some(0));
+                thread::sleep(std::time::Duration::new(5, 0));
+                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                // Decrease guest RAM with virtio-mem
+                resize_command(&api_socket, None, Some(5 << 30), None);
+                thread::sleep(std::time::Duration::new(5, 0));
+                let total_memory = guest.get_total_memory().unwrap_or_default();
+                assert!(total_memory > 4_800_000);
+                assert!(total_memory < 5_760_000);
+
                 guest.check_devices_common(Some(&socket), Some(&console_text));
             });
             // Shutdown the target VM and check console output
@@ -5377,7 +5488,12 @@ mod tests {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
             let api_socket = temp_api_path(&guest.tmp_dir);
+
+            #[cfg(target_arch = "x86_64")]
             let kernel_path = direct_kernel_boot_path();
+            #[cfg(target_arch = "aarch64")]
+            let kernel_path = edk2_path();
+
             let phy_net = "eth0";
 
             // Create a macvtap interface for the guest VM to use
@@ -5454,8 +5570,12 @@ mod tests {
                 let (cmd_success, cmd_output) =
                     remote_command_w_output(&api_socket, "add-net", Some(&net_params));
                 assert!(cmd_success);
+                #[cfg(target_arch = "x86_64")]
                 assert!(String::from_utf8_lossy(&cmd_output)
                     .contains("{\"id\":\"_net2\",\"bdf\":\"0000:00:05.0\"}"));
+                #[cfg(target_arch = "aarch64")]
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .contains("{\"id\":\"_net0\",\"bdf\":\"0000:00:05.0\"}"));
             }
 
             // The functional connectivity provided by the virtio-net device
@@ -6836,11 +6956,11 @@ mod tests {
             let memory_param: &[&str] = if numa {
                 &[
                     "--memory",
-                    "size=0",
+                    "size=0,hotplug_method=virtio-mem",
                     "--memory-zone",
-                    "id=mem0,size=1G",
-                    "id=mem1,size=1G",
-                    "id=mem2,size=2G",
+                    "id=mem0,size=1G,hotplug_size=32G",
+                    "id=mem1,size=1G,hotplug_size=32G",
+                    "id=mem2,size=1G,hotplug_size=32G",
                     "--numa",
                     "guest_numa_id=0,cpus=0-2:9,distances=1@15:2@20,memory_zones=mem0",
                     "guest_numa_id=1,cpus=3-4:6-8,distances=0@20:2@25,memory_zones=mem1",
@@ -6880,9 +7000,40 @@ mod tests {
                 // Check the number of vCPUs
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 6);
                 // Check the guest RAM
-                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 2_880_000);
                 // Check the guest virtio-devices, e.g. block, rng, console, and net
                 guest.check_devices_common(None, Some(&console_text));
+
+                // Check the NUMA parameters are applied correctly and resize
+                // each zone to test the case where we migrate a VM with the
+                // virtio-mem regions being used.
+                if numa {
+                    guest.check_numa_common(
+                        Some(&[960_000, 960_000, 960_000]),
+                        Some(&[vec![0, 1, 2], vec![3, 4], vec![5]]),
+                        Some(&["10 15 20", "20 10 25", "25 30 10"]),
+                    );
+
+                    // AArch64 currently does not support hotplug, and therefore we only
+                    // test hotplug-related function on x86_64 here.
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        guest.enable_memory_hotplug();
+
+                        // Resize every memory zone and check each associated NUMA node
+                        // has been assigned the right amount of memory.
+                        resize_zone_command(&src_api_socket, "mem0", "2G");
+                        resize_zone_command(&src_api_socket, "mem1", "2G");
+                        resize_zone_command(&src_api_socket, "mem2", "2G");
+                        thread::sleep(std::time::Duration::new(5, 0));
+
+                        guest.check_numa_common(
+                            Some(&[1_920_000, 1_920_000, 1_920_000]),
+                            None,
+                            None,
+                        );
+                    }
+                }
 
                 // x86_64: Following what's done in the `test_snapshot_restore`, we need
                 // to make sure that removing and adding back the virtio-net device does
@@ -7023,30 +7174,51 @@ mod tests {
             let r = std::panic::catch_unwind(|| {
                 // Perform same checks to validate VM has been properly migrated
                 assert_eq!(guest.get_cpu_count().unwrap_or_default(), 6);
-                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                if numa {
+                    #[cfg(target_arch = "x86_64")]
+                    assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                    #[cfg(target_arch = "aarch64")]
+                    assert!(guest.get_total_memory().unwrap_or_default() > 2_880_000);
+                } else {
+                    assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                }
                 guest.check_devices_common(None, Some(&console_text));
 
                 // Perform NUMA related checks
                 if numa {
-                    guest.check_numa_common(
-                        Some(&[960_000, 960_000, 1_920_000]),
-                        Some(&[vec![0, 1, 2], vec![3, 4], vec![5]]),
-                        Some(&["10 15 20", "20 10 25", "25 30 10"]),
-                    );
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        guest.check_numa_common(
+                            Some(&[960_000, 960_000, 960_000]),
+                            Some(&[vec![0, 1, 2], vec![3, 4], vec![5]]),
+                            Some(&["10 15 20", "20 10 25", "25 30 10"]),
+                        );
+                    }
 
                     // AArch64 currently does not support hotplug, and therefore we only
                     // test hotplug-related function on x86_64 here.
                     #[cfg(target_arch = "x86_64")]
                     {
+                        guest.check_numa_common(
+                            Some(&[1_920_000, 1_920_000, 1_920_000]),
+                            Some(&[vec![0, 1, 2], vec![3, 4], vec![5]]),
+                            Some(&["10 15 20", "20 10 25", "25 30 10"]),
+                        );
+
                         guest.enable_memory_hotplug();
 
+                        // Resize every memory zone and check each associated NUMA node
+                        // has been assigned the right amount of memory.
+                        resize_zone_command(&dest_api_socket, "mem0", "4G");
+                        resize_zone_command(&dest_api_socket, "mem1", "4G");
+                        resize_zone_command(&dest_api_socket, "mem2", "4G");
                         // Resize to the maximum amount of CPUs and check each NUMA
                         // node has been assigned the right CPUs set.
                         resize_command(&dest_api_socket, Some(12), None, None);
                         thread::sleep(std::time::Duration::new(5, 0));
 
                         guest.check_numa_common(
-                            None,
+                            Some(&[3_840_000, 3_840_000, 3_840_000]),
                             Some(&[vec![0, 1, 2, 9], vec![3, 4, 6, 7, 8], vec![5, 10, 11]]),
                             None,
                         );
@@ -7072,10 +7244,12 @@ mod tests {
         }
 
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_live_migration_numa() {
             _test_live_migration(true)
         }
         #[test]
+        #[cfg(not(feature = "mshv"))]
         fn test_live_migration_ovs_dpdk() {
             let ovs_focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let ovs_guest = Guest::new(Box::new(ovs_focal));
@@ -7335,6 +7509,11 @@ mod tests {
         #[test]
         fn test_power_button_acpi() {
             _test_power_button(true);
+        }
+
+        #[test]
+        fn test_virtio_iommu() {
+            _test_virtio_iommu(true)
         }
     }
 }

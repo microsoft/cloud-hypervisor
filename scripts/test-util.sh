@@ -34,7 +34,6 @@ process_common_args() {
 	shift
     done
     if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
-        echo "Hypervisor value must be kvm or mshv"
-        exit 1
+        die "Hypervisor value must be kvm or mshv"
     fi
 }

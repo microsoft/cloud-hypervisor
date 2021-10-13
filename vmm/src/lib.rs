@@ -28,6 +28,7 @@ use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
+use memory_manager::MemoryManagerSnapshotData;
 use seccompiler::{apply_filter, SeccompAction};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fs::File;
@@ -46,7 +47,10 @@ use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
+#[cfg(feature = "acpi")]
+mod acpi;
 pub mod api;
+mod clone3;
 pub mod config;
 pub mod cpu;
 pub mod device_manager;
@@ -54,12 +58,12 @@ pub mod device_tree;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
+mod pci_segment;
 pub mod seccomp_filters;
-pub mod vm;
-
-#[cfg(feature = "acpi")]
-mod acpi;
 mod serial_buffer;
+mod serial_manager;
+mod sigwinch_listener;
+pub mod vm;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
@@ -147,10 +151,8 @@ pub type Result<T> = result::Result<T, Error>;
 pub enum EpollDispatch {
     Exit = 0,
     Reset = 1,
-    Stdin = 2,
-    Api = 3,
-    ActivateVirtioDevices = 4,
-    SerialPty = 5,
+    Api = 2,
+    ActivateVirtioDevices = 3,
     Unknown,
 }
 
@@ -160,10 +162,8 @@ impl From<u64> for EpollDispatch {
         match v {
             0 => Exit,
             1 => Reset,
-            2 => Stdin,
-            3 => Api,
-            4 => ActivateVirtioDevices,
-            5 => SerialPty,
+            2 => Api,
+            3 => ActivateVirtioDevices,
             _ => Unknown,
         }
     }
@@ -180,18 +180,6 @@ impl EpollContext {
         let epoll_file = unsafe { File::from_raw_fd(epoll_fd) };
 
         Ok(EpollContext { epoll_file })
-    }
-
-    pub fn add_stdin(&mut self) -> result::Result<(), io::Error> {
-        let dispatch_index = EpollDispatch::Stdin as u64;
-        epoll::ctl(
-            self.epoll_file.as_raw_fd(),
-            epoll::ControlOptions::EPOLL_CTL_ADD,
-            libc::STDIN_FILENO,
-            epoll::Event::new(epoll::Events::EPOLLIN, dispatch_index),
-        )?;
-
-        Ok(())
     }
 
     fn add_event<T>(&mut self, fd: &T, token: EpollDispatch) -> result::Result<(), io::Error>
@@ -312,6 +300,7 @@ struct VmMigrationConfig {
     vm_config: Arc<Mutex<VmConfig>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     common_cpuid: hypervisor::CpuId,
+    memory_manager_data: MemoryManagerSnapshotData,
 }
 
 pub struct Vmm {
@@ -405,19 +394,8 @@ impl Vmm {
                     activate_evt,
                     None,
                     None,
+                    None,
                 )?;
-                if let Some(serial_pty) = vm.serial_pty() {
-                    self.epoll
-                        .add_event(&serial_pty.main, EpollDispatch::SerialPty)
-                        .map_err(VmError::EventfdError)?;
-                };
-                if matches!(
-                    vm_config.lock().unwrap().serial.mode,
-                    config::ConsoleOutputMode::Tty
-                ) && unsafe { libc::isatty(libc::STDIN_FILENO as i32) } != 0
-                {
-                    self.epoll.add_stdin().map_err(VmError::EventfdError)?;
-                }
 
                 self.vm = Some(vm);
             }
@@ -532,6 +510,10 @@ impl Vmm {
             let config = vm.get_config();
             let serial_pty = vm.serial_pty();
             let console_pty = vm.console_pty();
+            let console_resize_pipe = vm
+                .console_resize_pipe()
+                .as_ref()
+                .map(|pipe| pipe.try_clone().unwrap());
             self.vm_shutdown()?;
 
             let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
@@ -556,6 +538,7 @@ impl Vmm {
                 activate_evt,
                 serial_pty,
                 console_pty,
+                console_resize_pipe,
             )?);
         }
 
@@ -783,7 +766,7 @@ impl Vmm {
     where
         T: Read + Write,
     {
-        // Read in config data
+        // Read in config data along with memory manager data
         let mut data = Vec::with_capacity(req.length() as usize);
         unsafe {
             data.set_len(req.length() as usize);
@@ -821,6 +804,7 @@ impl Vmm {
             &self.seccomp_action,
             self.hypervisor.clone(),
             activate_evt,
+            &vm_migration_config.memory_manager_data,
         )
         .map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {:?}", e))
@@ -1057,11 +1041,7 @@ impl Vmm {
         let common_cpuid = {
             #[cfg(feature = "tdx")]
             let tdx_enabled = vm_config.lock().unwrap().tdx.is_some();
-            let phys_bits = vm::physical_bits(
-                vm_config.lock().unwrap().cpus.max_phys_bits,
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
-            );
+            let phys_bits = vm::physical_bits(vm_config.lock().unwrap().cpus.max_phys_bits);
             arch::generate_common_cpuid(
                 hypervisor,
                 None,
@@ -1080,8 +1060,8 @@ impl Vmm {
             vm_config,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             common_cpuid,
+            memory_manager_data: vm.memory_manager_data(),
         };
-
         let config_data = serde_json::to_vec(&vm_migration_config).unwrap();
         Request::config(config_data.len() as u64).write_to(&mut socket)?;
         socket
@@ -1229,11 +1209,7 @@ impl Vmm {
 
             #[cfg(feature = "tdx")]
             let tdx_enabled = vm_config.tdx.is_some();
-            let phys_bits = vm::physical_bits(
-                vm_config.cpus.max_phys_bits,
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
-            );
+            let phys_bits = vm::physical_bits(vm_config.cpus.max_phys_bits);
             arch::generate_common_cpuid(
                 self.hypervisor.clone(),
                 None,
@@ -1300,11 +1276,6 @@ impl Vmm {
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
-                    EpollDispatch::Stdin => {
-                        if let Some(ref vm) = self.vm {
-                            vm.handle_stdin().map_err(Error::Stdin)?;
-                        }
-                    }
                     EpollDispatch::ActivateVirtioDevices => {
                         if let Some(ref vm) = self.vm {
                             let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
@@ -1314,11 +1285,6 @@ impl Vmm {
                             );
                             vm.activate_virtio_devices()
                                 .map_err(Error::ActivateVirtioDevices)?;
-                        }
-                    }
-                    event @ EpollDispatch::SerialPty => {
-                        if let Some(ref vm) = self.vm {
-                            vm.handle_pty(event).map_err(Error::Pty)?;
                         }
                     }
                     EpollDispatch::Api => {

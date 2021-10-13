@@ -33,12 +33,17 @@ use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic,
     GuestMemoryError, GuestMemoryRegion,
 };
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshottable, Transportable};
+use vm_migration::protocol::MemoryRangeTable;
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 128;
@@ -159,8 +164,8 @@ struct VirtioMemResp {
 unsafe impl ByteValued for VirtioMemResp {}
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
-struct VirtioMemConfig {
+#[derive(Copy, Clone, Debug, Default, Versionize)]
+pub struct VirtioMemConfig {
     // Block size and alignment. Cannot change.
     block_size: u64,
     // Valid with VIRTIO_MEM_F_ACPI_PXM. Cannot change.
@@ -320,14 +325,14 @@ impl Request {
 }
 
 pub struct ResizeSender {
-    size: Arc<AtomicU64>,
+    hotplugged_size: Arc<AtomicU64>,
     tx: mpsc::Sender<Result<(), Error>>,
     evt: EventFd,
 }
 
 impl ResizeSender {
     fn size(&self) -> u64 {
-        self.size.load(Ordering::Acquire)
+        self.hotplugged_size.load(Ordering::Acquire)
     }
 
     fn send(&self, r: Result<(), Error>) -> Result<(), mpsc::SendError<Result<(), Error>>> {
@@ -338,7 +343,7 @@ impl ResizeSender {
 impl Clone for ResizeSender {
     fn clone(&self) -> Self {
         ResizeSender {
-            size: self.size.clone(),
+            hotplugged_size: self.hotplugged_size.clone(),
             tx: self.tx.clone(),
             evt: self
                 .evt
@@ -349,18 +354,18 @@ impl Clone for ResizeSender {
 }
 
 pub struct Resize {
-    size: Arc<AtomicU64>,
+    hotplugged_size: Arc<AtomicU64>,
     tx: mpsc::Sender<Result<(), Error>>,
     rx: mpsc::Receiver<Result<(), Error>>,
     evt: EventFd,
 }
 
 impl Resize {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(hotplugged_size: u64) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
 
         Ok(Resize {
-            size: Arc::new(AtomicU64::new(0)),
+            hotplugged_size: Arc::new(AtomicU64::new(hotplugged_size)),
             tx,
             rx,
             evt: EventFd::new(EFD_NONBLOCK)?,
@@ -369,25 +374,34 @@ impl Resize {
 
     pub fn new_resize_sender(&self) -> Result<ResizeSender, Error> {
         Ok(ResizeSender {
-            size: self.size.clone(),
+            hotplugged_size: self.hotplugged_size.clone(),
             tx: self.tx.clone(),
             evt: self.evt.try_clone().map_err(Error::EventFdTryCloneFail)?,
         })
     }
 
-    pub fn work(&self, size: u64) -> Result<(), Error> {
-        self.size.store(size, Ordering::Release);
+    pub fn work(&self, desired_size: u64) -> Result<(), Error> {
+        self.hotplugged_size.store(desired_size, Ordering::Release);
         self.evt.write(1).map_err(Error::EventFdWriteFail)?;
         self.rx.recv().map_err(Error::MpscRecvFail)?
     }
 }
 
-struct BlocksState(Vec<bool>);
+#[derive(Clone, Versionize)]
+pub struct BlocksState {
+    bitmap: Vec<bool>,
+}
 
 impl BlocksState {
+    pub fn new(region_size: u64) -> Self {
+        BlocksState {
+            bitmap: vec![false; (region_size / VIRTIO_MEM_DEFAULT_BLOCK_SIZE) as usize],
+        }
+    }
+
     fn is_range_state(&self, first_block_index: usize, nb_blocks: u16, plug: bool) -> bool {
         for state in self
-            .0
+            .bitmap
             .iter()
             .skip(first_block_index)
             .take(nb_blocks as usize)
@@ -401,7 +415,7 @@ impl BlocksState {
 
     fn set_range(&mut self, first_block_index: usize, nb_blocks: u16, plug: bool) {
         for state in self
-            .0
+            .bitmap
             .iter_mut()
             .skip(first_block_index)
             .take(nb_blocks as usize)
@@ -411,7 +425,27 @@ impl BlocksState {
     }
 
     fn inner(&self) -> &Vec<bool> {
-        &self.0
+        &self.bitmap
+    }
+
+    pub fn memory_ranges(&self, start_addr: u64, plugged: bool) -> MemoryRangeTable {
+        let mut bitmap: Vec<u64> = Vec::new();
+        let mut i = 0;
+        for (j, bit) in self.bitmap.iter().enumerate() {
+            if j % 64 == 0 {
+                bitmap.push(0);
+
+                if j != 0 {
+                    i += 1;
+                }
+            }
+
+            if *bit == plugged {
+                bitmap[i] |= 1 << (j % 64);
+            }
+        }
+
+        MemoryRangeTable::from_bitmap(bitmap, start_addr, VIRTIO_MEM_DEFAULT_BLOCK_SIZE)
     }
 }
 
@@ -428,7 +462,7 @@ struct MemEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     hugepages: bool,
-    dma_mapping_handlers: Arc<Mutex<BTreeMap<u32, Arc<dyn ExternalDmaMapping>>>>,
+    dma_mapping_handlers: Arc<Mutex<BTreeMap<VirtioMemMappingSource, Arc<dyn ExternalDmaMapping>>>>,
 }
 
 impl MemEpollHandler {
@@ -734,7 +768,22 @@ impl EpollHelperHandler for MemEpollHandler {
     }
 }
 
-// Virtio device for exposing entropy to the guest OS through virtio.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum VirtioMemMappingSource {
+    Container,
+    Device(u32),
+}
+
+#[derive(Versionize)]
+pub struct MemState {
+    pub avail_features: u64,
+    pub acked_features: u64,
+    pub config: VirtioMemConfig,
+    pub blocks_state: BlocksState,
+}
+
+impl VersionMapped for MemState {}
+
 pub struct Mem {
     common: VirtioCommon,
     id: String,
@@ -744,7 +793,7 @@ pub struct Mem {
     config: Arc<Mutex<VirtioMemConfig>>,
     seccomp_action: SeccompAction,
     hugepages: bool,
-    dma_mapping_handlers: Arc<Mutex<BTreeMap<u32, Arc<dyn ExternalDmaMapping>>>>,
+    dma_mapping_handlers: Arc<Mutex<BTreeMap<VirtioMemMappingSource, Arc<dyn ExternalDmaMapping>>>>,
     blocks_state: Arc<Mutex<BlocksState>>,
     exit_evt: EventFd,
 }
@@ -761,6 +810,7 @@ impl Mem {
         initial_size: u64,
         hugepages: bool,
         exit_evt: EventFd,
+        blocks_state: Arc<Mutex<BlocksState>>,
     ) -> io::Result<Mem> {
         let region_len = region.len();
 
@@ -833,18 +883,14 @@ impl Mem {
             seccomp_action,
             hugepages,
             dma_mapping_handlers: Arc::new(Mutex::new(BTreeMap::new())),
-            blocks_state: Arc::new(Mutex::new(BlocksState(vec![
-                false;
-                (config.region_size / config.block_size)
-                    as usize
-            ]))),
+            blocks_state,
             exit_evt,
         })
     }
 
     pub fn add_dma_mapping_handler(
         &mut self,
-        device_id: u32,
+        source: VirtioMemMappingSource,
         handler: Arc<dyn ExternalDmaMapping>,
     ) -> result::Result<(), Error> {
         let config = self.config.lock().unwrap();
@@ -863,17 +909,20 @@ impl Mem {
         self.dma_mapping_handlers
             .lock()
             .unwrap()
-            .insert(device_id, handler);
+            .insert(source, handler);
 
         Ok(())
     }
 
-    pub fn remove_dma_mapping_handler(&mut self, device_id: u32) -> result::Result<(), Error> {
+    pub fn remove_dma_mapping_handler(
+        &mut self,
+        source: VirtioMemMappingSource,
+    ) -> result::Result<(), Error> {
         let handler = self
             .dma_mapping_handlers
             .lock()
             .unwrap()
-            .remove(&device_id)
+            .remove(&source)
             .ok_or(Error::InvalidDmaMappingHandler)?;
 
         let config = self.config.lock().unwrap();
@@ -890,6 +939,22 @@ impl Mem {
         }
 
         Ok(())
+    }
+
+    fn state(&self) -> MemState {
+        MemState {
+            avail_features: self.common.avail_features,
+            acked_features: self.common.acked_features,
+            config: *(self.config.lock().unwrap()),
+            blocks_state: self.blocks_state.lock().unwrap().clone(),
+        }
+    }
+
+    fn set_state(&mut self, state: &MemState) {
+        self.common.avail_features = state.avail_features;
+        self.common.acked_features = state.acked_features;
+        *(self.config.lock().unwrap()) = state.config;
+        *(self.blocks_state.lock().unwrap()) = state.blocks_state.clone();
     }
 }
 
@@ -932,7 +997,6 @@ impl VirtioDevice for Mem {
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
-        let config = self.config.lock().unwrap();
         let mut handler = MemEpollHandler {
             host_addr: self.host_addr,
             host_fd: self.host_fd,
@@ -949,12 +1013,20 @@ impl VirtioDevice for Mem {
             dma_mapping_handlers: Arc::clone(&self.dma_mapping_handlers),
         };
 
-        handler
-            .discard_memory_range(0, config.region_size)
-            .map_err(|e| {
-                error!("failed discarding memory range: {:?}", e);
-                ActivateError::BadActivate
-            })?;
+        let unplugged_memory_ranges = self.blocks_state.lock().unwrap().memory_ranges(0, false);
+        for range in unplugged_memory_ranges.regions() {
+            handler
+                .discard_memory_range(range.gpa, range.length)
+                .map_err(|e| {
+                    error!(
+                        "failed discarding memory range [0x{:x}-0x{:x}]: {:?}",
+                        range.gpa,
+                        range.gpa + range.length - 1,
+                        e
+                    );
+                    ActivateError::BadActivate
+                })?;
+        }
 
         let paused = self.common.paused.clone();
         let paused_sync = self.common.paused_sync.clone();
@@ -998,6 +1070,15 @@ impl Pausable for Mem {
 impl Snapshottable for Mem {
     fn id(&self) -> String {
         self.id.clone()
+    }
+
+    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
+        Snapshot::new_from_versioned_state(&self.id(), &self.state())
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
+        self.set_state(&snapshot.to_versioned_state(&self.id)?);
+        Ok(())
     }
 }
 impl Transportable for Mem {}

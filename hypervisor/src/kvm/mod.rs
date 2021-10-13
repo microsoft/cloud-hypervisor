@@ -1153,10 +1153,11 @@ impl cpu::Vcpu for KvmVcpu {
         // https://elixir.free-electrons.com/linux/v4.9.62/source/arch/arm64/include/uapi/asm/kvm.h#L53
         let mut off = offset__of!(kvm_regs, fp_regs) + offset__of!(user_fpsimd_state, vregs);
         for i in 0..32 {
-            state.fp_regs.vregs[i][0] = self
+            state.fp_regs.vregs[i] = self
                 .fd
                 .get_one_reg(arm64_core_reg_id!(KVM_REG_SIZE_U128, off))
-                .map_err(|e| cpu::HypervisorCpuError::GetCoreRegister(e.into()))?;
+                .map_err(|e| cpu::HypervisorCpuError::GetCoreRegister(e.into()))?
+                .into();
             off += mem::size_of::<u128>();
         }
 
@@ -1233,7 +1234,7 @@ impl cpu::Vcpu for KvmVcpu {
             self.fd
                 .set_one_reg(
                     arm64_core_reg_id!(KVM_REG_SIZE_U128, off),
-                    state.fp_regs.vregs[i][0],
+                    state.fp_regs.vregs[i] as u64,
                 )
                 .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
             off += mem::size_of::<u128>();
@@ -1373,8 +1374,8 @@ impl cpu::Vcpu for KvmVcpu {
                 0x40000020, 0x40000021, 0x40000080, 0x40000081, 0x40000082, 0x40000083, 0x40000084,
                 0x40000090, 0x40000091, 0x40000092, 0x40000093, 0x40000094, 0x40000095, 0x40000096,
                 0x40000097, 0x40000098, 0x40000099, 0x4000009a, 0x4000009b, 0x4000009c, 0x4000009d,
-                0x4000009f, 0x400000b0, 0x400000b1, 0x400000b2, 0x400000b3, 0x400000b4, 0x400000b5,
-                0x400000b6, 0x400000b7,
+                0x4000009e, 0x4000009f, 0x400000b0, 0x400000b1, 0x400000b2, 0x400000b3, 0x400000b4,
+                0x400000b5, 0x400000b6, 0x400000b7,
             ];
             for index in hyperv_synic_msrs {
                 let msr = kvm_msr_entry {

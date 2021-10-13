@@ -14,25 +14,27 @@
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::{
-    ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
-    UserDeviceConfig, ValidationError, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig, UserDeviceConfig,
+    ValidationError, VmConfig, VsockConfig,
 };
-use crate::device_manager::{
-    self, get_win_size, Console, DeviceManager, DeviceManagerError, PtyPair,
-};
+use crate::cpu;
+use crate::device_manager::{self, Console, DeviceManager, DeviceManagerError, PtyPair};
 use crate::device_tree::DeviceTree;
-use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
+use crate::memory_manager::{
+    Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
+};
 use crate::migration::{get_vm_snapshot, url_to_path, VM_SNAPSHOT_FILE};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::GuestMemoryMmap;
-use crate::{cpu, EpollDispatch};
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
+#[cfg(all(feature = "tdx", feature = "acpi"))]
+use arch::x86_64::tdx::TdVmmDataRegionType;
 #[cfg(feature = "tdx")]
-use arch::x86_64::tdx::TdvfSection;
+use arch::x86_64::tdx::{TdVmmDataRegion, TdvfSection};
 use arch::EntryPoint;
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use arch::{NumaNode, NumaNodes};
@@ -55,7 +57,6 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ffi::CString;
 #[cfg(target_arch = "x86_64")]
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -67,14 +68,16 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, str, thread};
 use vm_device::Bus;
-use vm_memory::{
-    Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
-    GuestMemoryRegion,
-};
+#[cfg(target_arch = "x86_64")]
+use vm_device::BusDevice;
+#[cfg(any(target_arch = "aarch64", feature = "tdx"))]
+use vm_memory::Address;
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+#[cfg(feature = "tdx")]
+use vm_memory::{GuestMemory, GuestMemoryRegion};
 use vm_migration::{
-    protocol::{MemoryRange, MemoryRangeTable},
-    Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
-    Transportable,
+    protocol::MemoryRangeTable, Migratable, MigratableError, Pausable, Snapshot,
+    SnapshotDataSection, Snapshottable, Transportable,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
@@ -111,9 +114,6 @@ pub enum Error {
 
     /// Cannot modify the command line
     CmdLineInsertStr(linux_loader::cmdline::Error),
-
-    /// Cannot convert command line into CString
-    CmdLineCString(std::ffi::NulError),
 
     /// Cannot configure system
     ConfigureSystem(arch::Error),
@@ -362,6 +362,8 @@ struct VmOps {
     mmio_bus: Arc<Bus>,
     #[cfg(target_arch = "x86_64")]
     timestamp: std::time::Instant,
+    #[cfg(target_arch = "x86_64")]
+    pci_config_io: Arc<Mutex<dyn BusDevice>>,
 }
 
 impl VmOps {
@@ -419,6 +421,17 @@ impl VmmOps for VmOps {
 
     #[cfg(target_arch = "x86_64")]
     fn pio_read(&self, port: u64, data: &mut [u8]) -> hypervisor::vm::Result<()> {
+        use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
+
+        if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port) {
+            self.pci_config_io.lock().unwrap().read(
+                PCI_CONFIG_IO_PORT,
+                port - PCI_CONFIG_IO_PORT,
+                data,
+            );
+            return Ok(());
+        }
+
         if let Err(vm_device::BusError::MissingAddressRange) = self.io_bus.read(port, data) {
             warn!("Guest PIO read to unregistered address 0x{:x}", port);
         }
@@ -427,8 +440,19 @@ impl VmmOps for VmOps {
 
     #[cfg(target_arch = "x86_64")]
     fn pio_write(&self, port: u64, data: &[u8]) -> hypervisor::vm::Result<()> {
+        use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
+
         if port == DEBUG_IOPORT as u64 && data.len() == 1 {
             self.log_debug_ioport(data[0]);
+            return Ok(());
+        }
+
+        if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port) {
+            self.pci_config_io.lock().unwrap().write(
+                PCI_CONFIG_IO_PORT,
+                port - PCI_CONFIG_IO_PORT,
+                data,
+            );
             return Ok(());
         }
 
@@ -447,24 +471,10 @@ impl VmmOps for VmOps {
     }
 }
 
-pub fn physical_bits(max_phys_bits: Option<u8>, #[cfg(feature = "tdx")] tdx_enabled: bool) -> u8 {
-    #[cfg(not(feature = "tdx"))]
+pub fn physical_bits(max_phys_bits: u8) -> u8 {
     let host_phys_bits = get_host_cpu_phys_bits();
-    #[cfg(feature = "tdx")]
-    let mut host_phys_bits = get_host_cpu_phys_bits();
 
-    #[cfg(feature = "tdx")]
-    if tdx_enabled {
-        // When running TDX guest, the Guest Physical Address space is limited
-        // by a shared bit that is located on bit 47 for 4 level paging, and on
-        // bit 51 for 5 level paging (when GPAW bit is 1). In order to keep
-        // things simple, and since a 47 bits address space is 128TiB large, we
-        // ensure to limit the physical addressable space to 47 bits when
-        // runnning TDX.
-        host_phys_bits = std::cmp::min(host_phys_bits, 47)
-    }
-
-    cmp::min(host_phys_bits, max_phys_bits.unwrap_or(host_phys_bits))
+    cmp::min(host_phys_bits, max_phys_bits)
 }
 
 pub const HANDLED_SIGNALS: [i32; 3] = [SIGWINCH, SIGTERM, SIGINT];
@@ -548,6 +558,10 @@ impl Vm {
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
         // Create the VmOps structure, which implements the VmmOps trait.
         // And send it to the hypervisor.
+
+        #[cfg(target_arch = "x86_64")]
+        let pci_config_io =
+            device_manager.lock().unwrap().pci_config_io() as Arc<Mutex<dyn BusDevice>>;
         let vm_ops: Arc<dyn VmmOps> = Arc::new(VmOps {
             memory,
             #[cfg(target_arch = "x86_64")]
@@ -555,6 +569,8 @@ impl Vm {
             mmio_bus,
             #[cfg(target_arch = "x86_64")]
             timestamp: std::time::Instant::now(),
+            #[cfg(target_arch = "x86_64")]
+            pci_config_io,
         });
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
@@ -710,6 +726,7 @@ impl Vm {
         activate_evt: EventFd,
         serial_pty: Option<PtyPair>,
         console_pty: Option<PtyPair>,
+        console_resize_pipe: Option<File>,
     ) -> Result<Self> {
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().tdx.is_some();
@@ -727,18 +744,15 @@ impl Vm {
 
         #[cfg(target_arch = "x86_64")]
         vm.enable_split_irq().unwrap();
-        let phys_bits = physical_bits(
-            config.lock().unwrap().cpus.max_phys_bits,
-            #[cfg(feature = "tdx")]
-            tdx_enabled,
-        );
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
         let memory_manager = MemoryManager::new(
             vm.clone(),
             &config.lock().unwrap().memory.clone(),
-            false,
+            None,
             phys_bits,
             #[cfg(feature = "tdx")]
             tdx_enabled,
+            None,
         )
         .map_err(Error::MemoryManager)?;
 
@@ -773,7 +787,7 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices(serial_pty, console_pty)
+            .create_devices(serial_pty, console_pty, console_resize_pipe)
             .map_err(Error::DeviceManager)?;
         Ok(new_vm)
     }
@@ -803,11 +817,7 @@ impl Vm {
         let memory_manager = if let Some(memory_manager_snapshot) =
             snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID)
         {
-            let phys_bits = physical_bits(
-                config.lock().unwrap().cpus.max_phys_bits,
-                #[cfg(feature = "tdx")]
-                config.lock().unwrap().tdx.is_some(),
-            );
+            let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
             MemoryManager::new_from_snapshot(
                 memory_manager_snapshot,
                 vm.clone(),
@@ -845,24 +855,22 @@ impl Vm {
         seccomp_action: &SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         activate_evt: EventFd,
+        memory_manager_data: &MemoryManagerSnapshotData,
     ) -> Result<Self> {
         hypervisor.check_required_extensions().unwrap();
         let vm = hypervisor.create_vm().unwrap();
         #[cfg(target_arch = "x86_64")]
         vm.enable_split_irq().unwrap();
-        let phys_bits = physical_bits(
-            config.lock().unwrap().cpus.max_phys_bits,
-            #[cfg(feature = "tdx")]
-            config.lock().unwrap().tdx.is_some(),
-        );
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
 
         let memory_manager = MemoryManager::new(
             vm.clone(),
             &config.lock().unwrap().memory.clone(),
-            false,
+            None,
             phys_bits,
             #[cfg(feature = "tdx")]
             false,
+            Some(memory_manager_data),
         )
         .map_err(Error::MemoryManager)?;
 
@@ -904,7 +912,7 @@ impl Vm {
         Ok(arch::InitramfsConfig { address, size })
     }
 
-    fn get_cmdline(&mut self) -> Result<CString> {
+    fn get_cmdline(&mut self) -> Result<Cmdline> {
         let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
         cmdline
             .insert_str(self.config.lock().unwrap().cmdline.args.clone())
@@ -912,7 +920,7 @@ impl Vm {
         for entry in self.device_manager.lock().unwrap().cmdline_additions() {
             cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
         }
-        CString::new(cmdline).map_err(Error::CmdLineCString)
+        Ok(cmdline)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -957,7 +965,7 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     fn load_kernel(&mut self) -> Result<EntryPoint> {
         info!("Loading kernel");
-        let cmdline_cstring = self.get_cmdline()?;
+        let cmdline = self.get_cmdline()?;
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
         let mut kernel = self.kernel.as_ref().unwrap();
@@ -973,12 +981,8 @@ impl Vm {
             }
         };
 
-        linux_loader::loader::load_cmdline(
-            mem.deref(),
-            arch::layout::CMDLINE_START,
-            &cmdline_cstring,
-        )
-        .map_err(Error::LoadCmdLine)?;
+        linux_loader::loader::load_cmdline(mem.deref(), arch::layout::CMDLINE_START, &cmdline)
+            .map_err(Error::LoadCmdLine)?;
 
         if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
             // Use the PVH kernel entry point to boot the guest
@@ -990,7 +994,7 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(&mut self) -> Result<()> {
+    fn configure_system(&mut self, #[cfg(feature = "acpi")] rsdp_addr: GuestAddress) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
@@ -1001,23 +1005,10 @@ impl Vm {
 
         let boot_vcpus = self.cpu_manager.lock().unwrap().boot_vcpus();
 
-        #[allow(unused_mut, unused_assignments)]
-        let mut rsdp_addr: Option<GuestAddress> = None;
-
         #[cfg(feature = "acpi")]
-        {
-            rsdp_addr = Some(crate::acpi::create_acpi_tables(
-                &mem,
-                &self.device_manager,
-                &self.cpu_manager,
-                &self.memory_manager,
-                &self.numa_nodes,
-            ));
-            info!(
-                "Created ACPI tables: rsdp_addr = 0x{:x}",
-                rsdp_addr.unwrap().0
-            );
-        }
+        let rsdp_addr = Some(rsdp_addr);
+        #[cfg(not(feature = "acpi"))]
+        let rsdp_addr = None;
 
         let sgx_epc_region = self
             .memory_manager
@@ -1040,8 +1031,11 @@ impl Vm {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn configure_system(&mut self) -> Result<()> {
-        let cmdline_cstring = self.get_cmdline()?;
+    fn configure_system(
+        &mut self,
+        #[cfg(feature = "acpi")] _rsdp_addr: GuestAddress,
+    ) -> Result<()> {
+        let cmdline = self.get_cmdline()?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
@@ -1078,16 +1072,13 @@ impl Vm {
 
         let pci_space = (pci_space_start.0, pci_space_size);
 
-        #[cfg(feature = "acpi")]
-        {
-            let _ = crate::acpi::create_acpi_tables(
-                &mem,
-                &self.device_manager,
-                &self.cpu_manager,
-                &self.memory_manager,
-                &self.numa_nodes,
-            );
-        }
+        let virtio_iommu_bdf = self
+            .device_manager
+            .lock()
+            .unwrap()
+            .iommu_attached_devices()
+            .as_ref()
+            .map(|(v, _)| *v);
 
         let gic_device = create_gic(
             &self.memory_manager.lock().as_ref().unwrap().vm,
@@ -1099,12 +1090,13 @@ impl Vm {
 
         arch::configure_system(
             &mem,
-            &cmdline_cstring,
+            cmdline.as_str(),
             vcpu_mpidrs,
             vcpu_topology,
             device_info,
             &initramfs_config,
             &pci_space,
+            virtio_iommu_bdf,
             &*gic_device,
             &self.numa_nodes,
         )
@@ -1140,6 +1132,10 @@ impl Vm {
 
     pub fn console_pty(&self) -> Option<PtyPair> {
         self.device_manager.lock().unwrap().console_pty()
+    }
+
+    pub fn console_resize_pipe(&self) -> Option<Arc<File>> {
+        self.device_manager.lock().unwrap().console_resize_pipe()
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
@@ -1602,8 +1598,7 @@ impl Vm {
         for signal in signals.forever() {
             match signal {
                 SIGWINCH => {
-                    let (col, row) = get_win_size();
-                    console_input_clone.update_console_size(col, row);
+                    console_input_clone.update_console_size();
                 }
                 SIGTERM | SIGINT => {
                     if on_tty {
@@ -1644,7 +1639,11 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
-    fn populate_tdx_sections(&mut self, sections: &[TdvfSection]) -> Result<Option<u64>> {
+    fn populate_tdx_sections(
+        &mut self,
+        sections: &[TdvfSection],
+        vmm_data_regions: &[TdVmmDataRegion],
+    ) -> Result<Option<u64>> {
         use arch::x86_64::tdx::*;
         // Get the memory end *before* we start adding TDVF ram regions
         let boot_guest_memory = self
@@ -1710,6 +1709,20 @@ impl Vm {
         sorted_sections.retain(|section| {
             !matches!(section.r#type, TdvfSectionType::Bfv | TdvfSectionType::Cfv)
         });
+
+        // Add VMM specific data memory region to TdvfSections as TdHob type
+        // to ensure the firmware won't ignore/reject the ranges.
+        for region in vmm_data_regions {
+            sorted_sections.push(TdvfSection {
+                data_offset: 0,
+                data_size: 0,
+                address: region.start_address,
+                size: region.length,
+                r#type: TdvfSectionType::TdHob,
+                attributes: 0,
+            });
+        }
+
         sorted_sections.sort_by_key(|section| section.address);
         sorted_sections.reverse();
         let mut current_section = sorted_sections.pop();
@@ -1777,13 +1790,25 @@ impl Vm {
         )
         .map_err(Error::PopulateHob)?;
 
+        // Add VMM specific data to the TdHob. The content of the data is
+        // is written as part of the HOB, which will be retrieved from the
+        // firmware, and processed accordingly to the type.
+        for region in vmm_data_regions {
+            hob.add_td_vmm_data(&mem, *region)
+                .map_err(Error::PopulateHob)?;
+        }
+
         hob.finish(&mem).map_err(Error::PopulateHob)?;
 
         Ok(hob_offset)
     }
 
     #[cfg(feature = "tdx")]
-    fn init_tdx_memory(&mut self, sections: &[TdvfSection]) -> Result<()> {
+    fn init_tdx_memory(
+        &mut self,
+        sections: &[TdvfSection],
+        regions: &[TdVmmDataRegion],
+    ) -> Result<()> {
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
 
@@ -1798,6 +1823,22 @@ impl Vm {
                 )
                 .map_err(Error::InitializeTdxMemoryRegion)?;
         }
+
+        // The same way we let the hypervisor know about the TDVF sections, we
+        // must declare the VMM specific regions shared with the guest so that
+        // they won't be discarded.
+        for region in regions {
+            self.vm
+                .tdx_init_memory_region(
+                    mem.get_host_address(GuestAddress(region.start_address))
+                        .unwrap() as u64,
+                    region.start_address,
+                    region.length,
+                    false,
+                )
+                .map_err(Error::InitializeTdxMemoryRegion)?;
+        }
+
         Ok(())
     }
 
@@ -1888,16 +1929,52 @@ impl Vm {
         #[cfg(feature = "tdx")]
         let sections = self.extract_tdvf_sections()?;
 
-        // Configuring the TDX regions requires that the vCPUs are created
+        #[cfg(feature = "acpi")]
+        let rsdp_addr = {
+            let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
+
+            let rsdp_addr = crate::acpi::create_acpi_tables(
+                &mem,
+                &self.device_manager,
+                &self.cpu_manager,
+                &self.memory_manager,
+                &self.numa_nodes,
+            );
+            info!("Created ACPI tables: rsdp_addr = 0x{:x}", rsdp_addr.0);
+
+            rsdp_addr
+        };
+
+        #[cfg(all(feature = "tdx", not(feature = "acpi")))]
+        let vmm_data_regions: Vec<TdVmmDataRegion> = Vec::new();
+
+        // Create a VMM specific data region to share the ACPI tables with
+        // the guest. Reserving 64kiB to ensure the ACPI tables will fit.
+        #[cfg(all(feature = "tdx", feature = "acpi"))]
+        let vmm_data_regions = vec![TdVmmDataRegion {
+            start_address: rsdp_addr.0,
+            length: 0x10000,
+            region_type: TdVmmDataRegionType::AcpiTables,
+        }];
+
+        // Configuring the TDX regions requires that the vCPUs are created.
         #[cfg(feature = "tdx")]
         let hob_address = if self.config.lock().unwrap().tdx.is_some() {
-            self.populate_tdx_sections(&sections)?
+            // TDX sections are written to memory.
+            self.populate_tdx_sections(&sections, &vmm_data_regions)?
         } else {
             None
         };
 
         // Configure shared state based on loaded kernel
-        entry_point.map(|_| self.configure_system()).transpose()?;
+        entry_point
+            .map(|_| {
+                self.configure_system(
+                    #[cfg(feature = "acpi")]
+                    rsdp_addr,
+                )
+            })
+            .transpose()?;
 
         #[cfg(feature = "tdx")]
         if let Some(hob_address) = hob_address {
@@ -1908,7 +1985,10 @@ impl Vm {
                 .unwrap()
                 .initialize_tdx(hob_address)
                 .map_err(Error::CpuManager)?;
-            self.init_tdx_memory(&sections)?;
+            // Let the hypervisor know which memory ranges are shared with the
+            // guest. This prevents the guest from ignoring/discarding memory
+            // regions provided by the host.
+            self.init_tdx_memory(&sections, &vmm_data_regions)?;
             // With TDX memory and CPU state configured TDX setup is complete
             self.vm.tdx_finalize().map_err(Error::FinalizeTdx)?;
         }
@@ -1925,53 +2005,6 @@ impl Vm {
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
         *state = new_state;
         event!("vm", "booted");
-        Ok(())
-    }
-
-    pub fn handle_pty(&self, event: EpollDispatch) -> Result<()> {
-        // Could be a little dangerous, picks up a lock on device_manager
-        // and goes into a blocking read. If the epoll loops starts to be
-        // services by multiple threads likely need to revist this.
-        let dm = self.device_manager.lock().unwrap();
-
-        if matches!(event, EpollDispatch::SerialPty) {
-            if let Some(mut pty) = dm.serial_pty() {
-                let mut out = [0u8; 64];
-                let count = pty.main.read(&mut out).map_err(Error::PtyConsole)?;
-                let console = dm.console();
-                console
-                    .queue_input_bytes_serial(&out[..count])
-                    .map_err(Error::Console)?;
-            };
-        }
-
-        Ok(())
-    }
-
-    pub fn handle_stdin(&self) -> Result<()> {
-        let mut out = [0u8; 64];
-        let count = io::stdin()
-            .lock()
-            .read_raw(&mut out)
-            .map_err(Error::Console)?;
-
-        // Replace "\n" with "\r" to deal with Windows SAC (#1170)
-        if count == 1 && out[0] == 0x0a {
-            out[0] = 0x0d;
-        }
-
-        if matches!(
-            self.config.lock().unwrap().serial.mode,
-            ConsoleOutputMode::Tty
-        ) {
-            self.device_manager
-                .lock()
-                .unwrap()
-                .console()
-                .queue_input_bytes_serial(&out[..count])
-                .map_err(Error::Console)?;
-        }
-
         Ok(())
     }
 
@@ -2127,14 +2160,33 @@ impl Vm {
         let mem = guest_memory.memory();
 
         for range in ranges.regions() {
-            mem.read_exact_from(GuestAddress(range.gpa), fd, range.length as usize)
-                .map_err(|e| {
-                    MigratableError::MigrateReceive(anyhow!(
-                        "Error transferring memory to socket: {}",
-                        e
-                    ))
-                })?;
+            let mut offset: u64 = 0;
+            // Here we are manually handling the retry in case we can't the
+            // whole region at once because we can't use the implementation
+            // from vm-memory::GuestMemory of read_exact_from() as it is not
+            // following the correct behavior. For more info about this issue
+            // see: https://github.com/rust-vmm/vm-memory/issues/174
+            loop {
+                let bytes_read = mem
+                    .read_from(
+                        GuestAddress(range.gpa + offset),
+                        fd,
+                        (range.length - offset) as usize,
+                    )
+                    .map_err(|e| {
+                        MigratableError::MigrateReceive(anyhow!(
+                            "Error receiving memory from socket: {}",
+                            e
+                        ))
+                    })?;
+                offset += bytes_read as u64;
+
+                if offset == range.length {
+                    break;
+                }
+            }
         }
+
         Ok(())
     }
 
@@ -2150,30 +2202,41 @@ impl Vm {
         let mem = guest_memory.memory();
 
         for range in ranges.regions() {
-            mem.write_all_to(GuestAddress(range.gpa), fd, range.length as usize)
-                .map_err(|e| {
-                    MigratableError::MigrateSend(anyhow!(
-                        "Error transferring memory to socket: {}",
-                        e
-                    ))
-                })?;
+            let mut offset: u64 = 0;
+            // Here we are manually handling the retry in case we can't the
+            // whole region at once because we can't use the implementation
+            // from vm-memory::GuestMemory of write_all_to() as it is not
+            // following the correct behavior. For more info about this issue
+            // see: https://github.com/rust-vmm/vm-memory/issues/174
+            loop {
+                let bytes_written = mem
+                    .write_to(
+                        GuestAddress(range.gpa + offset),
+                        fd,
+                        (range.length - offset) as usize,
+                    )
+                    .map_err(|e| {
+                        MigratableError::MigrateSend(anyhow!(
+                            "Error transferring memory to socket: {}",
+                            e
+                        ))
+                    })?;
+                offset += bytes_written as u64;
+
+                if offset == range.length {
+                    break;
+                }
+            }
         }
 
         Ok(())
     }
 
     pub fn memory_range_table(&self) -> std::result::Result<MemoryRangeTable, MigratableError> {
-        let mut table = MemoryRangeTable::default();
-        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
-
-        for region in guest_memory.memory().iter() {
-            table.push(MemoryRange {
-                gpa: region.start_addr().raw_value(),
-                length: region.len() as u64,
-            });
-        }
-
-        Ok(table)
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .memory_range_table(false)
     }
 
     pub fn device_tree(&self) -> Arc<Mutex<DeviceTree>> {
@@ -2208,6 +2271,10 @@ impl Vm {
             .unwrap()
             .notify_power_button()
             .map_err(Error::PowerButton)
+    }
+
+    pub fn memory_manager_data(&self) -> MemoryManagerSnapshotData {
+        self.memory_manager.lock().unwrap().snapshot_data()
     }
 }
 
@@ -2312,11 +2379,7 @@ impl Snapshottable for Vm {
         let common_cpuid = {
             #[cfg(feature = "tdx")]
             let tdx_enabled = self.config.lock().unwrap().tdx.is_some();
-            let phys_bits = physical_bits(
-                self.config.lock().unwrap().cpus.max_phys_bits,
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
-            );
+            let phys_bits = physical_bits(self.config.lock().unwrap().cpus.max_phys_bits);
             arch::generate_common_cpuid(
                 self.hypervisor.clone(),
                 None,
@@ -2621,7 +2684,7 @@ mod tests {
         let gic = create_gic(&vm, 1).unwrap();
         assert!(create_fdt(
             &mem,
-            &CString::new("console=tty0").unwrap(),
+            "console=tty0",
             vec![0],
             Some((0, 0, 0)),
             &dev_info,
@@ -2629,6 +2692,7 @@ mod tests {
             &None,
             &(0x1_0000_0000, 0x1_0000),
             &BTreeMap::new(),
+            None,
         )
         .is_ok())
     }
@@ -2638,7 +2702,7 @@ mod tests {
 #[test]
 pub fn test_vm() {
     use hypervisor::VmExit;
-    use vm_memory::{GuestMemory, GuestMemoryRegion};
+    use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
     // This example based on https://lwn.net/Articles/658511/
     let code = [
         0xba, 0xf8, 0x03, /* mov $0x3f8, %dx */

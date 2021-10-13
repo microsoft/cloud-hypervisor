@@ -117,7 +117,8 @@ impl log::Log for Logger {
 }
 
 fn prepare_default_values() -> (String, String, String) {
-    let default_vcpus = format! {"boot={}", config::DEFAULT_VCPUS};
+    let default_vcpus =
+        format! {"boot={},max_phys_bits={}", config::DEFAULT_VCPUS,config::DEFAULT_MAX_PHYS_BITS};
     let default_memory = format! {"size={}M", config::DEFAULT_MEMORY_MB};
     let default_rng = format! {"src={}", config::DEFAULT_RNG_SOURCE};
 
@@ -163,7 +164,8 @@ fn create_app<'a, 'b>(
                      hugepages=on|off,hugepage_size=<hugepage_size>,\
                      hotplug_method=acpi|virtio-mem,\
                      hotplug_size=<hotpluggable_memory_size>,\
-                     hotplugged_size=<hotplugged_memory_size>\"",
+                     hotplugged_size=<hotplugged_memory_size>,\
+                     prefault=on|off\"",
                 )
                 .default_value(default_memory)
                 .group("vm-config"),
@@ -178,7 +180,8 @@ fn create_app<'a, 'b>(
                      hugepages=on|off,hugepage_size=<hugepage_size>,\
                      host_numa_node=<node_id>,\
                      id=<zone_identifier>,hotplug_size=<hotpluggable_memory_size>,\
-                     hotplugged_size=<hotplugged_memory_size>\"",
+                     hotplugged_size=<hotplugged_memory_size>,\
+                     prefault=on|off\"",
                 )
                 .takes_value(true)
                 .min_values(1)
@@ -501,7 +504,9 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     // installing handlers for, to make sure they only ever run on the
     // dedicated signal handling thread we'll start in a bit.
     for sig in vmm::vm::HANDLED_SIGNALS {
-        block_signal(sig).unwrap();
+        if let Err(e) = block_signal(sig) {
+            eprintln!("Error blocking signals: {}", e);
+        }
     }
 
     event!("vmm", "starting");
@@ -632,7 +637,7 @@ mod unit_tests {
                     max_vcpus: 1,
                     topology: None,
                     kvm_hyperv: false,
-                    max_phys_bits: None,
+                    max_phys_bits: 46,
                 },
                 memory: MemoryConfig {
                     size: 536_870_912,
@@ -642,8 +647,9 @@ mod unit_tests {
                     hotplugged_size: None,
                     shared: false,
                     hugepages: false,
-                    zones: None,
                     hugepage_size: None,
+                    prefault: false,
+                    zones: None,
                 },
                 kernel: Some(KernelConfig {
                     path: PathBuf::from("/path/to/kernel"),

@@ -8,70 +8,97 @@ export BUILD_TARGET=${BUILD_TARGET-aarch64-unknown-linux-gnu}
 
 WORKLOADS_DIR="$HOME/workloads"
 WORKLOADS_LOCK="$WORKLOADS_DIR/integration_test.lock"
-EDK2_BUILD_DIR="$WORKLOADS_DIR/edk2_build"
 
 mkdir -p "$WORKLOADS_DIR"
 
-build_edk2() {
-    EDK2_REPO="https://github.com/tianocore/edk2.git"
-    EDK2_DIR="edk2"
-    EDK2_BRANCH="master"
-    EDK2_PLAT_REPO="https://github.com/tianocore/edk2-platforms.git"
-    EDK2_PLAT_DIR="edk2-platforms"
-    ACPICA_REPO="https://github.com/acpica/acpica.git"
-    ACPICA_DIR="acpica"
+# Checkout source code of a GIT repo with specified branch and commit
+# Args:
+#   $1: Target directory
+#   $2: GIT URL of the repo
+#   $3: Required branch
+#   $4: Required commit (optional)
+checkout_repo() {
+    SRC_DIR="$1"
+    GIT_URL="$2"
+    GIT_BRANCH="$3"
+    GIT_COMMIT="$4"
 
-    export WORKSPACE="$EDK2_BUILD_DIR"
-    export PACKAGES_PATH="$WORKSPACE/$EDK2_DIR:$WORKSPACE/$EDK2_PLAT_DIR"
-    export IASL_PREFIX="$WORKSPACE/acpica/generate/unix/bin/"
-
-    cd "$WORKLOADS_DIR"
-    if [ ! -d "$WORKSPACE" ]; then
-        mkdir -p "$WORKSPACE"
-    fi
-
-    pushd "$WORKSPACE"
-
-    # Check whether the local HEAD commit same as the remote HEAD or not. Remove the folder if they are different.
-    if [ -d "$EDK2_DIR" ]; then
-        pushd $EDK2_DIR
+    # Check whether the local HEAD commit same as the requested commit or not.
+    # If commit is not specified, compare local HEAD and remote HEAD.
+    # Remove the folder if there is difference.
+    if [ -d "$SRC_DIR" ]; then
+        pushd $SRC_DIR
         git fetch
-        EDK2_LOCAL_HEAD=$(git rev-parse HEAD)
-        EDK2_REMOTE_HEAD=$(git rev-parse remotes/origin/$EDK2_BRANCH)
+        SRC_LOCAL_COMMIT=$(git rev-parse HEAD)
+        if [ -z "$GIT_COMMIT" ]; then
+            GIT_COMMIT=$(git rev-parse remotes/origin/"$GIT_BRANCH")
+        fi
         popd
-        if [ "$EDK2_LOCAL_HEAD" != "$EDK2_REMOTE_HEAD" ]; then
-            # If EDK2 code is out of date, remove and rebuild all
-            rm -rf "$EDK2_DIR"
-            rm -rf "$EDK2_PLAT_DIR"
-            rm -rf "$ACPICA_DIR"
+        if [ "$SRC_LOCAL_COMMIT" != "$GIT_COMMIT" ]; then
+            rm -rf "$SRC_DIR"
         fi
     fi
 
-    if [ ! -d "$EDK2_DIR" ]; then
-        time git clone --depth 1 "$EDK2_REPO" -b "$EDK2_BRANCH" "$EDK2_DIR"
-        pushd $EDK2_DIR
-        git submodule update --init
-        popd
+    # Checkout the specified branch and commit (if required)
+    if [ ! -d "$SRC_DIR" ]; then
+        git clone --depth 1 "$GIT_URL" -b "$GIT_BRANCH" "$SRC_DIR"
+        if [ "$GIT_COMMIT" ]; then
+            pushd "$SRC_DIR"
+            git fetch --depth 1 origin "$GIT_COMMIT"
+            git reset --hard FETCH_HEAD
+            popd
+        fi
+    fi
+}
+
+build_custom_linux() {
+    SRCDIR=$PWD
+    LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
+    LINUX_CUSTOM_BRANCH="ch-5.14"
+    LINUX_CUSTOM_URL="https://github.com/cloud-hypervisor/linux.git"
+
+    checkout_repo "$LINUX_CUSTOM_DIR" "$LINUX_CUSTOM_URL" "$LINUX_CUSTOM_BRANCH"
+
+    cp $SRCDIR/resources/linux-config-aarch64 $LINUX_CUSTOM_DIR/.config
+
+    pushd $LINUX_CUSTOM_DIR
+    time make -j `nproc`
+    cp arch/arm64/boot/Image "$WORKLOADS_DIR/" || exit 1
+    cp arch/arm64/boot/Image.gz "$WORKLOADS_DIR/" || exit 1
+    popd
+}
+
+build_edk2() {
+    EDK2_BUILD_DIR="$WORKLOADS_DIR/edk2_build"
+    EDK2_REPO="https://github.com/tianocore/edk2.git"
+    EDK2_DIR="$EDK2_BUILD_DIR/edk2"
+    EDK2_PLAT_REPO="https://github.com/tianocore/edk2-platforms.git"
+    EDK2_PLAT_DIR="$EDK2_BUILD_DIR/edk2-platforms"
+    ACPICA_REPO="https://github.com/acpica/acpica.git"
+    ACPICA_DIR="$EDK2_BUILD_DIR/acpica"
+    export WORKSPACE="$EDK2_BUILD_DIR"
+    export PACKAGES_PATH="$EDK2_DIR:$EDK2_PLAT_DIR"
+    export IASL_PREFIX="$ACPICA_DIR/generate/unix/bin/"
+
+    if [ ! -d "$EDK2_BUILD_DIR" ]; then
+        mkdir -p "$EDK2_BUILD_DIR"
     fi
 
-    if [ ! -d "$EDK2_PLAT_DIR" ]; then
-        time git clone --depth 1 "$EDK2_PLAT_REPO" -b master "$EDK2_PLAT_DIR"
-    fi
+    # Prepare source code
+    checkout_repo "$EDK2_DIR" "$EDK2_REPO" master "46b4606ba23498d3d0e66b53e498eb3d5d592586"
+    pushd "$EDK2_DIR"
+    git submodule update --init
+    popd
+    checkout_repo "$EDK2_PLAT_DIR" "$EDK2_PLAT_REPO" master "8227e9e9f6a8aefbd772b40138f835121ccb2307"
+    checkout_repo "$ACPICA_DIR" "$ACPICA_REPO" master "b9c69f81a05c45611c91ea9cbce8756078d76233"
 
-    if [ ! -d "$ACPICA_DIR" ]; then
-        time git clone --depth 1 "$ACPICA_REPO" -b master "$ACPICA_DIR"
-    fi
-
-    make -C "$ACPICA_DIR"/
-
+    pushd "$EDK2_BUILD_DIR"
+    # Build
+    make -C acpica -j `nproc`
     source edk2/edksetup.sh
-    make -C edk2/BaseTools
-
-    build -a AARCH64 -t GCC5 -p ArmVirtPkg/ArmVirtCloudHv.dsc -b RELEASE
+    make -C edk2/BaseTools -j `nproc`
+    build -a AARCH64 -t GCC5 -p ArmVirtPkg/ArmVirtCloudHv.dsc -b RELEASE -n 0
     cp Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd "$WORKLOADS_DIR"
-
-    echo "Info: build UEFI successfully"
-
     popd
 }
 
@@ -105,7 +132,7 @@ update_workloads() {
         popd
     fi
 
-    FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-arm64-custom.raw"
+    FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-arm64-custom-20210929-0.raw"
     FOCAL_OS_RAW_IMAGE_DOWNLOAD_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_RAW_IMAGE_NAME"
     FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
     if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
@@ -114,9 +141,7 @@ update_workloads() {
         popd
     fi
 
-    # Convert the raw image to qcow2 image to remove compressed blocks from the disk. Therefore letting the
-    # qcow2 format image can be directly used in the integration test.
-    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME="focal-server-cloudimg-arm64-custom.qcow2"
+    FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME="focal-server-cloudimg-arm64-custom-20210929-0.qcow2"
     FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL="https://cloud-hypervisor.azureedge.net/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_NAME"
     if [ ! -f "$FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE" ]; then
@@ -159,59 +184,26 @@ update_workloads() {
     fi
     popd
 
-    # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
-    PE_IMAGE="$WORKLOADS_DIR/Image"
-    LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
+    # Build custom kernel for guest VMs
+    build_custom_linux
 
-    build_custom_linux_kernel() {
-        pushd $LINUX_CUSTOM_DIR
-        time make -j `nproc`
-        cp arch/arm64/boot/Image $WORKLOADS_DIR/Image || exit 1
-        popd
-    }
+    # Update the kernel in the cloud image for some tests that requires recent kernel version
+    FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_NAME="focal-server-cloudimg-arm64-custom-20210929-0-update-kernel.raw"
+    cp "$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME" "$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_NAME"
+    FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_ROOT_DIR="$WORKLOADS_DIR/focal-server-cloudimg-root"
+    mkdir -p "$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_ROOT_DIR"
+    # Mount the 'raw' image, replace the compressed kernel file and umount the working folder
+    guestmount -a "$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_NAME" -m /dev/sda1 "$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_ROOT_DIR" || exit 1
+    cp "$WORKLOADS_DIR"/Image.gz "$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_ROOT_DIR"/boot/vmlinuz
+    guestunmount "$FOCAL_OS_RAW_IMAGE_UPDATE_KERNEL_ROOT_DIR"
 
-    SRCDIR=$PWD
-    LINUX_CUSTOM_BRANCH="ch-5.14"
-
-    # Check whether the local HEAD commit same as the remote HEAD or not. Remove the folder if they are different.
-    if [ -d "$LINUX_CUSTOM_DIR" ]; then
-        pushd $LINUX_CUSTOM_DIR
-        git fetch
-        LINUX_CUSTOM_LOCAL_HEAD=$(git rev-parse HEAD)
-        LINUX_CUSTOM_REMOTE_HEAD=$(git rev-parse remotes/origin/$LINUX_CUSTOM_BRANCH)
-        popd
-        if [ "$LINUX_CUSTOM_LOCAL_HEAD" != "$LINUX_CUSTOM_REMOTE_HEAD" ]; then
-            rm -rf "$LINUX_CUSTOM_DIR"
-        fi
-    fi
-
-    if [ ! -d "$LINUX_CUSTOM_DIR" ]; then
-        time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b $LINUX_CUSTOM_BRANCH $LINUX_CUSTOM_DIR
-    fi
-
-    cp $SRCDIR/resources/linux-config-aarch64 $LINUX_CUSTOM_DIR/.config
-    build_custom_linux_kernel
-
-    VIRTIOFSD="$WORKLOADS_DIR/virtiofsd"
-    QEMU_DIR="qemu_build"
-
-    if [ ! -f "$VIRTIOFSD" ]; then
-        pushd $WORKLOADS_DIR
-        git clone --depth 1 "https://gitlab.com/virtio-fs/qemu.git" -b "qemu5.0-virtiofs-dax" $QEMU_DIR
-        pushd $QEMU_DIR
-        time ./configure --prefix=$PWD --target-list=aarch64-softmmu
-        time make virtiofsd -j `nproc`
-        cp virtiofsd $VIRTIOFSD || exit 1
-        popd
-        rm -rf $QEMU_DIR
-        popd
-    fi
-
+    # Build virtiofsd
     VIRTIOFSD_RS="$WORKLOADS_DIR/virtiofsd-rs"
     VIRTIOFSD_RS_DIR="virtiofsd_rs_build"
     if [ ! -f "$VIRTIOFSD_RS" ]; then
         pushd $WORKLOADS_DIR
-        git clone --depth 1 "https://gitlab.com/virtio-fs/virtiofsd-rs.git" $VIRTIOFSD_RS_DIR
+        git clone "https://gitlab.com/virtio-fs/virtiofsd-rs.git" $VIRTIOFSD_RS_DIR
+        git checkout c847ab63acabed2ed6e6913b9c76bb5099a1d4cb
         pushd $VIRTIOFSD_RS_DIR
         time cargo build --release
         cp target/release/virtiofsd-rs $VIRTIOFSD_RS || exit 1

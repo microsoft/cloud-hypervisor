@@ -339,12 +339,11 @@ cmd_tests() {
     if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
     fi
+
     if [[ "$hypervisor" = "mshv" ]]; then
         exported_device="/dev/mshv"
     fi
-    if [[ "$hypervisor" = "mshv" ]]; then
-        exported_device="/dev/mshv"
-    fi
+
     set -- "$@" '--hypervisor' $hypervisor
 
     ensure_build_dir
