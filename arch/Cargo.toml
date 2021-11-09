@@ -13,15 +13,15 @@ kvm = []
 
 [dependencies]
 acpi_tables = { path = "../acpi_tables", optional = true }
-anyhow = "1.0.44"
+anyhow = "1.0.46"
 byteorder = "1.4.3"
 hypervisor = { path = "../hypervisor" }
-libc = "0.2.103"
+libc = "0.2.107"
 linux-loader = { version = "0.4.0", features = ["elf", "bzimage", "pe"] }
 log = "0.4.14"
 serde = { version = "1.0.130", features = ["rc"] }
 serde_derive = "1.0.130"
-thiserror = "1.0.29"
+thiserror = "1.0.30"
 versionize = "0.1.6"
 versionize_derive = "0.1.4"
 vm-memory = { version = "0.6.0", features = ["backend-mmap", "backend-bitmap"] }

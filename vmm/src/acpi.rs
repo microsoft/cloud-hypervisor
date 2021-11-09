@@ -5,6 +5,7 @@
 use crate::cpu::CpuManager;
 use crate::device_manager::DeviceManager;
 use crate::memory_manager::MemoryManager;
+use crate::pci_segment::PciSegment;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 use acpi_tables::sdt::GenericAddress;
 use acpi_tables::{aml::Aml, rsdp::Rsdp, sdt::Sdt};
@@ -16,7 +17,9 @@ use arch::DeviceType;
 use arch::NumaNodes;
 
 use bitflags::bitflags;
+use pci::PciBdf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryRegion};
 
 /* Values for Type in APIC sub-headers */
@@ -173,9 +176,12 @@ pub fn create_dsdt_table(
     // DSDT
     let mut dsdt = Sdt::new(*b"DSDT", 36, 6, *b"CLOUDH", *b"CHDSDT  ", 1);
 
-    dsdt.append_slice(device_manager.lock().unwrap().to_aml_bytes().as_slice());
-    dsdt.append_slice(cpu_manager.lock().unwrap().to_aml_bytes().as_slice());
-    dsdt.append_slice(memory_manager.lock().unwrap().to_aml_bytes().as_slice());
+    let mut bytes = Vec::new();
+
+    device_manager.lock().unwrap().append_aml_bytes(&mut bytes);
+    cpu_manager.lock().unwrap().append_aml_bytes(&mut bytes);
+    memory_manager.lock().unwrap().append_aml_bytes(&mut bytes);
+    dsdt.append_slice(&bytes);
 
     dsdt
 }
@@ -222,20 +228,22 @@ fn create_facp_table(dsdt_offset: GuestAddress) -> Sdt {
     facp
 }
 
-fn create_mcfg_table() -> Sdt {
+fn create_mcfg_table(pci_segments: &[PciSegment]) -> Sdt {
     let mut mcfg = Sdt::new(*b"MCFG", 36, 1, *b"CLOUDH", *b"CHMCFG  ", 1);
 
     // MCFG reserved 8 bytes
     mcfg.append(0u64);
 
-    // 32-bit PCI enhanced configuration mechanism
-    mcfg.append(PciRangeEntry {
-        base_address: arch::layout::PCI_MMCONFIG_START.0,
-        segment: 0,
-        start: 0,
-        end: 0,
-        ..Default::default()
-    });
+    for segment in pci_segments {
+        // 32-bit PCI enhanced configuration mechanism
+        mcfg.append(PciRangeEntry {
+            base_address: segment.mmio_config_address,
+            segment: segment.id,
+            start: 0,
+            end: 0,
+            ..Default::default()
+        });
+    }
     mcfg
 }
 
@@ -436,7 +444,7 @@ fn create_iort_table() -> Sdt {
     iort
 }
 
-fn create_viot_table(iommu_bdf: u32, devices_bdf: &[u32]) -> Sdt {
+fn create_viot_table(iommu_bdf: &PciBdf, devices_bdf: &[PciBdf]) -> Sdt {
     // VIOT
     let mut viot = Sdt::new(*b"VIOT", 36, 0, *b"CLOUDH", *b"CHVIOT  ", 0);
     // Node count
@@ -450,8 +458,8 @@ fn create_viot_table(iommu_bdf: u32, devices_bdf: &[u32]) -> Sdt {
     viot.append(ViotVirtioPciNode {
         type_: 3,
         length: 16,
-        pci_segment: 0,
-        pci_bdf_number: iommu_bdf as u16,
+        pci_segment: iommu_bdf.segment(),
+        pci_bdf_number: iommu_bdf.into(),
         ..Default::default()
     });
 
@@ -459,11 +467,11 @@ fn create_viot_table(iommu_bdf: u32, devices_bdf: &[u32]) -> Sdt {
         viot.append(ViotPciRangeNode {
             type_: 1,
             length: 24,
-            endpoint_start: *device_bdf,
-            pci_segment_start: 0,
-            pci_segment_end: 0,
-            pci_bdf_start: *device_bdf as u16,
-            pci_bdf_end: *device_bdf as u16,
+            endpoint_start: device_bdf.into(),
+            pci_segment_start: device_bdf.segment(),
+            pci_segment_end: device_bdf.segment(),
+            pci_bdf_start: device_bdf.into(),
+            pci_bdf_end: device_bdf.into(),
             output_node: 48,
             ..Default::default()
         });
@@ -479,6 +487,7 @@ pub fn create_acpi_tables(
     memory_manager: &Arc<Mutex<MemoryManager>>,
     numa_nodes: &NumaNodes,
 ) -> GuestAddress {
+    let start_time = Instant::now();
     let mut prev_tbl_len: u64;
     let mut prev_tbl_off: GuestAddress;
     let rsdp_offset = arch::layout::RSDP_POINTER;
@@ -536,7 +545,7 @@ pub fn create_acpi_tables(
     }
 
     // MCFG
-    let mcfg = create_mcfg_table();
+    let mcfg = create_mcfg_table(device_manager.lock().unwrap().pci_segments());
     let mcfg_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
     guest_mem
         .write_slice(mcfg.as_slice(), mcfg_offset)
@@ -617,7 +626,7 @@ pub fn create_acpi_tables(
     // VIOT
     if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
     {
-        let viot = create_viot_table(*iommu_bdf, devices_bdf);
+        let viot = create_viot_table(iommu_bdf, devices_bdf);
 
         let viot_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
         guest_mem
@@ -645,5 +654,9 @@ pub fn create_acpi_tables(
         .write_slice(rsdp.as_slice(), rsdp_offset)
         .expect("Error writing RSDP");
 
+    info!(
+        "Generated ACPI tables: took {}µs",
+        Instant::now().duration_since(start_time).as_micros()
+    );
     rsdp_offset
 }

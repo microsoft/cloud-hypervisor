@@ -32,6 +32,9 @@ pub const DEFAULT_QUEUE_SIZE_VUNET: u16 = 256;
 pub const DEFAULT_NUM_QUEUES_VUBLK: usize = 1;
 pub const DEFAULT_QUEUE_SIZE_VUBLK: u16 = 128;
 
+pub const DEFAULT_NUM_PCI_SEGMENTS: u16 = 1;
+const MAX_NUM_PCI_SEGMENTS: u16 = 16;
+
 /// Errors associated with VM configuration parameters.
 #[derive(Debug)]
 pub enum Error {
@@ -101,6 +104,8 @@ pub enum Error {
     ParseUserDevice(OptionParserError),
     /// Missing socket for userspace device
     ParseUserDeviceSocketMissing,
+    /// Failed parsing platform parameters
+    ParsePlatform(OptionParserError),
 }
 
 #[derive(Debug)]
@@ -149,6 +154,10 @@ pub enum ValidationError {
     UserDevicesRequireSharedMemory,
     /// Memory zone is reused across NUMA nodes
     MemoryZoneReused(String, u32, u32),
+    /// Invalid number of PCI segments
+    InvalidNumPciSegments(u16),
+    /// Invalid PCI segment id
+    InvalidPciSegment(u16),
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -206,6 +215,16 @@ impl fmt::Display for ValidationError {
                     s, u1, u2
                 )
             }
+            InvalidNumPciSegments(n) => {
+                write!(
+                    f,
+                    "Number of PCI segments ({}) not in range of 1 to {}",
+                    n, MAX_NUM_PCI_SEGMENTS
+                )
+            }
+            InvalidPciSegment(pci_segment) => {
+                write!(f, "Invalid PCI segment id{}", pci_segment)
+            }
         }
     }
 }
@@ -258,6 +277,7 @@ impl fmt::Display for Error {
             ParseTdx(o) => write!(f, "Error parsing --tdx: {}", o),
             #[cfg(feature = "tdx")]
             FirmwarePathMissing => write!(f, "TDX firmware missing"),
+            ParsePlatform(o) => write!(f, "Error parsing --platform: {}", o),
         }
     }
 }
@@ -288,6 +308,7 @@ pub struct VmParams<'a> {
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
     pub tdx: Option<&'a str>,
+    pub platform: Option<&'a str>,
 }
 
 impl<'a> VmParams<'a> {
@@ -316,6 +337,7 @@ impl<'a> VmParams<'a> {
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
         let numa: Option<Vec<&str>> = args.values_of("numa").map(|x| x.collect());
         let watchdog = args.is_present("watchdog");
+        let platform = args.value_of("platform");
         #[cfg(feature = "tdx")]
         let tdx = args.value_of("tdx");
         VmParams {
@@ -342,6 +364,7 @@ impl<'a> VmParams<'a> {
             watchdog,
             #[cfg(feature = "tdx")]
             tdx,
+            platform,
         }
     }
 }
@@ -480,6 +503,48 @@ impl Default for CpusConfig {
             topology: None,
             kvm_hyperv: false,
             max_phys_bits: DEFAULT_MAX_PHYS_BITS,
+        }
+    }
+}
+
+fn default_platformconfig_num_pci_segments() -> u16 {
+    DEFAULT_NUM_PCI_SEGMENTS
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct PlatformConfig {
+    #[serde(default = "default_platformconfig_num_pci_segments")]
+    pub num_pci_segments: u16,
+}
+
+impl PlatformConfig {
+    pub fn parse(platform: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser.add("num_pci_segments");
+        parser.parse(platform).map_err(Error::ParseCpus)?;
+
+        let num_pci_segments: u16 = parser
+            .convert("num_pci_segments")
+            .map_err(Error::ParsePlatform)?
+            .unwrap_or(DEFAULT_NUM_PCI_SEGMENTS);
+        Ok(PlatformConfig { num_pci_segments })
+    }
+
+    pub fn validate(&self) -> ValidationResult<()> {
+        if self.num_pci_segments == 0 || self.num_pci_segments > MAX_NUM_PCI_SEGMENTS {
+            return Err(ValidationError::InvalidNumPciSegments(
+                self.num_pci_segments,
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for PlatformConfig {
+    fn default() -> Self {
+        PlatformConfig {
+            num_pci_segments: DEFAULT_NUM_PCI_SEGMENTS,
         }
     }
 }
@@ -761,6 +826,8 @@ pub struct DiskConfig {
     // For testing use only. Not exposed in API.
     #[serde(default)]
     pub disable_io_uring: bool,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 fn default_diskconfig_num_queues() -> usize {
@@ -790,6 +857,7 @@ impl Default for DiskConfig {
             id: None,
             disable_io_uring: false,
             rate_limiter_config: None,
+            pci_segment: 0,
         }
     }
 }
@@ -801,7 +869,7 @@ impl DiskConfig {
          vhost_user=on|off,socket=<vhost_user_socket_path>,poll_queue=on|off,\
          bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
          ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,\
-         id=<device_id>\"";
+         id=<device_id>,pci_segment=<segment_id>\"";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -822,7 +890,8 @@ impl DiskConfig {
             .add("ops_one_time_burst")
             .add("ops_refill_time")
             .add("id")
-            .add("_disable_io_uring");
+            .add("_disable_io_uring")
+            .add("pci_segment");
         parser.parse(disk).map_err(Error::ParseDisk)?;
 
         let path = parser.get("path").map(PathBuf::from);
@@ -866,6 +935,10 @@ impl DiskConfig {
             .map_err(Error::ParseDisk)?
             .unwrap_or(Toggle(false))
             .0;
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParseDisk)?
+            .unwrap_or_default();
         let bw_size = parser
             .convert("bw_size")
             .map_err(Error::ParseDisk)?
@@ -934,12 +1007,19 @@ impl DiskConfig {
             rate_limiter_config,
             id,
             disable_io_uring,
+            pci_segment,
         })
     }
 
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if self.num_queues > vm_config.cpus.boot_vcpus as usize {
             return Err(ValidationError::TooManyQueues);
+        }
+
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
         }
 
         Ok(())
@@ -1004,6 +1084,8 @@ pub struct NetConfig {
     pub fds: Option<Vec<i32>>,
     #[serde(default)]
     pub rate_limiter_config: Option<RateLimiterConfig>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 fn default_netconfig_tap() -> Option<String> {
@@ -1047,6 +1129,7 @@ impl Default for NetConfig {
             id: None,
             fds: None,
             rate_limiter_config: None,
+            pci_segment: 0,
         }
     }
 }
@@ -1057,7 +1140,7 @@ impl NetConfig {
     num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,\
     vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,\
     bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
-    ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>\"";
+    ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,pci_segment=<segment_id>\"";
 
     pub fn parse(net: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1081,7 +1164,8 @@ impl NetConfig {
             .add("bw_refill_time")
             .add("ops_size")
             .add("ops_one_time_burst")
-            .add("ops_refill_time");
+            .add("ops_refill_time")
+            .add("pci_segment");
         parser.parse(net).map_err(Error::ParseNetwork)?;
 
         let tap = parser.get("tap");
@@ -1126,7 +1210,10 @@ impl NetConfig {
             .convert::<IntegerList>("fd")
             .map_err(Error::ParseNetwork)?
             .map(|v| v.0.iter().map(|e| *e as i32).collect());
-
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParseNetwork)?
+            .unwrap_or_default();
         let bw_size = parser
             .convert("bw_size")
             .map_err(Error::ParseDisk)?
@@ -1193,6 +1280,7 @@ impl NetConfig {
             id,
             fds,
             rate_limiter_config,
+            pci_segment,
         };
         Ok(config)
     }
@@ -1216,6 +1304,12 @@ impl NetConfig {
 
         if (self.num_queues / 2) > vm_config.cpus.boot_vcpus as usize {
             return Err(ValidationError::TooManyQueues);
+        }
+
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
         }
 
         Ok(())
@@ -1310,6 +1404,8 @@ pub struct FsConfig {
     pub cache_size: u64,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 fn default_fsconfig_num_queues() -> usize {
@@ -1338,6 +1434,7 @@ impl Default for FsConfig {
             dax: default_fsconfig_dax(),
             cache_size: default_fsconfig_cache_size(),
             id: None,
+            pci_segment: 0,
         }
     }
 }
@@ -1346,7 +1443,7 @@ impl FsConfig {
     pub const SYNTAX: &'static str = "virtio-fs parameters \
     \"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,\
     queue_size=<size_of_each_queue>,dax=on|off,cache_size=<DAX cache size: \
-    default 8Gib>,id=<device_id>\"";
+    default 8Gib>,id=<device_id>,pci_segment=<segment_id>\"";
 
     pub fn parse(fs: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1357,7 +1454,8 @@ impl FsConfig {
             .add("queue_size")
             .add("num_queues")
             .add("socket")
-            .add("id");
+            .add("id")
+            .add("pci_segment");
         parser.parse(fs).map_err(Error::ParseFileSystem)?;
 
         let tag = parser.get("tag").ok_or(Error::ParseFsTagMissing)?;
@@ -1390,6 +1488,11 @@ impl FsConfig {
 
         let id = parser.get("id");
 
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParseFileSystem)?
+            .unwrap_or_default();
+
         Ok(FsConfig {
             tag,
             socket,
@@ -1398,12 +1501,19 @@ impl FsConfig {
             dax,
             cache_size,
             id,
+            pci_segment,
         })
     }
 
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if self.num_queues > vm_config.cpus.boot_vcpus as usize {
             return Err(ValidationError::TooManyQueues);
+        }
+
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
         }
 
         Ok(())
@@ -1423,12 +1533,14 @@ pub struct PmemConfig {
     pub discard_writes: bool,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 impl PmemConfig {
     pub const SYNTAX: &'static str = "Persistent memory parameters \
     \"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,\
-    mergeable=on|off,discard_writes=on|off,id=<device_id>\"";
+    mergeable=on|off,discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\"";
     pub fn parse(pmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
@@ -1437,7 +1549,8 @@ impl PmemConfig {
             .add("mergeable")
             .add("iommu")
             .add("discard_writes")
-            .add("id");
+            .add("id")
+            .add("pci_segment");
         parser.parse(pmem).map_err(Error::ParsePersistentMemory)?;
 
         let file = PathBuf::from(parser.get("file").ok_or(Error::ParsePmemFileMissing)?);
@@ -1461,6 +1574,10 @@ impl PmemConfig {
             .unwrap_or(Toggle(false))
             .0;
         let id = parser.get("id");
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParsePersistentMemory)?
+            .unwrap_or_default();
 
         Ok(PmemConfig {
             file,
@@ -1469,7 +1586,18 @@ impl PmemConfig {
             mergeable,
             discard_writes,
             id,
+            pci_segment,
         })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1559,14 +1687,16 @@ pub struct DeviceConfig {
     pub iommu: bool,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 impl DeviceConfig {
     pub const SYNTAX: &'static str =
-        "Direct device assignment parameters \"path=<device_path>,iommu=on|off,id=<device_id>\"";
+        "Direct device assignment parameters \"path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
     pub fn parse(device: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("path").add("id").add("iommu");
+        parser.add("path").add("id").add("iommu").add("pci_segment");
         parser.parse(device).map_err(Error::ParseDevice)?;
 
         let path = parser
@@ -1579,7 +1709,27 @@ impl DeviceConfig {
             .unwrap_or(Toggle(false))
             .0;
         let id = parser.get("id");
-        Ok(DeviceConfig { path, iommu, id })
+        let pci_segment = parser
+            .convert::<u16>("pci_segment")
+            .map_err(Error::ParseDevice)?
+            .unwrap_or_default();
+
+        Ok(DeviceConfig {
+            path,
+            iommu,
+            id,
+            pci_segment,
+        })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1588,23 +1738,43 @@ pub struct UserDeviceConfig {
     pub socket: PathBuf,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 impl UserDeviceConfig {
-    pub const SYNTAX: &'static str = "Userspace device socket=<socket_path>,id=<device_id>\"";
+    pub const SYNTAX: &'static str =
+        "Userspace device socket=<socket_path>,id=<device_id>,pci_segment=<segment_id>\"";
     pub fn parse(user_device: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("socket").add("id");
+        parser.add("socket").add("id").add("pci_segment");
         parser.parse(user_device).map_err(Error::ParseUserDevice)?;
 
         let socket = parser
             .get("socket")
             .map(PathBuf::from)
             .ok_or(Error::ParseUserDeviceSocketMissing)?;
-
         let id = parser.get("id");
+        let pci_segment = parser
+            .convert::<u16>("pci_segment")
+            .map_err(Error::ParseUserDevice)?
+            .unwrap_or_default();
 
-        Ok(UserDeviceConfig { socket, id })
+        Ok(UserDeviceConfig {
+            socket,
+            id,
+            pci_segment,
+        })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+        }
+
+        Ok(())
     }
 }
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
@@ -1615,14 +1785,21 @@ pub struct VsockConfig {
     pub iommu: bool,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
 }
 
 impl VsockConfig {
     pub const SYNTAX: &'static str = "Virtio VSOCK parameters \
-        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>\"";
+        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
     pub fn parse(vsock: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
-        parser.add("socket").add("cid").add("iommu").add("id");
+        parser
+            .add("socket")
+            .add("cid")
+            .add("iommu")
+            .add("id")
+            .add("pci_segment");
         parser.parse(vsock).map_err(Error::ParseVsock)?;
 
         let socket = parser
@@ -1639,13 +1816,28 @@ impl VsockConfig {
             .map_err(Error::ParseVsock)?
             .ok_or(Error::ParseVsockCidMissing)?;
         let id = parser.get("id");
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParseVsock)?
+            .unwrap_or_default();
 
         Ok(VsockConfig {
             cid,
             socket,
             iommu,
             id,
+            pci_segment,
         })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1849,6 +2041,7 @@ pub struct VmConfig {
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
     pub tdx: Option<TdxConfig>,
+    pub platform: Option<PlatformConfig>,
 }
 
 impl VmConfig {
@@ -1920,6 +2113,12 @@ impl VmConfig {
             }
         }
 
+        if let Some(pmems) = &self.pmem {
+            for pmem in pmems {
+                pmem.validate(self)?;
+            }
+        }
+
         if let Some(t) = &self.cpus.topology {
             if t.threads_per_core == 0
                 || t.cores_per_die == 0
@@ -1948,6 +2147,20 @@ impl VmConfig {
             if !user_devices.is_empty() && !self.memory.shared {
                 return Err(ValidationError::UserDevicesRequireSharedMemory);
             }
+
+            for user_device in user_devices {
+                user_device.validate(self)?;
+            }
+        }
+
+        if let Some(devices) = &self.devices {
+            for device in devices {
+                device.validate(self)?;
+            }
+        }
+
+        if let Some(vsock) = &self.vsock {
+            vsock.validate(self)?;
         }
 
         if let Some(numa) = &self.numa {
@@ -1969,6 +2182,8 @@ impl VmConfig {
                 }
             }
         }
+
+        self.platform.as_ref().map(|p| p.validate()).transpose()?;
 
         Ok(())
     }
@@ -2072,6 +2287,8 @@ impl VmConfig {
             vsock = Some(vsock_config);
         }
 
+        let platform = vm_params.platform.map(PlatformConfig::parse).transpose()?;
+
         #[cfg(target_arch = "x86_64")]
         let mut sgx_epc: Option<Vec<SgxEpcConfig>> = None;
         #[cfg(target_arch = "x86_64")]
@@ -2137,6 +2354,7 @@ impl VmConfig {
             watchdog: vm_params.watchdog,
             #[cfg(feature = "tdx")]
             tdx,
+            platform,
         };
         config.validate().map_err(Error::Validation)?;
         Ok(config)
@@ -2641,7 +2859,8 @@ mod tests {
             DeviceConfig {
                 path: PathBuf::from("/path/to/device"),
                 id: None,
-                iommu: false
+                iommu: false,
+                ..Default::default()
             }
         );
 
@@ -2650,7 +2869,8 @@ mod tests {
             DeviceConfig {
                 path: PathBuf::from("/path/to/device"),
                 id: None,
-                iommu: true
+                iommu: true,
+                ..Default::default()
             }
         );
 
@@ -2659,7 +2879,8 @@ mod tests {
             DeviceConfig {
                 path: PathBuf::from("/path/to/device"),
                 id: Some("mydevice0".to_owned()),
-                iommu: true
+                iommu: true,
+                ..Default::default()
             }
         );
 
@@ -2677,6 +2898,7 @@ mod tests {
                 socket: PathBuf::from("/tmp/sock"),
                 iommu: false,
                 id: None,
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -2686,6 +2908,7 @@ mod tests {
                 socket: PathBuf::from("/tmp/sock"),
                 iommu: true,
                 id: None,
+                ..Default::default()
             }
         );
         Ok(())
@@ -2747,6 +2970,7 @@ mod tests {
             watchdog: false,
             #[cfg(feature = "tdx")]
             tdx: None,
+            platform: None,
         };
 
         assert!(valid_config.validate().is_ok());
@@ -2860,9 +3084,21 @@ mod tests {
         invalid_config.memory.hugepage_size = Some(2 << 20);
         assert!(invalid_config.validate().is_err());
 
-        let mut invalid_config = valid_config;
+        let mut invalid_config = valid_config.clone();
         invalid_config.memory.hugepages = true;
         invalid_config.memory.hugepage_size = Some(3 << 20);
+        assert!(invalid_config.validate().is_err());
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+        });
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut invalid_config = valid_config;
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 17,
+        });
         assert!(invalid_config.validate().is_err());
     }
 }

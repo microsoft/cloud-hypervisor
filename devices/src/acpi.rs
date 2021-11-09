@@ -104,7 +104,7 @@ impl BusDevice for AcpiGedDevice {
 
 #[cfg(feature = "acpi")]
 impl Aml for AcpiGedDevice {
-    fn to_aml_bytes(&self) -> Vec<u8> {
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         aml::Device::new(
             "_SB_.GED_".into(),
             vec![
@@ -151,7 +151,7 @@ impl Aml for AcpiGedDevice {
                         &aml::And::new(&aml::Local(1), &aml::Local(0), &4usize),
                         &aml::If::new(
                             &aml::Equal::new(&aml::Local(1), &4usize),
-                            vec![&aml::MethodCall::new("\\_SB_.PCI0.PCNT".into(), vec![])],
+                            vec![&aml::MethodCall::new("\\_SB_.PHPR.PSCN".into(), vec![])],
                         ),
                         &aml::And::new(&aml::Local(1), &aml::Local(0), &8usize),
                         &aml::If::new(
@@ -165,7 +165,7 @@ impl Aml for AcpiGedDevice {
                 ),
             ],
         )
-        .to_aml_bytes()
+        .append_aml_bytes(bytes)
     }
 }
 

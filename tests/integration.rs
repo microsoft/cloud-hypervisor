@@ -1607,6 +1607,7 @@ mod tests {
         virtiofsd_cache: &str,
         prepare_daemon: &dyn Fn(&TempDir, &str, &str) -> (std::process::Child, String),
         hotplug: bool,
+        pci_segment: Option<u16>,
     ) {
         #[cfg(target_arch = "aarch64")]
         let focal_image = if hotplug {
@@ -1657,10 +1658,20 @@ mod tests {
             .default_disks()
             .default_net()
             .args(&["--api-socket", &api_socket]);
+        if pci_segment.is_some() {
+            guest_command.args(&["--platform", "num_pci_segments=16"]);
+        }
 
         let fs_params = format!(
-            "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}",
-            virtiofsd_socket_path, dax_vmm_param, cache_size_vmm_param
+            "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}{}",
+            virtiofsd_socket_path,
+            dax_vmm_param,
+            cache_size_vmm_param,
+            if let Some(pci_segment) = pci_segment {
+                format!(",pci_segment={}", pci_segment)
+            } else {
+                "".to_owned()
+            }
         );
 
         if !hotplug {
@@ -1677,8 +1688,16 @@ mod tests {
                 let (cmd_success, cmd_output) =
                     remote_command_w_output(&api_socket, "add-fs", Some(&fs_params));
                 assert!(cmd_success);
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
+
+                if let Some(pci_segment) = pci_segment {
+                    assert!(String::from_utf8_lossy(&cmd_output).contains(&format!(
+                        "{{\"id\":\"myfs0\",\"bdf\":\"{:04x}:00:01.0\"}}",
+                        pci_segment
+                    )));
+                } else {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
+                }
 
                 thread::sleep(std::time::Duration::new(10, 0));
             }
@@ -1749,16 +1768,31 @@ mod tests {
             let r = std::panic::catch_unwind(|| {
                 thread::sleep(std::time::Duration::new(10, 0));
                 let fs_params = format!(
-                    "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}",
-                    virtiofsd_socket_path, dax_vmm_param, cache_size_vmm_param
+                    "id=myfs0,tag=myfs,socket={},num_queues=1,queue_size=1024,dax={}{}{}",
+                    virtiofsd_socket_path,
+                    dax_vmm_param,
+                    cache_size_vmm_param,
+                    if let Some(pci_segment) = pci_segment {
+                        format!(",pci_segment={}", pci_segment)
+                    } else {
+                        "".to_owned()
+                    }
                 );
 
                 // Add back and check it works
                 let (cmd_success, cmd_output) =
                     remote_command_w_output(&api_socket, "add-fs", Some(&fs_params));
                 assert!(cmd_success);
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
+                if let Some(pci_segment) = pci_segment {
+                    assert!(String::from_utf8_lossy(&cmd_output).contains(&format!(
+                        "{{\"id\":\"myfs0\",\"bdf\":\"{:04x}:00:01.0\"}}",
+                        pci_segment
+                    )));
+                } else {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains("{\"id\":\"myfs0\",\"bdf\":\"0000:00:06.0\"}"));
+                }
+
                 thread::sleep(std::time::Duration::new(10, 0));
                 // Mount shared directory through virtio_fs filesystem
                 let mount_cmd = format!(
@@ -3061,24 +3095,38 @@ mod tests {
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size() {
-            test_virtio_fs(true, None, "none", &prepare_virtiofsd, false)
+            test_virtio_fs(true, None, "none", &prepare_virtiofsd, false, None)
         }
 
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_cache_size_1_gib() {
-            test_virtio_fs(true, Some(0x4000_0000), "none", &prepare_virtiofsd, false)
+            test_virtio_fs(
+                true,
+                Some(0x4000_0000),
+                "none",
+                &prepare_virtiofsd,
+                false,
+                None,
+            )
         }
 
         #[test]
         fn test_virtio_fs_dax_off() {
-            test_virtio_fs(false, None, "none", &prepare_virtiofsd, false)
+            test_virtio_fs(false, None, "none", &prepare_virtiofsd, false, None)
         }
 
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_dax_on_default_cache_size_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(true, None, "never", &prepare_virtiofsd_rs_daemon, false)
+            test_virtio_fs(
+                true,
+                None,
+                "never",
+                &prepare_virtiofsd_rs_daemon,
+                false,
+                None,
+            )
         }
 
         #[test]
@@ -3090,34 +3138,82 @@ mod tests {
                 "never",
                 &prepare_virtiofsd_rs_daemon,
                 false,
+                None,
             )
         }
 
         #[test]
         fn test_virtio_fs_dax_off_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(false, None, "never", &prepare_virtiofsd_rs_daemon, false)
+            test_virtio_fs(
+                false,
+                None,
+                "never",
+                &prepare_virtiofsd_rs_daemon,
+                false,
+                None,
+            )
         }
 
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on() {
-            test_virtio_fs(true, None, "none", &prepare_virtiofsd, true)
+            test_virtio_fs(true, None, "none", &prepare_virtiofsd, true, None)
         }
 
         #[test]
         fn test_virtio_fs_hotplug_dax_off() {
-            test_virtio_fs(false, None, "none", &prepare_virtiofsd, true)
+            test_virtio_fs(false, None, "none", &prepare_virtiofsd, true, None)
         }
 
         #[test]
         #[cfg(not(feature = "mshv"))]
         fn test_virtio_fs_hotplug_dax_on_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(true, None, "never", &prepare_virtiofsd_rs_daemon, true)
+            test_virtio_fs(
+                true,
+                None,
+                "never",
+                &prepare_virtiofsd_rs_daemon,
+                true,
+                None,
+            )
         }
 
         #[test]
         fn test_virtio_fs_hotplug_dax_off_w_virtiofsd_rs_daemon() {
-            test_virtio_fs(false, None, "never", &prepare_virtiofsd_rs_daemon, true)
+            test_virtio_fs(
+                false,
+                None,
+                "never",
+                &prepare_virtiofsd_rs_daemon,
+                true,
+                None,
+            )
+        }
+
+        #[test]
+        #[cfg(all(not(feature = "mshv"), target_arch = "x86_64"))]
+        fn test_virtio_fs_multi_segment_hotplug() {
+            test_virtio_fs(
+                true,
+                Some(0x4000_0000),
+                "none",
+                &prepare_virtiofsd,
+                true,
+                Some(15),
+            )
+        }
+
+        #[test]
+        #[cfg(all(not(feature = "mshv"), target_arch = "x86_64"))]
+        fn test_virtio_fs_multi_segment() {
+            test_virtio_fs(
+                true,
+                Some(0x4000_0000),
+                "none",
+                &prepare_virtiofsd,
+                false,
+                Some(15),
+            )
         }
 
         #[test]
@@ -3522,9 +3618,7 @@ mod tests {
                         }
                         Err(mpsc::TryRecvError::Empty) => {
                             empty += 1;
-                            if empty > 5 {
-                                panic!("No login on pty");
-                            }
+                            assert!(!(empty > 5), "No login on pty");
                         }
                         _ => panic!("No login on pty"),
                     }
@@ -4799,6 +4893,16 @@ mod tests {
 
         #[test]
         fn test_pmem_hotplug() {
+            _test_pmem_hotplug(None)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[test]
+        fn test_pmem_multi_segment_hotplug() {
+            _test_pmem_hotplug(Some(15))
+        }
+
+        fn _test_pmem_hotplug(pci_segment: Option<u16>) {
             #[cfg(target_arch = "aarch64")]
             let focal_image = FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string();
             #[cfg(target_arch = "x86_64")]
@@ -4813,17 +4917,22 @@ mod tests {
 
             let api_socket = temp_api_path(&guest.tmp_dir);
 
-            let mut child = GuestCommand::new(&guest)
-                .args(&["--api-socket", &api_socket])
+            let mut cmd = GuestCommand::new(&guest);
+
+            cmd.args(&["--api-socket", &api_socket])
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
                 .default_net()
-                .capture_output()
-                .spawn()
-                .unwrap();
+                .capture_output();
+
+            if pci_segment.is_some() {
+                cmd.args(&["--platform", "num_pci_segments=16"]);
+            }
+
+            let mut child = cmd.spawn().unwrap();
 
             let r = std::panic::catch_unwind(|| {
                 guest.wait_vm_boot(None).unwrap();
@@ -4845,13 +4954,25 @@ mod tests {
                     &api_socket,
                     "add-pmem",
                     Some(&format!(
-                        "file={},id=test0",
-                        pmem_temp_file.as_path().to_str().unwrap()
+                        "file={},id=test0{}",
+                        pmem_temp_file.as_path().to_str().unwrap(),
+                        if let Some(pci_segment) = pci_segment {
+                            format!(",pci_segment={}", pci_segment)
+                        } else {
+                            "".to_owned()
+                        }
                     )),
                 );
                 assert!(cmd_success);
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:06.0\"}"));
+                if let Some(pci_segment) = pci_segment {
+                    assert!(String::from_utf8_lossy(&cmd_output).contains(&format!(
+                        "{{\"id\":\"test0\",\"bdf\":\"{:04x}:00:01.0\"}}",
+                        pci_segment
+                    )));
+                } else {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:06.0\"}"));
+                }
 
                 // Check that /dev/pmem0 exists and the block size is 128M
                 assert_eq!(
@@ -4914,6 +5035,16 @@ mod tests {
 
         #[test]
         fn test_net_hotplug() {
+            _test_net_hotplug(None)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[test]
+        fn test_net_multi_segment_hotplug() {
+            _test_net_hotplug(Some(15))
+        }
+
+        fn _test_net_hotplug(pci_segment: Option<u16>) {
             let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
             let guest = Guest::new(Box::new(focal));
 
@@ -4925,16 +5056,21 @@ mod tests {
             let api_socket = temp_api_path(&guest.tmp_dir);
 
             // Boot without network
-            let mut child = GuestCommand::new(&guest)
-                .args(&["--api-socket", &api_socket])
+            let mut cmd = GuestCommand::new(&guest);
+
+            cmd.args(&["--api-socket", &api_socket])
                 .args(&["--cpus", "boot=1"])
                 .args(&["--memory", "size=512M"])
                 .args(&["--kernel", kernel_path.to_str().unwrap()])
                 .args(&["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                 .default_disks()
-                .capture_output()
-                .spawn()
-                .unwrap();
+                .capture_output();
+
+            if pci_segment.is_some() {
+                cmd.args(&["--platform", "num_pci_segments=16"]);
+            }
+
+            let mut child = cmd.spawn().unwrap();
 
             thread::sleep(std::time::Duration::new(20, 0));
 
@@ -4943,16 +5079,30 @@ mod tests {
                 let (cmd_success, cmd_output) = remote_command_w_output(
                     &api_socket,
                     "add-net",
-                    Some(guest.default_net_string().as_str()),
+                    Some(
+                        format!(
+                            "{}{},id=test0",
+                            guest.default_net_string(),
+                            if let Some(pci_segment) = pci_segment {
+                                format!(",pci_segment={}", pci_segment)
+                            } else {
+                                "".to_owned()
+                            }
+                        )
+                        .as_str(),
+                    ),
                 );
                 assert!(cmd_success);
 
-                #[cfg(target_arch = "x86_64")]
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"_net2\",\"bdf\":\"0000:00:05.0\"}"));
-                #[cfg(target_arch = "aarch64")]
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"_net0\",\"bdf\":\"0000:00:05.0\"}"));
+                if let Some(pci_segment) = pci_segment {
+                    assert!(String::from_utf8_lossy(&cmd_output).contains(&format!(
+                        "{{\"id\":\"test0\",\"bdf\":\"{:04x}:00:01.0\"}}",
+                        pci_segment
+                    )));
+                } else {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains("{\"id\":\"test0\",\"bdf\":\"0000:00:05.0\"}"));
+                }
 
                 thread::sleep(std::time::Duration::new(5, 0));
 
@@ -4968,29 +5118,36 @@ mod tests {
                 );
 
                 // Remove network
-                assert!(remote_command(
-                    &api_socket,
-                    "remove-device",
-                    #[cfg(target_arch = "x86_64")]
-                    Some("_net2"),
-                    #[cfg(target_arch = "aarch64")]
-                    Some("_net0")
-                ));
+                assert!(remote_command(&api_socket, "remove-device", Some("test0"),));
                 thread::sleep(std::time::Duration::new(5, 0));
 
-                // Add network again
                 let (cmd_success, cmd_output) = remote_command_w_output(
                     &api_socket,
                     "add-net",
-                    Some(guest.default_net_string().as_str()),
+                    Some(
+                        format!(
+                            "{}{},id=test1",
+                            guest.default_net_string(),
+                            if let Some(pci_segment) = pci_segment {
+                                format!(",pci_segment={}", pci_segment)
+                            } else {
+                                "".to_owned()
+                            }
+                        )
+                        .as_str(),
+                    ),
                 );
                 assert!(cmd_success);
-                #[cfg(target_arch = "x86_64")]
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"_net3\",\"bdf\":\"0000:00:05.0\"}"));
-                #[cfg(target_arch = "aarch64")]
-                assert!(String::from_utf8_lossy(&cmd_output)
-                    .contains("{\"id\":\"_net1\",\"bdf\":\"0000:00:05.0\"}"));
+
+                if let Some(pci_segment) = pci_segment {
+                    assert!(String::from_utf8_lossy(&cmd_output).contains(&format!(
+                        "{{\"id\":\"test1\",\"bdf\":\"{:04x}:00:01.0\"}}",
+                        pci_segment
+                    )));
+                } else {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .contains("{\"id\":\"test1\",\"bdf\":\"0000:00:05.0\"}"));
+                }
 
                 thread::sleep(std::time::Duration::new(5, 0));
 

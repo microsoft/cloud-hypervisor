@@ -20,9 +20,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61604a8f862e1d5c3229fdd78f8b02c68dcf73a4c4b05fd636d12240aaa242c1"
+checksum = "ee10e43ae4a853c0a3591d4e2ada1719e553be18199d9da9d4a83f5927c2f5c7"
 
 [[package]]
 name = "api_client"
@@ -105,6 +105,7 @@ dependencies = [
  "versionize_derive",
  "vhdx",
  "virtio-bindings",
+ "virtio-queue",
  "vm-memory",
  "vm-virtio",
  "vmm-sys-util",
@@ -146,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "cloud-hypervisor"
-version = "18.0.0"
+version = "19.0.0"
 dependencies = [
  "anyhow",
  "api_client",
@@ -178,6 +179,7 @@ dependencies = [
  "seccompiler",
  "vhdx",
  "virtio-devices",
+ "virtio-queue",
  "vm-memory",
  "vm-virtio",
  "vmm-sys-util",
@@ -338,9 +340,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.103"
+version = "0.2.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd8f7255a17a627354f321ef0055d63b898c6fb27eff628af4d1b66b7331edf6"
+checksum = "a60553f9a9e039a333b4e9b20573b9e9b9c0bb3a11e201ccc48ef4283456d673"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -401,6 +403,7 @@ dependencies = [
  "versionize",
  "versionize_derive",
  "virtio-bindings",
+ "virtio-queue",
  "vm-memory",
  "vm-virtio",
  "vmm-sys-util",
@@ -440,9 +443,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.29"
+version = "1.0.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9f5105d4fdaab20335ca9565e106a5d9b82b6219b5ba735731124ac6711d23d"
+checksum = "ba508cc11742c0dc5c1659771673afbab7a0efab23aa17e854cbab0837ed0b43"
 dependencies = [
  "unicode-xid",
 ]
@@ -545,9 +548,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.68"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f690853975602e1bfe1ccbf50504d67174e3bcf340f23b5ea9992e0587a52d8"
+checksum = "e466864e431129c7e0d3476b92f20458e5879919a0596c6472738d9fa2d342f8"
 dependencies = [
  "itoa",
  "ryu",
@@ -587,9 +590,9 @@ checksum = "8ea5119cdb4c55b55d432abb513a0429384878c15dde60cc77b1c99de1a95a6a"
 
 [[package]]
 name = "syn"
-version = "1.0.80"
+version = "1.0.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d010a1623fbd906d51d650a9916aaefc05ffa0e4053ff7fe601167f3e715d194"
+checksum = "f2afee18b8beb5a596ecb4a2dce128c719b4ba399d34126b9e4396e3f9860966"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -618,18 +621,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.29"
+version = "1.0.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "602eca064b2d83369e2b2f34b09c70b605402801927c65c11071ac911d299b88"
+checksum = "854babe52e4df1653706b98fcfc05843010039b406875930a70e4d9644e5c417"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.29"
+version = "1.0.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bad553cc2c78e8de258400763a647e80e6d1b31ee237275d756f6836d204494c"
+checksum = "aa32fd3f627f367fe16f893e2597ae3c05020f8bba2666a4e6ea73d377e5714b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -702,7 +705,7 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=main#d51c1fad37be30c20385c55a217e2d90972ea31d"
+source = "git+https://github.com/rust-vmm/vfio-ioctls?branch=main#8f7f2210ebe71660938b05b2ed7eec9253478bc5"
 dependencies = [
  "byteorder",
  "kvm-bindings",
@@ -786,11 +789,21 @@ dependencies = [
  "versionize_derive",
  "vhost",
  "virtio-bindings",
+ "virtio-queue",
  "vm-allocator",
  "vm-device",
  "vm-memory",
  "vm-migration",
  "vm-virtio",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "virtio-queue"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "vm-memory",
  "vmm-sys-util",
 ]
 
@@ -853,6 +866,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "virtio-bindings",
+ "virtio-queue",
  "vm-memory",
 ]
 
@@ -893,6 +907,7 @@ dependencies = [
  "vfio_user",
  "vhdx",
  "virtio-devices",
+ "virtio-queue",
  "vm-allocator",
  "vm-device",
  "vm-memory",
