@@ -346,12 +346,14 @@ impl cpu::Vcpu for MshvVcpu {
                         _ => {}
                     }
 
-                    if unsafe { access_info.__bindgen_anon_1.string_op() } == 1 {
-                        panic!("String IN/OUT not supported");
-                    }
-                    if unsafe { access_info.__bindgen_anon_1.rep_prefix() } == 1 {
-                        panic!("Rep IN/OUT not supported");
-                    }
+                    assert!(
+                        !(unsafe { access_info.__bindgen_anon_1.string_op() } == 1),
+                        "String IN/OUT not supported"
+                    );
+                    assert!(
+                        !(unsafe { access_info.__bindgen_anon_1.rep_prefix() } == 1),
+                        "Rep IN/OUT not supported"
+                    );
 
                     if is_write {
                         let data = (info.rax as u32).to_le_bytes();
@@ -512,11 +514,12 @@ impl cpu::Vcpu for MshvVcpu {
         self.set_xcrs(&state.xcrs)?;
         self.set_lapic(&state.lapic)?;
         self.set_xsave(&state.xsave)?;
-        // This registers are global and needed to be set only for first VCPU
+        // These registers are global and needed to be set only for first VCPU
+        // as Microsoft Hypervisor allows setting this regsier for only one VCPU
         if self.vp_index == 0 {
             self.fd
                 .set_misc_regs(&state.misc)
-                .map_err(|e| cpu::HypervisorCpuError::SetMiscRegs(e.into()))?;
+                .map_err(|e| cpu::HypervisorCpuError::SetMiscRegs(e.into()))?
         }
         self.fd
             .set_debug_regs(&state.dbg)

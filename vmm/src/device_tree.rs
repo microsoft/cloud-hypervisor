@@ -82,14 +82,13 @@ impl DeviceTree {
             .filter(|v| v.pci_bdf.is_some() && v.pci_device_handle.is_some())
             .collect()
     }
+
     pub fn remove_node_by_pci_bdf(&mut self, pci_bdf: u32) -> Option<DeviceNode> {
         let mut id = None;
         for (k, v) in self.0.iter() {
-            if let Some(bdf) = v.pci_bdf {
-                if bdf == pci_bdf {
-                    id = Some(k.clone());
-                    break;
-                }
+            if v.pci_bdf == Some(pci_bdf) {
+                id = Some(k.clone());
+                break;
             }
         }
 

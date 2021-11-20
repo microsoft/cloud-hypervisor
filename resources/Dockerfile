@@ -1,7 +1,7 @@
 FROM ubuntu:20.04 as dev
 
 ARG TARGETARCH
-ARG RUST_TOOLCHAIN="1.55.0"
+ARG RUST_TOOLCHAIN="1.56.1"
 ARG CLH_SRC_DIR="/cloud-hypervisor"
 ARG CLH_BUILD_DIR="$CLH_SRC_DIR/build"
 ARG CARGO_REGISTRY_DIR="$CLH_BUILD_DIR/cargo_registry"
@@ -109,3 +109,22 @@ RUN git clone --depth 1 https://gitlab.com/virtio-fs/qemu.git -b qemu5.0-virtiof
     && make virtiofsd -j `nproc` \
     && cp virtiofsd /usr/local/bin \
     && cd .. && rm -rf qemu
+
+# install SPDK NVMe
+# only for 'x86_64' platform images as 'docker buildx' can't build 'spdk'
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+       git clone https://github.com/spdk/spdk \
+       && cd spdk \
+       && git checkout a827fd7eeca67209d4c0aaad9a3ed55692e7e36e \
+       && git submodule update --init \
+       && sed -i 's/pip3 install meson/pip3 install meson==0.59.2/g'  scripts/pkgdep/ubuntu.sh \
+       && sed -i 's/meson/meson==0.59.2/g'  scripts/pkgdep/requirements.txt \
+       && apt-get update \
+       && ./scripts/pkgdep.sh \
+       && ./configure --with-vfio-user \
+       && make -j `nproc` \
+       && mkdir /usr/local/bin/spdk-nvme \
+       && cp ./build/bin/nvmf_tgt /usr/local/bin/spdk-nvme \
+       && cp ./scripts/rpc.py /usr/local/bin/spdk-nvme \
+       && cp -r ./scripts/rpc /usr/local/bin/spdk-nvme \
+       && cd .. && rm -rf spdk; fi

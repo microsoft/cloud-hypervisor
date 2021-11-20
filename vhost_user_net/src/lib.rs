@@ -22,9 +22,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::vec::Vec;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Listener;
-use vhost_user_backend::{GuestMemoryMmap, VhostUserBackend, VhostUserDaemon, Vring, VringWorker};
+use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring, VringWorker};
 use virtio_bindings::bindings::virtio_net::*;
-use vm_memory::GuestMemoryAtomic;
 use vmm_sys_util::eventfd::EventFd;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,7 +80,6 @@ impl VhostUserNetThread {
         Ok(VhostUserNetThread {
             kill_evt: EventFd::new(EFD_NONBLOCK).map_err(Error::CreateKillEventFd)?,
             net: NetQueuePair {
-                mem: None,
                 tap_for_write_epoll: tap.clone(),
                 tap,
                 rx: RxVirtio::new(),
@@ -184,13 +182,6 @@ impl VhostUserBackend for VhostUserNetBackend {
 
     fn set_event_idx(&mut self, _enabled: bool) {}
 
-    fn update_memory(&mut self, mem: GuestMemoryMmap) -> VhostUserBackendResult<()> {
-        for thread in self.threads.iter() {
-            thread.lock().unwrap().net.mem = Some(GuestMemoryAtomic::new(mem.clone()));
-        }
-        Ok(())
-    }
-
     fn handle_event(
         &self,
         device_event: u16,
@@ -216,7 +207,7 @@ impl VhostUserBackend for VhostUserNetBackend {
                 let mut vring = vrings[1].write().unwrap();
                 if thread
                     .net
-                    .process_tx(&mut vring.mut_queue())
+                    .process_tx(vring.mut_queue())
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
@@ -228,7 +219,7 @@ impl VhostUserBackend for VhostUserNetBackend {
                 let mut vring = vrings[0].write().unwrap();
                 if thread
                     .net
-                    .process_rx(&mut vring.mut_queue())
+                    .process_rx(vring.mut_queue())
                     .map_err(Error::NetQueuePair)?
                 {
                     vring

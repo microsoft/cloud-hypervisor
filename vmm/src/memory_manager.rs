@@ -33,7 +33,7 @@ use versionize_derive::Versionize;
 use virtio_devices::BlocksState;
 #[cfg(target_arch = "x86_64")]
 use vm_allocator::GsiApic;
-use vm_allocator::SystemAllocator;
+use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::BusDevice;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::guest_memory::FileOffset;
@@ -62,6 +62,9 @@ const HOTPLUG_COUNT: usize = 8;
 const MPOL_BIND: u32 = 2;
 const MPOL_MF_STRICT: u32 = 1;
 const MPOL_MF_MOVE: u32 = 1 << 1;
+
+// Reserve 1 MiB for platform MMIO devices (e.g. ACPI control devices)
+const PLATFORM_DEVICE_AREA_SIZE: u64 = 1 << 20;
 
 #[derive(Clone, Default, Serialize, Deserialize, Versionize)]
 struct HotPlugState {
@@ -144,6 +147,7 @@ pub struct MemoryManager {
     next_memory_slot: u32,
     start_of_device_area: GuestAddress,
     end_of_device_area: GuestAddress,
+    end_of_ram_area: GuestAddress,
     pub vm: Arc<dyn hypervisor::Vm>,
     hotplug_slots: Vec<HotPlugState>,
     selected_slot: usize,
@@ -164,6 +168,7 @@ pub struct MemoryManager {
     memory_zones: MemoryZones,
     log_dirty: bool, // Enable dirty logging for created RAM regions
     arch_mem_regions: Vec<ArchMemRegion>,
+    ram_allocator: AddressAllocator,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -784,10 +789,8 @@ impl MemoryManager {
                     virtio_mem,
                     file_offset,
                 });
-                self.allocator
-                    .lock()
-                    .unwrap()
-                    .allocate_mmio_addresses(Some(region.start_addr()), region.len(), None)
+                self.ram_allocator
+                    .allocate(Some(region.start_addr()), region.len(), None)
                     .ok_or(Error::MemoryRangeAllocation)?;
             }
         }
@@ -799,10 +802,8 @@ impl MemoryManager {
                 // based on the GuestMemory regions.
                 continue;
             }
-            self.allocator
-                .lock()
-                .unwrap()
-                .allocate_mmio_addresses(
+            self.ram_allocator
+                .allocate(
                     Some(GuestAddress(region.base)),
                     region.size as GuestUsize,
                     None,
@@ -820,6 +821,7 @@ impl MemoryManager {
         phys_bits: u8,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         restore_data: Option<&MemoryManagerSnapshotData>,
+        #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         let user_provided_zones = config.size == 0;
 
@@ -828,7 +830,9 @@ impl MemoryManager {
             (((mmio_address_space_size) >> 16) << 16),
             mmio_address_space_size
         );
-        let end_of_device_area = GuestAddress(mmio_address_space_size - 1);
+        let start_of_platform_device_area =
+            GuestAddress(mmio_address_space_size - PLATFORM_DEVICE_AREA_SIZE);
+        let end_of_device_area = start_of_platform_device_area.unchecked_sub(1);
 
         let (ram_size, zones, allow_mem_hotplug) =
             Self::validate_memory_config(config, user_provided_zones)?;
@@ -990,8 +994,8 @@ impl MemoryManager {
                 {
                     1 << 16
                 },
-                GuestAddress(0),
-                mmio_address_space_size,
+                start_of_platform_device_area,
+                PLATFORM_DEVICE_AREA_SIZE,
                 layout::MEM_32BIT_DEVICES_START,
                 layout::MEM_32BIT_DEVICES_SIZE,
                 #[cfg(target_arch = "x86_64")]
@@ -1007,7 +1011,7 @@ impl MemoryManager {
         let acpi_address = allocator
             .lock()
             .unwrap()
-            .allocate_mmio_addresses(None, MEMORY_MANAGER_ACPI_SIZE as u64, None)
+            .allocate_platform_mmio_addresses(None, MEMORY_MANAGER_ACPI_SIZE as u64, None)
             .ok_or(Error::AllocateMmioAddress)?;
 
         #[cfg(not(feature = "tdx"))]
@@ -1015,12 +1019,18 @@ impl MemoryManager {
         #[cfg(feature = "tdx")]
         let log_dirty = !tdx_enabled; // Cannot log dirty pages on a TD
 
+        // If running on SGX the start of device area and RAM area may diverge but
+        // at this point they are next to each other.
+        let end_of_ram_area = start_of_device_area.unchecked_sub(1);
+        let ram_allocator = AddressAllocator::new(GuestAddress(0), start_of_device_area.0).unwrap();
+
         let mut memory_manager = MemoryManager {
             boot_guest_memory,
             guest_memory,
             next_memory_slot,
             start_of_device_area,
             end_of_device_area,
+            end_of_ram_area,
             vm,
             hotplug_slots,
             selected_slot,
@@ -1044,9 +1054,14 @@ impl MemoryManager {
             acpi_address,
             log_dirty,
             arch_mem_regions,
+            ram_allocator,
         };
 
         memory_manager.allocate_address_space()?;
+        #[cfg(target_arch = "x86_64")]
+        if let Some(sgx_epc_config) = sgx_epc_config {
+            memory_manager.setup_sgx(sgx_epc_config)?;
+        }
 
         Ok(Arc::new(Mutex::new(memory_manager)))
     }
@@ -1075,6 +1090,8 @@ impl MemoryManager {
                 #[cfg(feature = "tdx")]
                 false,
                 Some(&mem_snapshot),
+                #[cfg(target_arch = "x86_64")]
+                None,
             )?;
 
             mm.lock()
@@ -1350,7 +1367,7 @@ impl MemoryManager {
 
         let start_addr = MemoryManager::start_addr(self.guest_memory.memory().last_addr(), true)?;
 
-        if start_addr.checked_add(size.try_into().unwrap()).unwrap() > self.start_of_device_area() {
+        if start_addr.checked_add(size.try_into().unwrap()).unwrap() >= self.end_of_ram_area {
             return Err(Error::InsufficientHotplugRam);
         }
 
@@ -1363,10 +1380,8 @@ impl MemoryManager {
         }
 
         // Tell the allocator
-        self.allocator
-            .lock()
-            .unwrap()
-            .allocate_mmio_addresses(Some(start_addr), size as GuestUsize, None)
+        self.ram_allocator
+            .allocate(Some(start_addr), size as GuestUsize, None)
             .ok_or(Error::MemoryRangeAllocation)?;
 
         // Update the slot so that it can be queried via the I/O port
@@ -1585,16 +1600,13 @@ impl MemoryManager {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn setup_sgx(
-        &mut self,
-        sgx_epc_config: Vec<SgxEpcConfig>,
-        vm: &Arc<dyn hypervisor::Vm>,
-    ) -> Result<(), Error> {
+    pub fn setup_sgx(&mut self, sgx_epc_config: Vec<SgxEpcConfig>) -> Result<(), Error> {
         let file = OpenOptions::new()
             .read(true)
             .open("/dev/sgx_provision")
             .map_err(Error::SgxProvisionOpen)?;
-        vm.enable_sgx_attribute(file)
+        self.vm
+            .enable_sgx_attribute(file)
             .map_err(Error::SgxEnableProvisioning)?;
 
         // Go over each EPC section and verify its size is a 4k multiple. At
@@ -1612,17 +1624,18 @@ impl MemoryManager {
             epc_region_size += epc_section.size;
         }
 
-        // Now that we know about the total size for the EPC region, we can
-        // proceed with the allocation of the entire range. The EPC region
-        // must be 4kiB aligned.
-        let epc_region_start = self
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate_mmio_addresses(None, epc_region_size as GuestUsize, Some(0x1000))
-            .ok_or(Error::SgxEpcRangeAllocation)?;
+        // Place the SGX EPC region on a 4k boundary between the RAM and the device area
+        let epc_region_start =
+            GuestAddress(((self.start_of_device_area.0 + 0xfff) / 0x1000) * 0x1000);
+        self.start_of_device_area = epc_region_start
+            .checked_add(epc_region_size)
+            .ok_or(Error::GuestAddressOverFlow)?;
 
         let mut sgx_epc_region = SgxEpcRegion::new(epc_region_start, epc_region_size as GuestUsize);
+        info!(
+            "SGX EPC region: 0x{:x} (0x{:x})",
+            epc_region_start.0, epc_region_size
+        );
 
         // Each section can be memory mapped into the allocated region.
         let mut epc_section_start = epc_region_start.raw_value();
@@ -1655,6 +1668,11 @@ impl MemoryManager {
                     0,
                 )
             } as u64;
+
+            info!(
+                "Adding SGX EPC section: 0x{:x} (0x{:x})",
+                epc_section_start, epc_section.size
+            );
 
             let _mem_slot = self.create_userspace_mapping(
                 epc_section_start,
@@ -1765,13 +1783,13 @@ struct MemoryNotify {
 
 #[cfg(feature = "acpi")]
 impl Aml for MemoryNotify {
-    fn to_aml_bytes(&self) -> Vec<u8> {
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let object = aml::Path::new(&format!("M{:03}", self.slot_id));
         aml::If::new(
             &aml::Equal::new(&aml::Arg(0), &self.slot_id),
             vec![&aml::Notify::new(&object, &aml::Arg(1))],
         )
-        .to_aml_bytes()
+        .append_aml_bytes(bytes)
     }
 }
 
@@ -1782,7 +1800,7 @@ struct MemorySlot {
 
 #[cfg(feature = "acpi")]
 impl Aml for MemorySlot {
-    fn to_aml_bytes(&self) -> Vec<u8> {
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         aml::Device::new(
             format!("M{:03}", self.slot_id).as_str().into(),
             vec![
@@ -1820,7 +1838,7 @@ impl Aml for MemorySlot {
                 ),
             ],
         )
-        .to_aml_bytes()
+        .append_aml_bytes(bytes)
     }
 }
 
@@ -1831,14 +1849,10 @@ struct MemorySlots {
 
 #[cfg(feature = "acpi")]
 impl Aml for MemorySlots {
-    fn to_aml_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         for slot_id in 0..self.slots {
-            bytes.extend_from_slice(&MemorySlot { slot_id }.to_aml_bytes());
+            MemorySlot { slot_id }.append_aml_bytes(bytes);
         }
-
-        bytes
     }
 }
 
@@ -1849,8 +1863,7 @@ struct MemoryMethods {
 
 #[cfg(feature = "acpi")]
 impl Aml for MemoryMethods {
-    fn to_aml_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         // Add "MTFY" notification method
         let mut memory_notifies = Vec::new();
         for slot_id in 0..self.slots {
@@ -1862,239 +1875,213 @@ impl Aml for MemoryMethods {
             memory_notifies_refs.push(memory_notifier);
         }
 
-        bytes.extend_from_slice(
-            &aml::Method::new("MTFY".into(), 2, true, memory_notifies_refs).to_aml_bytes(),
-        );
+        aml::Method::new("MTFY".into(), 2, true, memory_notifies_refs).append_aml_bytes(bytes);
 
         // MSCN method
-        bytes.extend_from_slice(
-            &aml::Method::new(
-                "MSCN".into(),
-                0,
-                true,
-                vec![
-                    // Take lock defined above
-                    &aml::Acquire::new("MLCK".into(), 0xffff),
-                    &aml::Store::new(&aml::Local(0), &aml::ZERO),
-                    &aml::While::new(
-                        &aml::LessThan::new(&aml::Local(0), &self.slots),
-                        vec![
-                            // Write slot number (in first argument) to I/O port via field
-                            &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Local(0)),
-                            // Check if MINS bit is set (inserting)
-                            &aml::If::new(
-                                &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MINS"), &aml::ONE),
-                                // Notify device if it is
-                                vec![
-                                    &aml::MethodCall::new(
-                                        "MTFY".into(),
-                                        vec![&aml::Local(0), &aml::ONE],
-                                    ),
-                                    // Reset MINS bit
-                                    &aml::Store::new(
-                                        &aml::Path::new("\\_SB_.MHPC.MINS"),
-                                        &aml::ONE,
-                                    ),
-                                ],
-                            ),
-                            // Check if MRMV bit is set
-                            &aml::If::new(
-                                &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MRMV"), &aml::ONE),
-                                // Notify device if it is (with the eject constant 0x3)
-                                vec![
-                                    &aml::MethodCall::new(
-                                        "MTFY".into(),
-                                        vec![&aml::Local(0), &3u8],
-                                    ),
-                                    // Reset MRMV bit
-                                    &aml::Store::new(
-                                        &aml::Path::new("\\_SB_.MHPC.MRMV"),
-                                        &aml::ONE,
-                                    ),
-                                ],
-                            ),
-                            &aml::Add::new(&aml::Local(0), &aml::Local(0), &aml::ONE),
-                        ],
-                    ),
-                    // Release lock
-                    &aml::Release::new("MLCK".into()),
-                ],
-            )
-            .to_aml_bytes(),
-        );
+        aml::Method::new(
+            "MSCN".into(),
+            0,
+            true,
+            vec![
+                // Take lock defined above
+                &aml::Acquire::new("MLCK".into(), 0xffff),
+                &aml::Store::new(&aml::Local(0), &aml::ZERO),
+                &aml::While::new(
+                    &aml::LessThan::new(&aml::Local(0), &self.slots),
+                    vec![
+                        // Write slot number (in first argument) to I/O port via field
+                        &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Local(0)),
+                        // Check if MINS bit is set (inserting)
+                        &aml::If::new(
+                            &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MINS"), &aml::ONE),
+                            // Notify device if it is
+                            vec![
+                                &aml::MethodCall::new(
+                                    "MTFY".into(),
+                                    vec![&aml::Local(0), &aml::ONE],
+                                ),
+                                // Reset MINS bit
+                                &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MINS"), &aml::ONE),
+                            ],
+                        ),
+                        // Check if MRMV bit is set
+                        &aml::If::new(
+                            &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MRMV"), &aml::ONE),
+                            // Notify device if it is (with the eject constant 0x3)
+                            vec![
+                                &aml::MethodCall::new("MTFY".into(), vec![&aml::Local(0), &3u8]),
+                                // Reset MRMV bit
+                                &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MRMV"), &aml::ONE),
+                            ],
+                        ),
+                        &aml::Add::new(&aml::Local(0), &aml::Local(0), &aml::ONE),
+                    ],
+                ),
+                // Release lock
+                &aml::Release::new("MLCK".into()),
+            ],
+        )
+        .append_aml_bytes(bytes);
 
-        bytes.extend_from_slice(
-            // Memory status method
-            &aml::Method::new(
-                "MSTA".into(),
-                1,
-                true,
-                vec![
-                    // Take lock defined above
-                    &aml::Acquire::new("MLCK".into(), 0xffff),
-                    // Write slot number (in first argument) to I/O port via field
-                    &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Arg(0)),
-                    &aml::Store::new(&aml::Local(0), &aml::ZERO),
-                    // Check if MEN_ bit is set, if so make the local variable 0xf (see _STA for details of meaning)
-                    &aml::If::new(
-                        &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MEN_"), &aml::ONE),
-                        vec![&aml::Store::new(&aml::Local(0), &0xfu8)],
-                    ),
-                    // Release lock
-                    &aml::Release::new("MLCK".into()),
-                    // Return 0 or 0xf
-                    &aml::Return::new(&aml::Local(0)),
-                ],
-            )
-            .to_aml_bytes(),
-        );
+        // Memory status method
+        aml::Method::new(
+            "MSTA".into(),
+            1,
+            true,
+            vec![
+                // Take lock defined above
+                &aml::Acquire::new("MLCK".into(), 0xffff),
+                // Write slot number (in first argument) to I/O port via field
+                &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Arg(0)),
+                &aml::Store::new(&aml::Local(0), &aml::ZERO),
+                // Check if MEN_ bit is set, if so make the local variable 0xf (see _STA for details of meaning)
+                &aml::If::new(
+                    &aml::Equal::new(&aml::Path::new("\\_SB_.MHPC.MEN_"), &aml::ONE),
+                    vec![&aml::Store::new(&aml::Local(0), &0xfu8)],
+                ),
+                // Release lock
+                &aml::Release::new("MLCK".into()),
+                // Return 0 or 0xf
+                &aml::Return::new(&aml::Local(0)),
+            ],
+        )
+        .append_aml_bytes(bytes);
 
-        bytes.extend_from_slice(
-            // Memory range method
-            &aml::Method::new(
-                "MCRS".into(),
-                1,
-                true,
-                vec![
-                    // Take lock defined above
-                    &aml::Acquire::new("MLCK".into(), 0xffff),
-                    // Write slot number (in first argument) to I/O port via field
-                    &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Arg(0)),
-                    &aml::Name::new(
-                        "MR64".into(),
-                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                            aml::AddressSpaceCachable::Cacheable,
-                            true,
-                            0x0000_0000_0000_0000u64,
-                            0xFFFF_FFFF_FFFF_FFFEu64,
-                        )]),
-                    ),
-                    &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &14usize, "MINL".into()),
-                    &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &18usize, "MINH".into()),
-                    &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &22usize, "MAXL".into()),
-                    &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &26usize, "MAXH".into()),
-                    &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &38usize, "LENL".into()),
-                    &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &42usize, "LENH".into()),
-                    &aml::Store::new(&aml::Path::new("MINL"), &aml::Path::new("\\_SB_.MHPC.MHBL")),
-                    &aml::Store::new(&aml::Path::new("MINH"), &aml::Path::new("\\_SB_.MHPC.MHBH")),
-                    &aml::Store::new(&aml::Path::new("LENL"), &aml::Path::new("\\_SB_.MHPC.MHLL")),
-                    &aml::Store::new(&aml::Path::new("LENH"), &aml::Path::new("\\_SB_.MHPC.MHLH")),
-                    &aml::Add::new(
-                        &aml::Path::new("MAXL"),
-                        &aml::Path::new("MINL"),
-                        &aml::Path::new("LENL"),
-                    ),
-                    &aml::Add::new(
+        // Memory range method
+        aml::Method::new(
+            "MCRS".into(),
+            1,
+            true,
+            vec![
+                // Take lock defined above
+                &aml::Acquire::new("MLCK".into(), 0xffff),
+                // Write slot number (in first argument) to I/O port via field
+                &aml::Store::new(&aml::Path::new("\\_SB_.MHPC.MSEL"), &aml::Arg(0)),
+                &aml::Name::new(
+                    "MR64".into(),
+                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                        aml::AddressSpaceCachable::Cacheable,
+                        true,
+                        0x0000_0000_0000_0000u64,
+                        0xFFFF_FFFF_FFFF_FFFEu64,
+                    )]),
+                ),
+                &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &14usize, "MINL".into()),
+                &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &18usize, "MINH".into()),
+                &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &22usize, "MAXL".into()),
+                &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &26usize, "MAXH".into()),
+                &aml::CreateField::<u64>::new(&aml::Path::new("MR64"), &38usize, "LENL".into()),
+                &aml::CreateField::<u32>::new(&aml::Path::new("MR64"), &42usize, "LENH".into()),
+                &aml::Store::new(&aml::Path::new("MINL"), &aml::Path::new("\\_SB_.MHPC.MHBL")),
+                &aml::Store::new(&aml::Path::new("MINH"), &aml::Path::new("\\_SB_.MHPC.MHBH")),
+                &aml::Store::new(&aml::Path::new("LENL"), &aml::Path::new("\\_SB_.MHPC.MHLL")),
+                &aml::Store::new(&aml::Path::new("LENH"), &aml::Path::new("\\_SB_.MHPC.MHLH")),
+                &aml::Add::new(
+                    &aml::Path::new("MAXL"),
+                    &aml::Path::new("MINL"),
+                    &aml::Path::new("LENL"),
+                ),
+                &aml::Add::new(
+                    &aml::Path::new("MAXH"),
+                    &aml::Path::new("MINH"),
+                    &aml::Path::new("LENH"),
+                ),
+                &aml::If::new(
+                    &aml::LessThan::new(&aml::Path::new("MAXL"), &aml::Path::new("MINL")),
+                    vec![&aml::Add::new(
                         &aml::Path::new("MAXH"),
-                        &aml::Path::new("MINH"),
-                        &aml::Path::new("LENH"),
-                    ),
-                    &aml::If::new(
-                        &aml::LessThan::new(&aml::Path::new("MAXL"), &aml::Path::new("MINL")),
-                        vec![&aml::Add::new(
-                            &aml::Path::new("MAXH"),
-                            &aml::ONE,
-                            &aml::Path::new("MAXH"),
-                        )],
-                    ),
-                    &aml::Subtract::new(
-                        &aml::Path::new("MAXL"),
-                        &aml::Path::new("MAXL"),
                         &aml::ONE,
-                    ),
-                    // Release lock
-                    &aml::Release::new("MLCK".into()),
-                    &aml::Return::new(&aml::Path::new("MR64")),
-                ],
-            )
-            .to_aml_bytes(),
-        );
-        bytes
+                        &aml::Path::new("MAXH"),
+                    )],
+                ),
+                &aml::Subtract::new(&aml::Path::new("MAXL"), &aml::Path::new("MAXL"), &aml::ONE),
+                // Release lock
+                &aml::Release::new("MLCK".into()),
+                &aml::Return::new(&aml::Path::new("MR64")),
+            ],
+        )
+        .append_aml_bytes(bytes)
     }
 }
 
 #[cfg(feature = "acpi")]
 impl Aml for MemoryManager {
-    fn to_aml_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
+    fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         // Memory Hotplug Controller
-        bytes.extend_from_slice(
-            &aml::Device::new(
-                "_SB_.MHPC".into(),
-                vec![
-                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
-                    &aml::Name::new("_UID".into(), &"Memory Hotplug Controller"),
-                    // Mutex to protect concurrent access as we write to choose slot and then read back status
-                    &aml::Mutex::new("MLCK".into(), 0),
-                    &aml::Name::new(
-                        "_CRS".into(),
-                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                            aml::AddressSpaceCachable::NotCacheable,
-                            true,
-                            self.acpi_address.0 as u64,
-                            self.acpi_address.0 + MEMORY_MANAGER_ACPI_SIZE as u64 - 1,
-                        )]),
-                    ),
-                    // OpRegion and Fields map MMIO range into individual field values
-                    &aml::OpRegion::new(
-                        "MHPR".into(),
-                        aml::OpRegionSpace::SystemMemory,
-                        self.acpi_address.0 as usize,
-                        MEMORY_MANAGER_ACPI_SIZE,
-                    ),
-                    &aml::Field::new(
-                        "MHPR".into(),
-                        aml::FieldAccessType::DWord,
-                        aml::FieldUpdateRule::Preserve,
-                        vec![
-                            aml::FieldEntry::Named(*b"MHBL", 32), // Base (low 4 bytes)
-                            aml::FieldEntry::Named(*b"MHBH", 32), // Base (high 4 bytes)
-                            aml::FieldEntry::Named(*b"MHLL", 32), // Length (low 4 bytes)
-                            aml::FieldEntry::Named(*b"MHLH", 32), // Length (high 4 bytes)
-                        ],
-                    ),
-                    &aml::Field::new(
-                        "MHPR".into(),
-                        aml::FieldAccessType::DWord,
-                        aml::FieldUpdateRule::Preserve,
-                        vec![
-                            aml::FieldEntry::Reserved(128),
-                            aml::FieldEntry::Named(*b"MHPX", 32), // PXM
-                        ],
-                    ),
-                    &aml::Field::new(
-                        "MHPR".into(),
-                        aml::FieldAccessType::Byte,
-                        aml::FieldUpdateRule::WriteAsZeroes,
-                        vec![
-                            aml::FieldEntry::Reserved(160),
-                            aml::FieldEntry::Named(*b"MEN_", 1), // Enabled
-                            aml::FieldEntry::Named(*b"MINS", 1), // Inserting
-                            aml::FieldEntry::Named(*b"MRMV", 1), // Removing
-                            aml::FieldEntry::Named(*b"MEJ0", 1), // Ejecting
-                        ],
-                    ),
-                    &aml::Field::new(
-                        "MHPR".into(),
-                        aml::FieldAccessType::DWord,
-                        aml::FieldUpdateRule::Preserve,
-                        vec![
-                            aml::FieldEntry::Named(*b"MSEL", 32), // Selector
-                            aml::FieldEntry::Named(*b"MOEV", 32), // Event
-                            aml::FieldEntry::Named(*b"MOSC", 32), // OSC
-                        ],
-                    ),
-                    &MemoryMethods {
-                        slots: self.hotplug_slots.len(),
-                    },
-                    &MemorySlots {
-                        slots: self.hotplug_slots.len(),
-                    },
-                ],
-            )
-            .to_aml_bytes(),
-        );
+        aml::Device::new(
+            "_SB_.MHPC".into(),
+            vec![
+                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
+                &aml::Name::new("_UID".into(), &"Memory Hotplug Controller"),
+                // Mutex to protect concurrent access as we write to choose slot and then read back status
+                &aml::Mutex::new("MLCK".into(), 0),
+                &aml::Name::new(
+                    "_CRS".into(),
+                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                        aml::AddressSpaceCachable::NotCacheable,
+                        true,
+                        self.acpi_address.0 as u64,
+                        self.acpi_address.0 + MEMORY_MANAGER_ACPI_SIZE as u64 - 1,
+                    )]),
+                ),
+                // OpRegion and Fields map MMIO range into individual field values
+                &aml::OpRegion::new(
+                    "MHPR".into(),
+                    aml::OpRegionSpace::SystemMemory,
+                    self.acpi_address.0 as usize,
+                    MEMORY_MANAGER_ACPI_SIZE,
+                ),
+                &aml::Field::new(
+                    "MHPR".into(),
+                    aml::FieldAccessType::DWord,
+                    aml::FieldUpdateRule::Preserve,
+                    vec![
+                        aml::FieldEntry::Named(*b"MHBL", 32), // Base (low 4 bytes)
+                        aml::FieldEntry::Named(*b"MHBH", 32), // Base (high 4 bytes)
+                        aml::FieldEntry::Named(*b"MHLL", 32), // Length (low 4 bytes)
+                        aml::FieldEntry::Named(*b"MHLH", 32), // Length (high 4 bytes)
+                    ],
+                ),
+                &aml::Field::new(
+                    "MHPR".into(),
+                    aml::FieldAccessType::DWord,
+                    aml::FieldUpdateRule::Preserve,
+                    vec![
+                        aml::FieldEntry::Reserved(128),
+                        aml::FieldEntry::Named(*b"MHPX", 32), // PXM
+                    ],
+                ),
+                &aml::Field::new(
+                    "MHPR".into(),
+                    aml::FieldAccessType::Byte,
+                    aml::FieldUpdateRule::WriteAsZeroes,
+                    vec![
+                        aml::FieldEntry::Reserved(160),
+                        aml::FieldEntry::Named(*b"MEN_", 1), // Enabled
+                        aml::FieldEntry::Named(*b"MINS", 1), // Inserting
+                        aml::FieldEntry::Named(*b"MRMV", 1), // Removing
+                        aml::FieldEntry::Named(*b"MEJ0", 1), // Ejecting
+                    ],
+                ),
+                &aml::Field::new(
+                    "MHPR".into(),
+                    aml::FieldAccessType::DWord,
+                    aml::FieldUpdateRule::Preserve,
+                    vec![
+                        aml::FieldEntry::Named(*b"MSEL", 32), // Selector
+                        aml::FieldEntry::Named(*b"MOEV", 32), // Event
+                        aml::FieldEntry::Named(*b"MOSC", 32), // OSC
+                    ],
+                ),
+                &MemoryMethods {
+                    slots: self.hotplug_slots.len(),
+                },
+                &MemorySlots {
+                    slots: self.hotplug_slots.len(),
+                },
+            ],
+        )
+        .append_aml_bytes(bytes);
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -2102,35 +2089,26 @@ impl Aml for MemoryManager {
                 let min = sgx_epc_region.start().raw_value() as u64;
                 let max = min + sgx_epc_region.size() as u64 - 1;
                 // SGX EPC region
-                bytes.extend_from_slice(
-                    &aml::Device::new(
-                        "_SB_.EPC_".into(),
-                        vec![
-                            &aml::Name::new("_HID".into(), &aml::EisaName::new("INT0E0C")),
-                            // QWORD describing the EPC region start and size
-                            &aml::Name::new(
-                                "_CRS".into(),
-                                &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                                    aml::AddressSpaceCachable::NotCacheable,
-                                    true,
-                                    min,
-                                    max,
-                                )]),
-                            ),
-                            &aml::Method::new(
-                                "_STA".into(),
-                                0,
-                                false,
-                                vec![&aml::Return::new(&0xfu8)],
-                            ),
-                        ],
-                    )
-                    .to_aml_bytes(),
-                );
+                aml::Device::new(
+                    "_SB_.EPC_".into(),
+                    vec![
+                        &aml::Name::new("_HID".into(), &aml::EisaName::new("INT0E0C")),
+                        // QWORD describing the EPC region start and size
+                        &aml::Name::new(
+                            "_CRS".into(),
+                            &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                                aml::AddressSpaceCachable::NotCacheable,
+                                true,
+                                min,
+                                max,
+                            )]),
+                        ),
+                        &aml::Method::new("_STA".into(), 0, false, vec![&aml::Return::new(&0xfu8)]),
+                    ],
+                )
+                .append_aml_bytes(bytes);
             }
         }
-
-        bytes
     }
 }
 
