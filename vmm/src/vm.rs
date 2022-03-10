@@ -11,6 +11,8 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
+use uio::*;
+
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::{
@@ -926,6 +928,74 @@ impl Vm {
             activate_evt,
             true,
         )
+    }
+
+    #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_craton(
+        config: Arc<Mutex<VmConfig>>,
+        exit_evt: EventFd,
+        reset_evt: EventFd,
+        seccomp_action: &SeccompAction,
+        hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        activate_evt: EventFd,
+        serial_pty: Option<PtyPair>,
+        console_pty: Option<PtyPair>,
+        console_resize_pipe: Option<File>,
+    ) -> Result<Self> {
+
+        let mut dev_num = 0;
+        'uio_devices: loop {
+            let dev = match UioDevice::new(dev_num) {
+                Ok(d) => d,
+                Err(error) => match error.kind() {
+                    std::io::ErrorKind::NotFound => break 'uio_devices,
+                    _ => continue 'uio_devices,
+                },
+            };
+            let name = dev.get_name().unwrap();
+            println!("{}", name);
+            dev_num += 1;
+        }
+
+        return Err(Error::Console(vmm_sys_util::errno::Error::new(1)));
+
+        hypervisor.check_required_extensions().unwrap();
+
+        let vm = hypervisor.create_vm().unwrap();
+
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
+
+        let memory_manager = MemoryManager::new(
+            vm.clone(),
+            &config.lock().unwrap().memory.clone(),
+            None,
+            phys_bits,
+            None,
+        )
+        .map_err(Error::MemoryManager)?;
+
+        let new_vm = Vm::new_from_memory_manager(
+            config,
+            memory_manager,
+            vm,
+            exit_evt,
+            reset_evt,
+            seccomp_action,
+            hypervisor,
+            activate_evt,
+            false,
+        )?;
+
+        // The device manager must create the devices from here as it is part
+        // of the regular code path creating everything from scratch.
+        new_vm
+            .device_manager
+            .lock()
+            .unwrap()
+            .create_devices(serial_pty, console_pty, console_resize_pipe)
+            .map_err(Error::DeviceManager)?;
+        Ok(new_vm)
     }
 
     fn load_initramfs(&mut self, guest_mem: &GuestMemoryMmap) -> Result<arch::InitramfsConfig> {
