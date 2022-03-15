@@ -11,8 +11,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-use uio::*;
-
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::{
@@ -32,6 +30,7 @@ use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
+use arch::PAGE_SIZE;
 use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
@@ -958,36 +957,81 @@ impl Vm {
         console_resize_pipe: Option<File>,
     ) -> Result<Self> {
 
+        let mut ram_dev = 0;
+        let mut ram_file = String::new();
         let mut dev_num = 0;
+        println!("UIO devices:");
         'uio_devices: loop {
-            let dev = match UioDevice::new(dev_num) {
-                Ok(d) => d,
+            let path = format!("/dev/uio{}", dev_num);
+            match OpenOptions::new().read(true).write(true).open(path.clone()) {
+                Ok(_) => (), /* but we don't actually need the file here */
                 Err(error) => match error.kind() {
                     std::io::ErrorKind::NotFound => break 'uio_devices,
                     _ => continue 'uio_devices,
                 },
             };
-            let name = dev.get_name().unwrap();
-            println!("{}", name);
+            let name_path = format!("/sys/class/uio/uio{}/name", dev_num);
+            let mut name_file = File::open(name_path).unwrap();
+            let mut name = String::new();
+            name_file.read_to_string(&mut name).unwrap();
+            if name.trim().eq("ram") {
+                println!("Found ram device. Path: {}", path);
+                ram_file = path.clone();
+                ram_dev = dev_num;
+            }
+            println!(" {}", name.trim());
             dev_num += 1;
         }
+        println!("Found ram device at: {}", ram_file);
+        if ram_file.is_empty() {
+            eprintln!("Couldn't find uio ram device!");
+            return Err(Error::Console(vmm_sys_util::errno::Error::new(1)));
+        }
+        fn open_and_parse_hex(path: String) -> u64 {
+            let mut file = File::open(path).unwrap();
+            let mut num = String::new();
+            file.read_to_string(&mut num).unwrap();
+            let just_num = num.trim().trim_start_matches("0x");
+            u64::from_str_radix(just_num, 16).unwrap()
+        }
+        let ram_start = open_and_parse_hex(
+                                format!("/sys/class/uio/uio{}/maps/map0/addr", ram_dev)
+                            );
+        println!(" ram start: {:#x}", ram_start);
+        let ram_size = open_and_parse_hex(
+                                format!("/sys/class/uio/uio{}/maps/map0/size", ram_dev)
+                            );
+        println!(" ram size: {:#x}", ram_size);
+        let ram_offset = open_and_parse_hex(
+                                format!("/sys/class/uio/uio{}/maps/map0/offset", ram_dev)
+                            );
+        println!(" ram offset: {:#x}", ram_offset);
 
-        return Err(Error::Console(vmm_sys_util::errno::Error::new(1)));
-
+        /* Nuno: this checks for SignalMsi and OneReg */
         hypervisor.check_required_extensions().unwrap();
 
-        let vm = hypervisor.create_vm().unwrap();
+        let vm = hypervisor.create_vm_with_type(0).unwrap(); // type 0 = KVM_X86_LEGACY_VM
+        println!("created vm");
 
         let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
 
-        let memory_manager = MemoryManager::new(
+        let memory_manager = MemoryManager::new_craton(
             vm.clone(),
-            &config.lock().unwrap().memory.clone(),
-            None,
+            GuestAddress(ram_start),
+            ram_size.try_into().unwrap(),
+            ram_offset * (PAGE_SIZE as u64),
+            std::path::PathBuf::from(ram_file),
             phys_bits,
-            None,
         )
         .map_err(Error::MemoryManager)?;
+
+        println!("created MemoryManager");
+        println!("created MemoryManager");
+        println!("created MemoryManager");
+        println!("created MemoryManager");
+
+        /* TODO the rest */
+        return Err(Error::Console(vmm_sys_util::errno::Error::new(1)));
 
         let new_vm = Vm::new_from_memory_manager(
             config,
