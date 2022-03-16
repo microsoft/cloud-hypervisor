@@ -393,7 +393,18 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         );
     }
-
+    #[cfg(target_arch = "aarch64")]
+    {
+        app = app.arg(
+            Arg::with_name("dtb")
+                .long("dtb")
+                .help(
+                    "Path to device tree file.",
+                )
+                .takes_value(true)
+                .group("vm-config"),
+        );
+    }
     app
 }
 
