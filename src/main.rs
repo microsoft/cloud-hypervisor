@@ -133,7 +133,7 @@ fn create_app<'a, 'b>(
     #[cfg(target_arch = "x86_64")]
     let mut app: App;
     #[cfg(target_arch = "aarch64")]
-    let app: App;
+    let mut app: App;
 
     app = App::new("cloud-hypervisor")
         // 'BUILT_VERSION' is set by the build script 'build.rs' at
