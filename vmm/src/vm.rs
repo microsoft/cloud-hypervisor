@@ -1151,7 +1151,8 @@ impl Vm {
         .map_err(|e| {
             Error::ConfigureSystem(arch::Error::AArch64Setup(arch::aarch64::Error::SetupGic(e)))
         })?;
-        let _dtb_file = &self.config.lock().unwrap().dtb.as_ref().unwrap().path;
+        let dtb_config = &mut self.config.lock().unwrap().dtb;
+        let mut _dtb_file = &dtb_config.as_ref().unwrap().path;
         arch::configure_system(
             &mem,
             cmdline.as_str(),
@@ -1163,7 +1164,7 @@ impl Vm {
             virtio_iommu_bdf.map(|bdf| bdf.into()),
             &*gic_device,
             &self.numa_nodes,
-            &_dtb_file,
+            _dtb_file,
         )
         .map_err(Error::ConfigureSystem)?;
 
