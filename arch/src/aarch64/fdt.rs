@@ -12,6 +12,7 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::path::PathBuf;
 use std::result;
 use std::str;
 
@@ -91,6 +92,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     pci_space_address: &(u64, u64),
     numa_nodes: &NumaNodes,
     virtio_iommu_bdf: Option<u32>,
+    _dtb_file: &PathBuf,
 ) -> FdtWriterResult<Vec<u8>> {
     // Allocate stuff necessary for the holding the blob.
     let mut fdt = FdtWriter::new().unwrap();
