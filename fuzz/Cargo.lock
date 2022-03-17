@@ -50,6 +50,7 @@ dependencies = [
  "acpi_tables",
  "anyhow",
  "byteorder",
+ "device_tree",
  "fdt",
  "hypervisor",
  "libc",
@@ -199,6 +200,11 @@ name = "crc64"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55626594feae15d266d52440b26ff77de0e22230cf0c113abe619084c1ddc910"
+
+[[package]]
+name = "device_tree"
+version = "1.0.3"
+source = "git+https://github.com/mbr/device_tree-rs?branch=master#bed843c6f5904abd3bc397df221925c8252478e6"
 
 [[package]]
 name = "devices"

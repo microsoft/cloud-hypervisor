@@ -68,6 +68,7 @@ dependencies = [
  "acpi_tables",
  "anyhow",
  "byteorder",
+ "device_tree",
  "fdt",
  "hypervisor",
  "libc",
@@ -236,6 +237,11 @@ dependencies = [
  "failure",
  "failure_derive",
 ]
+
+[[package]]
+name = "device_tree"
+version = "1.0.3"
+source = "git+https://github.com/mbr/device_tree-rs?branch=master#bed843c6f5904abd3bc397df221925c8252478e6"
 
 [[package]]
 name = "devices"
