@@ -4,6 +4,7 @@
 
 /// Module for the flattened device tree.
 pub mod fdt;
+pub mod fdt_edit;
 /// Module for the global interrupt controller configuration.
 pub mod gic;
 /// Layout for this aarch64 system.
@@ -12,6 +13,7 @@ pub mod layout;
 pub mod regs;
 /// Module for loading UEFI binary.
 pub mod uefi;
+
 
 pub use self::fdt::DeviceInfoForFdt;
 use crate::{DeviceType, GuestMemoryMmap, NumaNodes, RegionType};
