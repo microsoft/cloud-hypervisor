@@ -965,6 +965,91 @@ pub struct DeviceManager {
 
 impl DeviceManager {
     #[allow(clippy::too_many_arguments)]
+    pub fn new_craton(
+        vm: Arc<dyn hypervisor::Vm>,
+        config: Arc<Mutex<VmConfig>>,
+        memory_manager: Arc<Mutex<MemoryManager>>,
+        exit_evt: &EventFd,
+        reset_evt: &EventFd,
+        seccomp_action: SeccompAction,
+        #[cfg(any(target_arch = "aarch64", feature = "acpi"))] numa_nodes: NumaNodes,
+        activate_evt: &EventFd,
+        force_iommu: bool,
+        restoring: bool,
+    ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
+        let device_tree = Arc::new(Mutex::new(DeviceTree::new()));
+
+        let pci_mmio_allocators = vec![];
+
+        let address_manager = Arc::new(AddressManager {
+            allocator: memory_manager.lock().unwrap().allocator(),
+            mmio_bus: Arc::new(Bus::new()),
+            vm: vm.clone(),
+            device_tree: Arc::clone(&device_tree),
+            pci_mmio_allocators,
+        });
+
+        // First we create the MSI interrupt manager, the legacy one is created
+        // later, after the IOAPIC device creation.
+        // The reason we create the MSI one first is because the IOAPIC needs it,
+        // and then the legacy interrupt manager needs an IOAPIC. So we're
+        // handling a linear dependency chain:
+        // msi_interrupt_manager <- IOAPIC <- legacy_interrupt_manager.
+        let msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>> =
+            Arc::new(MsiInterruptManager::new(
+                Arc::clone(&address_manager.allocator),
+                vm,
+            ));
+
+        /* Nuno: these are used in add_pci_devices, virtio stuff, and vfio stuff - should be fine empty?*/
+        let pci_segments = vec![];
+
+        let device_manager = DeviceManager {
+            address_manager: Arc::clone(&address_manager),
+            console: Arc::new(Console::default()), /* Nuno: */
+            interrupt_controller: None,
+            cmdline_additions: Vec::new(),
+            config,
+            memory_manager,
+            virtio_devices: Vec::new(),
+            bus_devices: Vec::new(),
+            device_id_cnt: Wrapping(0),
+            msi_interrupt_manager,
+            legacy_interrupt_manager: None,
+            passthrough_device: None,
+            vfio_container: None,
+            iommu_device: None,
+            iommu_attached_devices: None,
+            pci_segments,
+            device_tree,
+            exit_evt: exit_evt.try_clone().map_err(DeviceManagerError::EventFd)?,
+            reset_evt: reset_evt.try_clone().map_err(DeviceManagerError::EventFd)?,
+            #[cfg(target_arch = "aarch64")]
+            id_to_dev_info: HashMap::new(),
+            seccomp_action,
+            #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+            numa_nodes,
+            balloon: None,
+            activate_evt: activate_evt
+                .try_clone()
+                .map_err(DeviceManagerError::EventFd)?,
+            serial_pty: None,
+            serial_manager: None,
+            console_pty: None,
+            console_resize_pipe: None,
+            virtio_mem_devices: Vec::new(),
+            #[cfg(target_arch = "aarch64")]
+            gpio_device: None,
+            force_iommu,
+            restoring,
+            io_uring_supported: None,
+        };
+
+        let device_manager = Arc::new(Mutex::new(device_manager));
+
+        Ok(device_manager)
+    }
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vm: Arc<dyn hypervisor::Vm>,
         config: Arc<Mutex<VmConfig>>,
@@ -1149,6 +1234,51 @@ impl DeviceManager {
 
     pub fn console_resize_pipe(&self) -> Option<Arc<File>> {
         self.console_resize_pipe.as_ref().map(Arc::clone)
+    }
+
+    pub fn create_devices_craton(
+        &mut self,
+        serial_pty: Option<PtyPair>,
+        console_pty: Option<PtyPair>,
+        console_resize_pipe: Option<File>,
+    ) -> DeviceManagerResult<()> {
+
+        let interrupt_controller = self.add_interrupt_controller()?;
+
+        /* Nuno: I think 'legacy' means not MSI; i.e. GSI. */
+        let legacy_interrupt_manager: Arc<
+            dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>,
+        > = Arc::new(LegacyUserspaceInterruptManager::new(Arc::clone(
+            &interrupt_controller,
+        )));
+
+        /* Nuno: this adds an emulated rtc and gpio as BusDevice's on the mmio bus*/
+        //#[cfg(target_arch = "aarch64")]
+        //self.add_legacy_devices(&legacy_interrupt_manager)?;
+
+        let mut virtio_devices: Vec<(VirtioDeviceArc, bool, String, u16)> = Vec::new();
+
+        /* 
+         * Nuno: with --serial tty --console off this doesn't do any virtio, just adds legacy
+         * serial device
+         */
+        self.console = self.add_console_device(
+            &legacy_interrupt_manager,
+            &mut virtio_devices,
+            serial_pty,
+            console_pty,
+            console_resize_pipe,
+        )?;
+
+        self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
+
+        //virtio_devices.append(&mut self.make_virtio_devices()?);
+
+        //self.add_pci_devices(virtio_devices.clone())?;
+
+        self.virtio_devices = virtio_devices;
+
+        Ok(())
     }
 
     pub fn create_devices(

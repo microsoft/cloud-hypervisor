@@ -1035,7 +1035,7 @@ impl Vm {
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
 
-        let device_manager = DeviceManager::new(
+        let device_manager = DeviceManager::new_craton(
             vm.clone(),
             config.clone(),
             memory_manager.clone(),
@@ -1060,6 +1060,7 @@ impl Vm {
             memory,
             mmio_bus,
         });
+        println!("created vm_ops");
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         let cpu_manager = cpu::CpuManager::new(
@@ -1121,7 +1122,7 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices(serial_pty, console_pty, console_resize_pipe)
+            .create_devices_craton(serial_pty, console_pty, console_resize_pipe)
             .map_err(Error::DeviceManager)?;
 
         println!("created devices, returning from vm::new_craton");
