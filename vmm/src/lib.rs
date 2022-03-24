@@ -14,7 +14,6 @@ extern crate serde_derive;
 #[cfg(test)]
 #[macro_use]
 extern crate credibility;
-extern crate uio;
 
 use crate::api::{
     ApiError, ApiRequest, ApiResponse, ApiResponsePayload, VmInfo, VmReceiveMigrationData,
