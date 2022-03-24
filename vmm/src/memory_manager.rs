@@ -135,8 +135,8 @@ struct GuestRamMapping {
 }
 
 #[derive(Clone, Serialize, Deserialize, Versionize)]
-struct ArchMemRegion {
-    base: u64,
+pub struct ArchMemRegion {
+    pub base: u64,
     size: usize,
     r_type: RegionType,
 }
@@ -167,7 +167,7 @@ pub struct MemoryManager {
     snapshot_memory_ranges: MemoryRangeTable,
     memory_zones: MemoryZones,
     log_dirty: bool, // Enable dirty logging for created RAM regions
-    arch_mem_regions: Vec<ArchMemRegion>,
+    pub arch_mem_regions: Vec<ArchMemRegion>,
     ram_allocator: AddressAllocator,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
@@ -1100,13 +1100,15 @@ impl MemoryManager {
         println!("opened ram file");
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_SHARED;
+        println!("libc::MAP_SHARED = {:?}", flags);
+        println!("libc::PROT_READ | libc::PROT_WRITE = {:?}", prot);
         use core::ptr::null_mut;
         let mmap_addr = unsafe {
             libc::mmap(
                 null_mut(),
                 ram_size,
-                flags,
                 prot,
+                flags,
                 ram_file.as_raw_fd(),
                 ram_offset as libc::off_t,
                 )
@@ -1116,7 +1118,12 @@ impl MemoryManager {
             eprintln!("mmap failed!");
             return Err(Error::SharedFileCreate(io::Error::last_os_error()));
         }
-        println!("mmap succeeded!");
+        println!("mmap succeeded! {:?}", mmap_addr);
+        unsafe {
+            //*(mmap_addr as *mut u8) = 69;
+            let vec: Vec<u8> = vec!(1,2,3);
+            std::ptr::copy_nonoverlapping(vec.as_ptr(), mmap_addr as *mut u8, 3);
+        };
 
         // Safe because we just mmapped this region successfully
         let region = unsafe {
