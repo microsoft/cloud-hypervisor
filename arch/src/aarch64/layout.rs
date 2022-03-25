@@ -86,19 +86,16 @@ pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;
 pub const PCI_MMIO_CONFIG_SIZE_PER_SEGMENT: u64 = 4096 * 256;
 
 /// Start of RAM on 64 bit ARM.
-pub const RAM_64BIT_START: u64 = 0x4000_0000;
+pub const CRATON_RAM_START: u64 = 0x5000_0000;
+pub const RAM_64BIT_START: u64 = CRATON_RAM_START; //0x4000_0000;
 
 /// Kernel command line maximum size.
 /// As per `arch/arm64/include/uapi/asm/setup.h`.
 pub const CMDLINE_MAX_SIZE: usize = 2048;
 
-pub const CRATON_RAM_START: u64 = 0x5000_0000;
-pub const CRATON_RAM_SIZE: usize = 0x2e00_0000;
-pub const CRATON_KERNEL_START: u64 = CRATON_RAM_START + FDT_MAX_SIZE as u64;
-
 /// FDT is at the beginning of RAM.
 /// Maximum size of the device tree blob as specified in https://www.kernel.org/doc/Documentation/arm64/booting.txt.
-pub const FDT_START: u64 = CRATON_RAM_START;//RAM_64BIT_START;
+pub const FDT_START: u64 = RAM_64BIT_START;
 pub const FDT_MAX_SIZE: usize = 0x20_0000;
 
 /// Put ACPI table above dtb
@@ -106,7 +103,9 @@ pub const ACPI_START: u64 = RAM_64BIT_START + FDT_MAX_SIZE as u64;
 pub const ACPI_MAX_SIZE: usize = 0x20_0000;
 pub const RSDP_POINTER: GuestAddress = GuestAddress(ACPI_START);
 
+
 /// Kernel start after FDT and ACPI
+pub const CRATON_KERNEL_START: u64 = CRATON_RAM_START + FDT_MAX_SIZE as u64;
 pub const KERNEL_START: u64 = CRATON_KERNEL_START;//ACPI_START + ACPI_MAX_SIZE as u64;
 
 /// Pci high memory base

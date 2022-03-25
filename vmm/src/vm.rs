@@ -1168,8 +1168,6 @@ impl Vm {
     fn load_kernel(&mut self) -> Result<EntryPoint> {
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
-        //let start_addr = self.memory_manager.lock().as_ref().unwrap().arch_mem_regions[0].base;
-        //let start_addr = GuestAddress(start_addr);
         let mut kernel = self.kernel.as_ref().unwrap();
         let entry_addr = match linux_loader::loader::pe::PE::load(
             mem.deref(),

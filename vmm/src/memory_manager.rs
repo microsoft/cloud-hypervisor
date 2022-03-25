@@ -1109,7 +1109,7 @@ impl MemoryManager {
                 ram_size,
                 prot,
                 flags,
-                ram_file.as_raw_fd(),
+                ram_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
                 ram_offset as libc::off_t,
                 )
         };
@@ -1119,6 +1119,7 @@ impl MemoryManager {
             return Err(Error::SharedFileCreate(io::Error::last_os_error()));
         }
         println!("mmap succeeded! {:?}", mmap_addr);
+        /* Nuno: test access to region */
         unsafe {
             //*(mmap_addr as *mut u8) = 69;
             let vec: Vec<u8> = vec!(1,2,3);
@@ -1150,15 +1151,10 @@ impl MemoryManager {
             GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
         let boot_guest_memory = guest_memory.clone();
 
-        /* Nuno: just gets the address after ram region - this might be wrong/cause issues */
-        let start_of_device_area =
-            MemoryManager::start_addr(guest_memory.last_addr(), false)?;
-
-        /* Nuno: copy what new() does here; I guess this isn't used if hotplug is disabled */
-        let mut hotplug_slots = Vec::with_capacity(HOTPLUG_COUNT);
-        hotplug_slots.resize_with(HOTPLUG_COUNT, HotPlugState::default);
-
-        /* Nuno: used for allocator init */
+        /* Nuno:
+         * Device area and platform device area are both after ram...this is so poorly named and
+         * stuff
+         */
         let mmio_address_space_size = mmio_address_space_size(phys_bits);
         debug_assert_eq!(
             (((mmio_address_space_size) >> 16) << 16),
@@ -1166,10 +1162,14 @@ impl MemoryManager {
         );
         let start_of_platform_device_area =
             GuestAddress(mmio_address_space_size - PLATFORM_DEVICE_AREA_SIZE);
+
+        let mut start_of_device_area =
+            MemoryManager::start_addr(guest_memory.last_addr(), false)?;
+        let end_of_ram_area = start_of_device_area.unchecked_sub(1);
         let end_of_device_area = start_of_platform_device_area.unchecked_sub(1);
+
         /*
-         * Nuno: assumption "Both MMIO and PIO address spaces start at address 0."
-         * This is used for allocating device memory by DeviceManager
+         * Nuno: This is used for allocating device memory by DeviceManager
          */
         let allocator = Arc::new(Mutex::new(
             SystemAllocator::new(
@@ -1181,14 +1181,16 @@ impl MemoryManager {
             .ok_or(Error::CreateSystemAllocator)?,
         ));
 
-        /* Nuno: assumption start of device area is just after ram */
-        let end_of_ram_area = start_of_device_area.unchecked_sub(1);
-        /* Nuno: assumption device area is after ram */
-        let ram_allocator = AddressAllocator::new(ram_start, start_of_device_area.0).unwrap();
+        /* Nuno:  */
+        let ram_allocator = AddressAllocator::new(ram_start, ram_start.0 + ram_size as u64).unwrap();
         println!("created AddressAllocator");
 
         /* Nuno: this needs to be atomic now */
         let guest_memory = GuestMemoryAtomic::new(guest_memory);
+
+        /* Nuno: copy what new() does here; I guess this isn't used if hotplug is disabled */
+        let mut hotplug_slots = Vec::with_capacity(HOTPLUG_COUNT);
+        hotplug_slots.resize_with(HOTPLUG_COUNT, HotPlugState::default);
 
         let mut memory_manager = MemoryManager {
             boot_guest_memory,
