@@ -3636,7 +3636,7 @@ impl DeviceManager {
                 MmioDeviceInfo {
                     addr: mmio_base,
                     len: mmio_size,
-                    irq: irq_num,
+                    irq: irq_num - 32,
                 },
             );
         }
