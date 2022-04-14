@@ -1066,6 +1066,7 @@ impl MemoryManager {
         Ok(Arc::new(Mutex::new(memory_manager)))
     }
 
+    #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
     pub fn new_craton(
         vm: Arc<dyn hypervisor::Vm>,
         ram_start: GuestAddress,
@@ -1163,7 +1164,7 @@ impl MemoryManager {
         let start_of_platform_device_area =
             GuestAddress(mmio_address_space_size - PLATFORM_DEVICE_AREA_SIZE);
 
-        let mut start_of_device_area =
+        let start_of_device_area =
             MemoryManager::start_addr(guest_memory.last_addr(), false)?;
         let end_of_ram_area = start_of_device_area.unchecked_sub(1);
         let end_of_device_area = start_of_platform_device_area.unchecked_sub(1);
