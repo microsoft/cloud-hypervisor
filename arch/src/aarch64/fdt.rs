@@ -413,16 +413,21 @@ fn create_psci_node(fdt: &mut FdtWriter) -> FdtWriterResult<()> {
     Ok(())
 }
 
-fn create_virtio_mmio_node<T: DeviceInfoForFdt + Clone + Debug>(
+fn create_virtio_node<T: DeviceInfoForFdt + Clone + Debug>(
     fdt: &mut FdtWriter,
     dev_info: &T,
 ) -> FdtWriterResult<()> {
     let device_reg_prop = [dev_info.addr(), dev_info.length()];
-    let irq = [
+    let irq = [GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING];
+    #[cfg(feature = "mmio_support")]
+    {
+        irq = [
         GIC_FDT_IRQ_TYPE_SPI,
         dev_info.irq() - IRQ_BASE,
         IRQ_TYPE_EDGE_RISING
     ];
+    }
+    
 
     let virtio_node = fdt.begin_node(&format!("virtio_mmio@{:x}", dev_info.addr()))?;
     fdt.property_string("compatible", "virtio,mmio")?;
@@ -532,7 +537,7 @@ fn create_devices_node<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Buil
             DeviceType::Gpio => create_gpio_node(fdt, info)?,
             DeviceType::Rtc => create_rtc_node(fdt, info)?,
             DeviceType::Serial => create_serial_node(fdt, info)?,
-            DeviceType::VirtioMmio(_) => {
+            DeviceType::Virtio(_) => {
                 ordered_virtio_device.push(info);
             }
         }
@@ -545,7 +550,7 @@ fn create_devices_node<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Buil
     // the older created device will appear in front of the newer created device in FDT.
     ordered_virtio_device.reverse();
     for ordered_device_info in ordered_virtio_device.drain(..) {
-        create_virtio_mmio_node(fdt, ordered_device_info)?;
+        create_virtio_node(fdt, ordered_device_info)?;
     }
 
     Ok(())

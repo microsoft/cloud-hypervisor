@@ -16,6 +16,7 @@ extern crate serde_derive;
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::SgxEpcSection;
 use std::collections::BTreeMap;
+#[cfg(target_arch = "aarch64")]
 use std::fmt;
 use std::result;
 use std::sync::Arc;
@@ -136,8 +137,8 @@ pub const PAGE_SIZE: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 #[cfg(target_arch = "aarch64")]
 pub enum DeviceType {
-    /// Device Type: VirtioMmio.
-    VirtioMmio(u32),
+    /// Device Type: VirtioMmio/VirtioPci.
+    Virtio(u32),
     /// Device Type: Serial.
     Serial,
     /// Device Type: RTC.
