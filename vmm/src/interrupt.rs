@@ -84,19 +84,19 @@ impl InterruptRoute {
     }
 }
 
-pub struct RoutingEntry<IrqRoutingEntry> {
+pub struct RoutingEntry {
     route: IrqRoutingEntry,
     masked: bool,
 }
 
-pub struct MsiInterruptGroup<IrqRoutingEntry> {
+pub struct MsiInterruptGroup {
     vm: Arc<dyn hypervisor::Vm>,
-    gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
+    gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry>>>,
     irq_routes: HashMap<InterruptIndex, InterruptRoute>,
 }
 
-impl MsiInterruptGroup<IrqRoutingEntry> {
-    fn set_gsi_routes(&self, routes: &HashMap<u32, RoutingEntry<IrqRoutingEntry>>) -> Result<()> {
+impl MsiInterruptGroup {
+    fn set_gsi_routes(&self, routes: &HashMap<u32, RoutingEntry>) -> Result<()> {
         let mut entry_vec: Vec<IrqRoutingEntry> = Vec::new();
         for (_, entry) in routes.iter() {
             if entry.masked {
@@ -115,10 +115,10 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
     }
 }
 
-impl MsiInterruptGroup<IrqRoutingEntry> {
+impl MsiInterruptGroup {
     fn new(
         vm: Arc<dyn hypervisor::Vm>,
-        gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
+        gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry>>>,
         irq_routes: HashMap<InterruptIndex, InterruptRoute>,
     ) -> Self {
         MsiInterruptGroup {
@@ -129,7 +129,7 @@ impl MsiInterruptGroup<IrqRoutingEntry> {
     }
 }
 
-impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
+impl InterruptSourceGroup for MsiInterruptGroup {
     fn enable(&self) -> Result<()> {
         for (_, route) in self.irq_routes.iter() {
             route.enable(&self.vm)?;
@@ -165,59 +165,30 @@ impl InterruptSourceGroup for MsiInterruptGroup<IrqRoutingEntry> {
         None
     }
 
-    fn update(&self, index: InterruptIndex, config: InterruptSourceConfig) -> Result<()> {
+    fn update(
+        &self,
+        index: InterruptIndex,
+        config: InterruptSourceConfig,
+        masked: bool,
+    ) -> Result<()> {
         if let Some(route) = self.irq_routes.get(&index) {
-            let entry = RoutingEntry::<_>::make_entry(&self.vm, route.gsi, &config)?;
+            let entry = RoutingEntry {
+                route: self.vm.make_routing_entry(route.gsi, &config),
+                masked,
+            };
+            if masked {
+                route.disable(&self.vm)?;
+            } else {
+                route.enable(&self.vm)?;
+            }
             let mut routes = self.gsi_msi_routes.lock().unwrap();
-            routes.insert(route.gsi, *entry);
+            routes.insert(route.gsi, entry);
             return self.set_gsi_routes(&routes);
         }
 
         Err(io::Error::new(
             io::ErrorKind::Other,
             format!("update: Invalid interrupt index {}", index),
-        ))
-    }
-
-    fn mask(&self, index: InterruptIndex) -> Result<()> {
-        if let Some(route) = self.irq_routes.get(&index) {
-            let mut routes = self.gsi_msi_routes.lock().unwrap();
-            if let Some(entry) = routes.get_mut(&route.gsi) {
-                entry.masked = true;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("mask: No existing route for interrupt index {}", index),
-                ));
-            }
-            self.set_gsi_routes(&routes)?;
-            return route.disable(&self.vm);
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("mask: Invalid interrupt index {}", index),
-        ))
-    }
-
-    fn unmask(&self, index: InterruptIndex) -> Result<()> {
-        if let Some(route) = self.irq_routes.get(&index) {
-            let mut routes = self.gsi_msi_routes.lock().unwrap();
-            if let Some(entry) = routes.get_mut(&route.gsi) {
-                entry.masked = false;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("mask: No existing route for interrupt index {}", index),
-                ));
-            }
-            self.set_gsi_routes(&routes)?;
-            return route.enable(&self.vm);
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("unmask: Invalid interrupt index {}", index),
         ))
     }
 }
@@ -247,7 +218,12 @@ impl InterruptSourceGroup for LegacyUserspaceInterruptGroup {
             })
     }
 
-    fn update(&self, _index: InterruptIndex, _config: InterruptSourceConfig) -> Result<()> {
+    fn update(
+        &self,
+        _index: InterruptIndex,
+        _config: InterruptSourceConfig,
+        _masked: bool,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -260,10 +236,10 @@ pub struct LegacyUserspaceInterruptManager {
     ioapic: Arc<Mutex<dyn InterruptController>>,
 }
 
-pub struct MsiInterruptManager<IrqRoutingEntry> {
+pub struct MsiInterruptManager {
     allocator: Arc<Mutex<SystemAllocator>>,
     vm: Arc<dyn hypervisor::Vm>,
-    gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry<IrqRoutingEntry>>>>,
+    gsi_msi_routes: Arc<Mutex<HashMap<u32, RoutingEntry>>>,
 }
 
 impl LegacyUserspaceInterruptManager {
@@ -272,7 +248,7 @@ impl LegacyUserspaceInterruptManager {
     }
 }
 
-impl MsiInterruptManager<IrqRoutingEntry> {
+impl MsiInterruptManager {
     pub fn new(allocator: Arc<Mutex<SystemAllocator>>, vm: Arc<dyn hypervisor::Vm>) -> Self {
         // Create a shared list of GSI that can be shared through all PCI
         // devices. This way, we can maintain the full list of used GSI,
@@ -303,7 +279,7 @@ impl InterruptManager for LegacyUserspaceInterruptManager {
     }
 }
 
-impl InterruptManager for MsiInterruptManager<IrqRoutingEntry> {
+impl InterruptManager for MsiInterruptManager {
     type GroupConfig = MsiIrqGroupConfig;
 
     fn create_group(&self, config: Self::GroupConfig) -> Result<Arc<dyn InterruptSourceGroup>> {
@@ -323,179 +299,5 @@ impl InterruptManager for MsiInterruptManager<IrqRoutingEntry> {
 
     fn destroy_group(&self, _group: Arc<dyn InterruptSourceGroup>) -> Result<()> {
         Ok(())
-    }
-}
-#[cfg(feature = "kvm")]
-pub mod kvm {
-    use super::*;
-    use hypervisor::kvm::KVM_MSI_VALID_DEVID;
-    use hypervisor::kvm::{kvm_irq_routing_entry, KVM_IRQ_ROUTING_IRQCHIP, KVM_IRQ_ROUTING_MSI};
-
-    type KvmRoutingEntry = RoutingEntry<kvm_irq_routing_entry>;
-    pub type KvmMsiInterruptManager = MsiInterruptManager<kvm_irq_routing_entry>;
-
-    impl KvmRoutingEntry {
-        pub fn make_entry(
-            vm: &Arc<dyn hypervisor::Vm>,
-            gsi: u32,
-            config: &InterruptSourceConfig,
-        ) -> Result<Box<Self>> {
-            if let InterruptSourceConfig::MsiIrq(cfg) = &config {
-                let mut kvm_route = kvm_irq_routing_entry {
-                    gsi,
-                    type_: KVM_IRQ_ROUTING_MSI,
-                    ..Default::default()
-                };
-
-                kvm_route.u.msi.address_lo = cfg.low_addr;
-                kvm_route.u.msi.address_hi = cfg.high_addr;
-                kvm_route.u.msi.data = cfg.data;
-
-                if vm.check_extension(hypervisor::Cap::MsiDevid) {
-                    kvm_route.flags = KVM_MSI_VALID_DEVID;
-                    kvm_route.u.msi.__bindgen_anon_1.devid = cfg.devid;
-                }
-
-                let kvm_entry = KvmRoutingEntry {
-                    route: kvm_route,
-                    masked: false,
-                };
-
-                return Ok(Box::new(kvm_entry));
-            } else if let InterruptSourceConfig::LegacyIrq(cfg) = &config {
-                let mut kvm_route = kvm_irq_routing_entry {
-                    gsi,
-                    type_: KVM_IRQ_ROUTING_IRQCHIP,
-                    ..Default::default()
-                };
-                kvm_route.u.irqchip.irqchip = cfg.irqchip;
-                kvm_route.u.irqchip.pin = cfg.pin;
-                let kvm_entry = KvmRoutingEntry {
-                    route: kvm_route,
-                    masked: false,
-                };
-
-                return Ok(Box::new(kvm_entry));
-            }
-
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Interrupt config type not supported",
-            ))
-        }
-    }
-}
-
-#[cfg(feature = "mshv")]
-pub mod mshv {
-    use super::*;
-    use hypervisor::mshv::*;
-
-    type MshvRoutingEntry = RoutingEntry<mshv_msi_routing_entry>;
-    pub type MshvMsiInterruptManager = MsiInterruptManager<mshv_msi_routing_entry>;
-
-    impl MshvRoutingEntry {
-        pub fn make_entry(
-            _vm: &Arc<dyn hypervisor::Vm>,
-            gsi: u32,
-            config: &InterruptSourceConfig,
-        ) -> Result<Box<Self>> {
-            if let InterruptSourceConfig::MsiIrq(cfg) = &config {
-                let route = mshv_msi_routing_entry {
-                    gsi,
-                    address_lo: cfg.low_addr,
-                    address_hi: cfg.high_addr,
-                    data: cfg.data,
-                };
-                let entry = MshvRoutingEntry {
-                    route,
-                    masked: false,
-                };
-
-                return Ok(Box::new(entry));
-            }
-
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Interrupt config type not supported",
-            ))
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[cfg(test)]
-mod tests {
-    use arch::aarch64::gic::kvm::{create_gic, save_pending_tables};
-    use arch::aarch64::gic::{
-        get_dist_regs, get_icc_regs, get_redist_regs, set_dist_regs, set_icc_regs, set_redist_regs,
-    };
-
-    #[test]
-    fn test_create_gic() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().unwrap();
-
-        assert!(create_gic(&vm, 1).is_ok());
-    }
-
-    #[test]
-    fn test_get_set_dist_regs() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().unwrap();
-        let _ = vm.create_vcpu(0, None).unwrap();
-        let gic = create_gic(&vm, 1).expect("Cannot create gic");
-
-        let res = get_dist_regs(gic.device());
-        assert!(res.is_ok());
-        let state = res.unwrap();
-        assert_eq!(state.len(), 568);
-
-        let res = set_dist_regs(gic.device(), &state);
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_get_set_redist_regs() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().unwrap();
-        let _ = vm.create_vcpu(0, None).unwrap();
-        let gic = create_gic(&vm, 1).expect("Cannot create gic");
-
-        let gicr_typer = vec![123];
-        let res = get_redist_regs(gic.device(), &gicr_typer);
-        assert!(res.is_ok());
-        let state = res.unwrap();
-        println!("{}", state.len());
-        assert!(state.len() == 24);
-
-        assert!(set_redist_regs(gic.device(), &gicr_typer, &state).is_ok());
-    }
-
-    #[test]
-    fn test_get_set_icc_regs() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().unwrap();
-        let _ = vm.create_vcpu(0, None).unwrap();
-        let gic = create_gic(&vm, 1).expect("Cannot create gic");
-
-        let gicr_typer = vec![123];
-        let res = get_icc_regs(gic.device(), &gicr_typer);
-        assert!(res.is_ok());
-        let state = res.unwrap();
-        println!("{}", state.len());
-        assert!(state.len() == 9);
-
-        assert!(set_icc_regs(gic.device(), &gicr_typer, &state).is_ok());
-    }
-
-    #[test]
-    fn test_save_pending_tables() {
-        let hv = hypervisor::new().unwrap();
-        let vm = hv.create_vm().unwrap();
-        let _ = vm.create_vcpu(0, None).unwrap();
-        let gic = create_gic(&vm, 1).expect("Cannot create gic");
-
-        assert!(save_pending_tables(gic.device()).is_ok());
     }
 }

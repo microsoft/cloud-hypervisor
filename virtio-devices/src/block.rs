@@ -39,6 +39,7 @@ use virtio_queue::Queue;
 use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
@@ -57,6 +58,8 @@ pub enum Error {
     RequestParsing(block_util::Error),
     /// Failed to execute the request.
     RequestExecuting(block_util::ExecuteError),
+    /// Failed to complete the request.
+    RequestCompleting(block_util::Error),
     /// Missing the expected entry in the list of requests.
     MissingEntryRequestList,
     /// The asynchronous request returned with failure.
@@ -80,6 +83,7 @@ pub struct BlockCounters {
 }
 
 struct BlockEpollHandler {
+    queue_index: u16,
     queue: Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     disk_image: Box<dyn AsyncIo>,
@@ -93,6 +97,7 @@ struct BlockEpollHandler {
     queue_evt: EventFd,
     request_list: HashMap<u16, Request>,
     rate_limiter: Option<RateLimiter>,
+    access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 impl BlockEpollHandler {
@@ -104,7 +109,8 @@ impl BlockEpollHandler {
 
         let mut avail_iter = queue.iter().map_err(Error::QueueIterator)?;
         for mut desc_chain in &mut avail_iter {
-            let mut request = Request::parse(&mut desc_chain).map_err(Error::RequestParsing)?;
+            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref())
+                .map_err(Error::RequestParsing)?;
 
             if let Some(rate_limiter) = &mut self.rate_limiter {
                 // If limiter.consume() fails it means there is no more TokenType::Ops
@@ -188,10 +194,11 @@ impl BlockEpollHandler {
         let completion_list = self.disk_image.complete();
         for (user_data, result) in completion_list {
             let desc_index = user_data as u16;
-            let request = self
+            let mut request = self
                 .request_list
                 .remove(&desc_index)
                 .ok_or(Error::MissingEntryRequestList)?;
+            request.complete_async().map_err(Error::RequestCompleting)?;
 
             let (status, len) = if result >= 0 {
                 match request.request_type {
@@ -255,7 +262,7 @@ impl BlockEpollHandler {
 
     fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(&self.queue))
+            .trigger(VirtioInterruptType::Queue(self.queue_index))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -422,7 +429,9 @@ impl Block {
 
         let mut avail_features = (1u64 << VIRTIO_F_VERSION_1)
             | (1u64 << VIRTIO_BLK_F_FLUSH)
-            | (1u64 << VIRTIO_BLK_F_CONFIG_WCE);
+            | (1u64 << VIRTIO_BLK_F_CONFIG_WCE)
+            | (1u64 << VIRTIO_BLK_F_BLK_SIZE)
+            | (1u64 << VIRTIO_BLK_F_TOPOLOGY);
 
         if iommu {
             avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
@@ -432,10 +441,31 @@ impl Block {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
         }
 
+        let topology = disk_image.topology();
+        info!("Disk topology: {:?}", topology);
+
+        let logical_block_size = if topology.logical_block_size > 512 {
+            topology.logical_block_size
+        } else {
+            512
+        };
+
+        // Calculate the exponent that maps physical block to logical block
+        let mut physical_block_exp = 0;
+        let mut size = logical_block_size;
+        while size < topology.physical_block_size {
+            physical_block_exp += 1;
+            size <<= 1;
+        }
+
         let disk_nsectors = disk_size / SECTOR_SIZE;
         let mut config = VirtioBlockConfig {
             capacity: disk_nsectors,
             writeback: 1,
+            blk_size: topology.logical_block_size as u32,
+            physical_block_exp,
+            min_io_size: (topology.minimum_io_size / logical_block_size) as u16,
+            opt_io_size: (topology.optimal_io_size / logical_block_size) as u32,
             ..Default::default()
         };
 
@@ -579,6 +609,7 @@ impl VirtioDevice for Block {
                 .map_err(ActivateError::CreateRateLimiter)?;
 
             let mut handler = BlockEpollHandler {
+                queue_index: i as u16,
                 queue,
                 mem: mem.clone(),
                 disk_image: self
@@ -598,6 +629,7 @@ impl VirtioDevice for Block {
                 queue_evt,
                 request_list: HashMap::with_capacity(queue_size.into()),
                 rate_limiter,
+                access_platform: self.common.access_platform.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -650,6 +682,10 @@ impl VirtioDevice for Block {
         );
 
         Some(counters)
+    }
+
+    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
+        self.common.set_access_platform(access_platform)
     }
 }
 

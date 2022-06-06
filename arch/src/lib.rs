@@ -6,19 +6,18 @@
 
 //! Implements platform specific functionality.
 //! Supported platforms: x86_64, aarch64.
-#![allow(clippy::transmute_ptr_to_ptr, clippy::redundant_static_lifetimes)]
 
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
 
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::SgxEpcSection;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::result;
 use std::sync::Arc;
+use thiserror::Error;
 use versionize::{VersionMap, Versionize, VersionizeError, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_migration::VersionMapped;
@@ -27,31 +26,27 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vm_memory::bitmap::AtomicBitma
 type GuestRegionMmap = vm_memory::GuestRegionMmap<vm_memory::bitmap::AtomicBitmap>;
 
 /// Type for returning error code.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[cfg(target_arch = "x86_64")]
-    /// X86_64 specific error triggered during system configuration.
-    X86_64Setup(x86_64::Error),
+    #[error("Platform specific error (x86_64): {0:?}")]
+    PlatformSpecific(x86_64::Error),
     #[cfg(target_arch = "aarch64")]
-    /// AArch64 specific error triggered during system configuration.
-    AArch64Setup(aarch64::Error),
-    /// The zero page extends past the end of guest_mem.
-    ZeroPagePastRamEnd,
-    /// Error writing the zero page of guest memory.
-    ZeroPageSetup(vm_memory::GuestMemoryError),
-    /// The memory map table extends past the end of guest memory.
+    #[error("Platform specific error (aarch64): {0:?}")]
+    PlatformSpecific(aarch64::Error),
+    #[error("The memory map table extends past the end of guest memory")]
     MemmapTablePastRamEnd,
-    /// Error writing memory map table to guest memory.
+    #[error("Error writing memory map table to guest memory")]
     MemmapTableSetup,
-    /// The hvm_start_info structure extends past the end of guest memory.
+    #[error("The hvm_start_info structure extends past the end of guest memory")]
     StartInfoPastRamEnd,
-    /// Error writing hvm_start_info to guest memory.
+    #[error("Error writing hvm_start_info to guest memory")]
     StartInfoSetup,
-    /// Failed to compute initramfs address.
+    #[error("Failed to compute initramfs address")]
     InitramfsAddress,
-    /// Error writing module entry to guest memory.
-    ModlistSetup(vm_memory::GuestMemoryError),
-    /// RSDP Beyond Guest Memory
+    #[error("Error writing module entry to guest memory: {0}")]
+    ModlistSetup(#[source] vm_memory::GuestMemoryError),
+    #[error("RSDP extends past the end of guest memory")]
     RsdpPastRamEnd,
 }
 
@@ -86,8 +81,8 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
     arch_memory_regions, configure_system, configure_vcpu, fdt::DeviceInfoForFdt,
-    get_host_cpu_phys_bits, get_kernel_start, get_uefi_start, initramfs_load_addr, layout,
-    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi, EntryPoint,
+    get_host_cpu_phys_bits, initramfs_load_addr, layout, layout::CMDLINE_MAX_SIZE,
+    layout::IRQ_BASE, uefi, EntryPoint,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -159,7 +154,18 @@ impl fmt::Display for DeviceType {
 #[cfg(target_arch = "aarch64")]
 pub struct MmioDeviceInfo {
     pub addr: u64,
+    pub len: u64,
     pub irq: u32,
+}
+
+/// Structure to describe PCI space information
+#[derive(Clone, Debug)]
+#[cfg(target_arch = "aarch64")]
+pub struct PciSpaceInfo {
+    pub pci_segment_id: u16,
+    pub mmio_config_address: u64,
+    pub pci_device_space_start: u64,
+    pub pci_device_space_size: u64,
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -171,6 +177,6 @@ impl DeviceInfoForFdt for MmioDeviceInfo {
         self.irq
     }
     fn length(&self) -> u64 {
-        4096
+        self.len
     }
 }

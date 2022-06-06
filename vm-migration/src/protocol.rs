@@ -4,6 +4,7 @@
 //
 
 use crate::{MigratableError, VersionMapped};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
@@ -27,7 +28,24 @@ use vm_memory::ByteValued;
 // (n-2): Dest -> Source : sends "ok response"
 // (n-1): Source -> Dest : send "complete command"
 // n: Dest -> Source: sends "ok response"
-
+//
+// "Local version": (Handing FDs across socket for memory)
+// 1: Source establishes communication with destination (file socket or TCP connection.)
+// (The establishment is out of scope.)
+// 2: Source -> Dest : send "start command"
+// 3: Dest -> Source : sends "ok response" when read to accept state data
+// 4: Source -> Dest : sends "config command" followed by config data, length
+//                     in command is length of config data
+// 5: Dest -> Source : sends "ok response" when ready to accept memory data
+// 6: Source -> Dest : send "memory fd command" followed by u16 slot ID and FD for memory
+// 7: Dest -> Source : sends "ok response" when received
+// 8..(n-4): Repeat steps 6 and 7 until source has no more memory to send
+// (n-3): Source -> Dest : sends "state command" followed by state data, length
+//                     in command is length of config data
+// (n-2): Dest -> Source : sends "ok response"
+// (n-1): Source -> Dest : send "complete command"
+// n: Dest -> Source: sends "ok response"
+//
 // The destination can at any time send an "error response" to cancel
 // The source can at any time send an "abandon request" to cancel
 
@@ -41,6 +59,7 @@ pub enum Command {
     Memory,
     Complete,
     Abandon,
+    MemoryFd,
 }
 
 impl Default for Command {
@@ -56,6 +75,9 @@ pub struct Request {
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Request struct
 }
+
+// SAFETY: Request contains a series of integers with no implicit padding
+unsafe impl ByteValued for Request {}
 
 impl Request {
     pub fn new(command: Command, length: u64) -> Self {
@@ -80,6 +102,10 @@ impl Request {
 
     pub fn memory(length: u64) -> Self {
         Self::new(Command::Memory, length)
+    }
+
+    pub fn memory_fd(length: u64) -> Self {
+        Self::new(Command::MemoryFd, length)
     }
 
     pub fn complete() -> Self {
@@ -112,8 +138,6 @@ impl Request {
     }
 }
 
-unsafe impl ByteValued for Request {}
-
 #[repr(u16)]
 #[derive(Copy, Clone, PartialEq)]
 pub enum Status {
@@ -135,6 +159,9 @@ pub struct Response {
     padding: [u8; 6],
     length: u64, // Length of payload for command excluding the Response struct
 }
+
+// SAFETY: Response contains a series of integers with no implicit padding
+unsafe impl ByteValued for Response {}
 
 impl Response {
     pub fn new(status: Status, length: u64) -> Self {
@@ -171,10 +198,8 @@ impl Response {
     }
 }
 
-unsafe impl ByteValued for Response {}
-
 #[repr(C)]
-#[derive(Clone, Serialize, Deserialize, Versionize)]
+#[derive(Clone, Default, Serialize, Deserialize, Versionize)]
 pub struct MemoryRange {
     pub gpa: u64,
     pub length: u64,
@@ -227,10 +252,11 @@ impl MemoryRangeTable {
     pub fn read_from(fd: &mut dyn Read, length: u64) -> Result<MemoryRangeTable, MigratableError> {
         assert!(length as usize % std::mem::size_of::<MemoryRange>() == 0);
 
-        let mut data = Vec::with_capacity(length as usize / (std::mem::size_of::<MemoryRange>()));
-        unsafe {
-            data.set_len(length as usize / (std::mem::size_of::<MemoryRange>()));
-        }
+        let mut data: Vec<MemoryRange> = Vec::new();
+        data.resize_with(
+            length as usize / (std::mem::size_of::<MemoryRange>()),
+            Default::default,
+        );
         fd.read_exact(unsafe {
             std::slice::from_raw_parts_mut(
                 data.as_ptr() as *mut MemoryRange as *mut u8,

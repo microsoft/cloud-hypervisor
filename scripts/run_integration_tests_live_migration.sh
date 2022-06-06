@@ -11,13 +11,11 @@ mkdir -p "$WORKLOADS_DIR"
 
 process_common_args "$@"
 
-# For now these values are deafult for kvm
-features_build=""
-features_test="--features integration_tests"
+# For now these values are default for kvm
+features=""
 
 if [ "$hypervisor" = "mshv" ] ;  then
-    features_build="--no-default-features --features mshv,common"
-    features_test="--no-default-features --features mshv,common,integration_tests"
+    features="--no-default-features --features mshv,common"
 fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
@@ -47,6 +45,15 @@ if [ $? -ne 0 ]; then
 fi
 popd
 
+# Download Cloud Hypervisor binary from its last stable release
+LAST_RELEASE_VERSION="v23.0"
+CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$LAST_RELEASE_VERSION/cloud-hypervisor-static"
+CH_RELEASE_NAME="cloud-hypervisor-static"
+pushd $WORKLOADS_DIR
+time wget --quiet $CH_RELEASE_URL -O "$CH_RELEASE_NAME" || exit 1
+chmod +x $CH_RELEASE_NAME
+popd
+
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
 
@@ -55,7 +62,7 @@ LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
 if [ ! -f "$VMLINUX_IMAGE" ]; then
     SRCDIR=$PWD
     pushd $WORKLOADS_DIR
-    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.14" $LINUX_CUSTOM_DIR
+    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.15.12" $LINUX_CUSTOM_DIR
     cp $SRCDIR/resources/linux-config-x86_64 $LINUX_CUSTOM_DIR/.config
     popd
 fi
@@ -79,7 +86,7 @@ if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
     CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --all --release $features_build --target $BUILD_TARGET
+cargo build --all --release $features --target $BUILD_TARGET
 strip target/$BUILD_TARGET/release/cloud-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
@@ -89,7 +96,7 @@ echo 6144 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
 export RUST_BACKTRACE=1
-time cargo test $features_test "tests::live_migration::$test_filter" -- --test-threads=1
+time cargo test $features "live_migration::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
 RES=$?
 
 exit $RES

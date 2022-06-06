@@ -28,9 +28,13 @@ use std::sync::{Arc, Barrier};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::{DescriptorChain, Queue};
-use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError};
+use vm_memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError,
+    GuestMemoryLoadGuard,
+};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
@@ -50,7 +54,7 @@ struct VirtioPmemConfig {
     size: u64,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioPmemConfig {}
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -59,7 +63,7 @@ struct VirtioPmemReq {
     type_: u32,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioPmemReq {}
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -68,7 +72,7 @@ struct VirtioPmemResp {
     ret: u32,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioPmemResp {}
 
 #[derive(Debug)]
@@ -114,7 +118,8 @@ struct Request {
 
 impl Request {
     fn parse(
-        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
     ) -> result::Result<Request, Error> {
         let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
         // The descriptor contains the request type which MUST be readable.
@@ -128,7 +133,10 @@ impl Request {
 
         let request: VirtioPmemReq = desc_chain
             .memory()
-            .read_obj(desc.addr())
+            .read_obj(
+                desc.addr()
+                    .translate_gva(access_platform, desc.len() as usize),
+            )
             .map_err(Error::GuestMemory)?;
 
         let request_type = match request.type_ {
@@ -149,7 +157,9 @@ impl Request {
 
         Ok(Request {
             type_: request_type,
-            status_addr: status_desc.addr(),
+            status_addr: status_desc
+                .addr()
+                .translate_gva(access_platform, status_desc.len() as usize),
         })
     }
 }
@@ -161,6 +171,7 @@ struct PmemEpollHandler {
     queue_evt: EventFd,
     kill_evt: EventFd,
     pause_evt: EventFd,
+    access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 impl PmemEpollHandler {
@@ -168,7 +179,7 @@ impl PmemEpollHandler {
         let mut used_desc_heads = [(0, 0); QUEUE_SIZE as usize];
         let mut used_count = 0;
         for mut desc_chain in self.queue.iter().unwrap() {
-            let len = match Request::parse(&mut desc_chain) {
+            let len = match Request::parse(&mut desc_chain, self.access_platform.as_ref()) {
                 Ok(ref req) if (req.type_ == RequestType::Flush) => {
                     let status_code = match self.disk.sync_all() {
                         Ok(()) => VIRTIO_PMEM_RESP_TYPE_OK,
@@ -210,7 +221,7 @@ impl PmemEpollHandler {
 
     fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(&self.queue))
+            .trigger(VirtioInterruptType::Queue(0))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -385,6 +396,7 @@ impl VirtioDevice for Pmem {
                 queue_evt: queue_evts.remove(0),
                 kill_evt,
                 pause_evt,
+                access_platform: self.common.access_platform.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -420,6 +432,10 @@ impl VirtioDevice for Pmem {
 
     fn userspace_mappings(&self) -> Vec<UserspaceMapping> {
         vec![self.mapping.clone()]
+    }
+
+    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
+        self.common.set_access_platform(access_platform)
     }
 }
 

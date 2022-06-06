@@ -1,10 +1,27 @@
 # How to build and test Cloud Hypervisor on AArch64
 
-This document introduces how to build and test Cloud Hypervisor on AArch64 servers. Currently Cloud Hypervisor cannot be tested on Raspberry PI. Because on AArch64, Cloud Hypervisor requires GICv3-ITS device for PCIe MSI interrupt handling. But GICv3-ITS has not been equipped on any Raspberry PI product so far.
+This document introduces how to build and test Cloud Hypervisor on AArch64.
+Currently, Cloud Hypervisor supports 2 methods of booting on AArch64: UEFI
+booting and direct-kernel booting. The document covers both methods.
 
-Now Cloud Hypervisor supports 2 ways of booting on AArch64: UEFI booting and direct-kernel booting. The document covers both of the ways.
+All the steps are based on Ubuntu. We use the Ubuntu cloud image for guest VM
+disk.
 
-All the steps are based on Ubuntu. We use the Ubuntu cloud image for guest VM disk.
+## Hardware requirements
+
+- AArch64 servers (recommended) or development boards equipped with the GICv3
+interrupt controller.
+
+- On development boards that have constrained RAM resources, if the creation of
+a VM consumes a large portion of the free memory on the host, it may be required
+to enable swap. For example, this was required on a board with 3 GB of RAM
+booting a 2 GB VM at a point in time when 2.8 GB were free. Without enabling
+swap the `cloud-hypervisor` process was terminated by the OOM killer. In this
+situation memory was allocated for the virtual machine using memfd while the
+page cache was filled, leading to a situation where the kernel could not even
+drop caches. Making a small section of swap available (observably, 1 to 15 MB),
+this situation can be resolved and the resulting memory footprint of
+`cloud-hypervisor` is as expected.
 
 ## Getting started
 
@@ -82,19 +99,29 @@ $ build -a AARCH64 -t GCC5 -p ArmVirtPkg/ArmVirtCloudHv.dsc -b RELEASE
 $ popd
 ```
 
-If the build goes well, the EDK2 binary is available at `edk2/Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd`.
+If the build goes well, the EDK2 binary is available at
+`edk2/Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd`.
 
 ### Booting the guest VM
 
 ```bash
 $ pushd $CLOUDH
-$ sudo RUST_BACKTRACE=1 $CLOUDH/cloud-hypervisor/target/debug/cloud-hypervisor --api-socket /tmp/cloud-hypervisor.sock --kernel $CLOUDH/edk2/Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd --disk path=$CLOUDH/focal-server-cloudimg-arm64.raw --cpus boot=4 --memory size=4096M --serial tty --console off --log-file log.log -vvv --net tap=,mac=12:34:56:78:90:01,ip=192.168.1.1,mask=255.255.255.0
+$ sudo RUST_BACKTRACE=1 $CLOUDH/cloud-hypervisor/target/debug/cloud-hypervisor \
+           --api-socket /tmp/cloud-hypervisor.sock \
+           --kernel $CLOUDH/edk2/Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC5/FV/CLOUDHV_EFI.fd \
+           --disk path=$CLOUDH/focal-server-cloudimg-arm64.raw \
+           --cpus boot=4 \
+           --memory size=4096M \
+           --net tap=,mac=12:34:56:78:90:01,ip=192.168.1.1,mask=255.255.255.0 \
+           --serial tty \
+           --console off
 $ popd
 ```
 
 ## Direct-kernel booting
 
-Alternativelly, you can build your own kernel for guest VM. This way, UEFI is not involved and ACPI cannot be enabled.
+Alternativelly, you can build your own kernel for guest VM. This way, UEFI is
+not involved and ACPI cannot be enabled.
 
 ### Building kernel
 
@@ -111,6 +138,15 @@ $ popd
 
 ```bash
 $ pushd $CLOUDH
-$ sudo $CLOUDH/cloud-hypervisor/target/debug/cloud-hypervisor --api-socket /tmp/cloud-hypervisor.sock --kernel $CLOUDH/linux/arch/arm64/boot/Image --disk path=focal-server-cloudimg-arm64.raw --cmdline "keep_bootcon console=ttyAMA0 reboot=k panic=1 root=/dev/vda1 rw" --cpus boot=4 --memory size=4096M --serial tty --console off --log-file log.log -vvv --net "tap=,mac=,ip=,mask="
+$ sudo $CLOUDH/cloud-hypervisor/target/debug/cloud-hypervisor \
+           --api-socket /tmp/cloud-hypervisor.sock \
+           --kernel $CLOUDH/linux/arch/arm64/boot/Image \
+           --disk path=focal-server-cloudimg-arm64.raw \
+           --cmdline "keep_bootcon console=ttyAMA0 reboot=k panic=1 root=/dev/vda1 rw" \
+           --cpus boot=4 \
+           --memory size=4096M \
+           --net tap=,mac=12:34:56:78:90:01,ip=192.168.1.1,mask=255.255.255.0 \
+           --serial tty \
+           --console off
 $ popd
 ```

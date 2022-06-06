@@ -25,6 +25,7 @@ pub enum TdvfError {
 
 // TDVF_DESCRIPTOR
 #[repr(packed)]
+#[derive(Default)]
 pub struct TdvfDescriptor {
     signature: [u8; 4],
     length: u32,
@@ -51,65 +52,15 @@ pub enum TdvfSectionType {
     Cfv,
     TdHob,
     TempMem,
+    PermMem,
+    Payload,
+    PayloadParam,
     Reserved = 0xffffffff,
 }
 
 impl Default for TdvfSectionType {
     fn default() -> Self {
         TdvfSectionType::Reserved
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
-pub struct TdVmmDataRegion {
-    pub start_address: u64,
-    pub length: u64,
-    pub region_type: TdVmmDataRegionType,
-}
-
-unsafe impl ByteValued for TdVmmDataRegion {}
-
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-pub enum TdVmmDataRegionType {
-    Signature = 0x0000,
-    InterfaceVersion = 0x0001,
-    SystemUuid = 0x0002,
-    RamSize = 0x0003,
-    GraphicsEnabled = 0x0004,
-    SmpCpuCount = 0x0005,
-    MachineId = 0x0006,
-    KernelAddress = 0x0007,
-    KernelSize = 0x0008,
-    KernelCommandLine = 0x0009,
-    InitrdAddress = 0x000a,
-    InitrdSize = 0x000b,
-    BootDevice = 0x000c,
-    NumaData = 0x000d,
-    BootMenu = 0x000e,
-    MaximumCpuCount = 0x000f,
-    KernelEntry = 0x0010,
-    KernelData = 0x0011,
-    InitrdData = 0x0012,
-    CommandLineAddress = 0x0013,
-    CommandLineSize = 0x0014,
-    CommandLineData = 0x0015,
-    KernelSetupAddress = 0x0016,
-    KernelSetupSize = 0x0017,
-    KernelSetupData = 0x0018,
-    FileDir = 0x0019,
-    AcpiTables = 0x8000,
-    SmbiosTables = 0x8001,
-    Irq0Override = 0x8002,
-    E820Table = 0x8003,
-    HpetData = 0x8004,
-    Reserved = 0xffff,
-}
-
-impl Default for TdVmmDataRegionType {
-    fn default() -> Self {
-        TdVmmDataRegionType::Reserved
     }
 }
 
@@ -128,7 +79,7 @@ pub fn parse_tdvf_sections(file: &mut File) -> Result<Vec<TdvfSection>, TdvfErro
     file.seek(SeekFrom::Start(descriptor_offset))
         .map_err(TdvfError::ReadDescriptor)?;
 
-    let mut descriptor: TdvfDescriptor = unsafe { std::mem::zeroed() };
+    let mut descriptor: TdvfDescriptor = Default::default();
     // Safe as we read exactly the size of the descriptor header
     file.read_exact(unsafe {
         std::slice::from_raw_parts_mut(
@@ -191,7 +142,6 @@ struct HobHeader {
     length: u16,
     reserved: u32,
 }
-unsafe impl ByteValued for HobHeader {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -205,7 +155,6 @@ struct HobHandoffInfoTable {
     efi_free_memory_bottom: u64,
     efi_end_of_hob_list: u64,
 }
-unsafe impl ByteValued for HobHandoffInfoTable {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -226,7 +175,6 @@ struct HobResourceDescriptor {
     physical_start: u64,
     resource_length: u64,
 }
-unsafe impl ByteValued for HobResourceDescriptor {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -234,15 +182,42 @@ struct HobGuidType {
     header: HobHeader,
     name: EfiGuid,
 }
-unsafe impl ByteValued for HobGuidType {}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug)]
+pub enum PayloadImageType {
+    ExecutablePayload,
+    BzImage,
+    RawVmLinux,
+}
+
+impl Default for PayloadImageType {
+    fn default() -> Self {
+        PayloadImageType::ExecutablePayload
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
-struct TdVmmData {
-    guid_type: HobGuidType,
-    region: TdVmmDataRegion,
+pub struct PayloadInfo {
+    pub image_type: PayloadImageType,
+    pub entry_point: u64,
 }
-unsafe impl ByteValued for TdVmmData {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+struct TdPayload {
+    guid_type: HobGuidType,
+    payload_info: PayloadInfo,
+}
+
+// SAFETY: These data structures only contain a series of integers
+unsafe impl ByteValued for HobHeader {}
+unsafe impl ByteValued for HobHandoffInfoTable {}
+unsafe impl ByteValued for HobResourceDescriptor {}
+unsafe impl ByteValued for HobGuidType {}
+unsafe impl ByteValued for PayloadInfo {}
+unsafe impl ByteValued for TdPayload {}
 
 pub struct TdHob {
     start_offset: u64,
@@ -349,10 +324,10 @@ impl TdHob {
             },
             /* TODO:
              * QEMU currently fills it in like this:
-             * EFI_RESOURCE_ATTRIBUTE_PRESENT | EFI_RESOURCE_ATTRIBUTE_INITIALIZED | EFI_RESOURCE_ATTRIBUTE_ENCRYPTED | EFI_RESOURCE_ATTRIBUTE_TESTED
+             * EFI_RESOURCE_ATTRIBUTE_PRESENT | EFI_RESOURCE_ATTRIBUTE_INITIALIZED | EFI_RESOURCE_ATTRIBUTE_TESTED
              * which differs from the spec (due to TDVF implementation issue?)
              */
-            0x04000007,
+            0x7,
         )
     }
 
@@ -374,35 +349,90 @@ impl TdHob {
         )
     }
 
-    pub fn add_td_vmm_data(
+    pub fn add_acpi_table(
         &mut self,
         mem: &GuestMemoryMmap,
-        region: TdVmmDataRegion,
+        table_content: &[u8],
     ) -> Result<(), TdvfError> {
-        let td_vmm_data = TdVmmData {
+        // We already know the HobGuidType size is 8 bytes multiple, but we
+        // need the total size to be 8 bytes multiple. That is why the ACPI
+        // table size must be 8 bytes multiple as well.
+        let length = std::mem::size_of::<HobGuidType>() as u16
+            + align_hob(table_content.len() as u64) as u16;
+        let hob_guid_type = HobGuidType {
+            header: HobHeader {
+                r#type: HobType::GuidExtension,
+                length,
+                reserved: 0,
+            },
+            // ACPI_TABLE_HOB_GUID
+            // 0x6a0c5870, 0xd4ed, 0x44f4, {0xa1, 0x35, 0xdd, 0x23, 0x8b, 0x6f, 0xc, 0x8d }
+            name: EfiGuid {
+                data1: 0x6a0c_5870,
+                data2: 0xd4ed,
+                data3: 0x44f4,
+                data4: [0xa1, 0x35, 0xdd, 0x23, 0x8b, 0x6f, 0xc, 0x8d],
+            },
+        };
+        info!(
+            "Writing HOB ACPI table {:x} {:x?} {:x?}",
+            self.current_offset, hob_guid_type, table_content
+        );
+        mem.write_obj(hob_guid_type, GuestAddress(self.current_offset))
+            .map_err(TdvfError::GuestMemoryWriteHob)?;
+        let current_offset = self.current_offset + std::mem::size_of::<HobGuidType>() as u64;
+
+        // In case the table is quite large, let's make sure we can handle
+        // retrying until everything has been correctly copied.
+        let mut offset: usize = 0;
+        loop {
+            let bytes_written = mem
+                .write(
+                    &table_content[offset..],
+                    GuestAddress(current_offset + offset as u64),
+                )
+                .map_err(TdvfError::GuestMemoryWriteHob)?;
+            offset += bytes_written;
+            if offset >= table_content.len() {
+                break;
+            }
+        }
+        self.current_offset += length as u64;
+
+        Ok(())
+    }
+
+    pub fn add_payload(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        payload_info: PayloadInfo,
+    ) -> Result<(), TdvfError> {
+        let payload = TdPayload {
             guid_type: HobGuidType {
                 header: HobHeader {
                     r#type: HobType::GuidExtension,
-                    length: std::mem::size_of::<TdVmmData>() as u16,
+                    length: std::mem::size_of::<TdPayload>() as u16,
                     reserved: 0,
                 },
-                // TD_VMM_DATA_GUID CF2643E4-C0D3-46FF-0000-72EE623DDE38
+                // HOB_PAYLOAD_INFO_GUID
+                // 0xb96fa412, 0x461f, 0x4be3, {0x8c, 0xd, 0xad, 0x80, 0x5a, 0x49, 0x7a, 0xc0
                 name: EfiGuid {
-                    data1: 0xcf26_43e4,
-                    data2: 0xc0d3,
-                    data3: 0x46ff,
-                    data4: [0x00, 0x00, 0x72, 0xee, 0x62, 0x3d, 0xde, 0x38],
+                    data1: 0xb96f_a412,
+                    data2: 0x461f,
+                    data3: 0x4be3,
+                    data4: [0x8c, 0xd, 0xad, 0x80, 0x5a, 0x49, 0x7a, 0xc0],
                 },
             },
-            region,
+            payload_info,
         };
         info!(
-            "Writing HOB TD_VMM_DATA {:x} {:x?}",
-            self.current_offset, td_vmm_data
+            "Writing HOB TD_PAYLOAD {:x} {:x?}",
+            self.current_offset, payload
         );
-        mem.write_obj(td_vmm_data, GuestAddress(self.current_offset))
+        mem.write_obj(payload, GuestAddress(self.current_offset))
             .map_err(TdvfError::GuestMemoryWriteHob)?;
-        self.update_offset::<TdVmmData>();
+        self.update_offset::<TdPayload>();
+
         Ok(())
     }
 }

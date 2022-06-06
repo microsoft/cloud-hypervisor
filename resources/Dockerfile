@@ -1,7 +1,10 @@
+# When changing this file don't forget to update the tag name in the
+# .github/workflows/docker-image.yaml file if doing multiple per day
+
 FROM ubuntu:20.04 as dev
 
 ARG TARGETARCH
-ARG RUST_TOOLCHAIN="1.56.1"
+ARG RUST_TOOLCHAIN="1.60.0"
 ARG CLH_SRC_DIR="/cloud-hypervisor"
 ARG CLH_BUILD_DIR="$CLH_SRC_DIR/build"
 ARG CARGO_REGISTRY_DIR="$CLH_BUILD_DIR/cargo_registry"
@@ -17,7 +20,6 @@ RUN apt-get update \
 	&& DEBIAN_FRONTEND=noninteractive apt-get install -yq \
 	build-essential \
 	bc \
-	docker.io \
 	curl \
 	wget \
 	sudo \
@@ -29,7 +31,6 @@ RUN apt-get update \
 	bison \
 	libelf-dev \
 	qemu-utils \
-	qemu-system \
 	libglib2.0-dev \
 	libpixman-1-dev \
 	libseccomp-dev \
@@ -44,6 +45,11 @@ RUN apt-get update \
 	openvswitch-switch-dpdk \
 	python3-distutils \
 	uuid-dev \
+	iperf3 \
+	zip \
+	git-core \
+	dnsmasq \
+	dmsetup \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -66,7 +72,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         && DEBIAN_FRONTEND=noninteractive apt-get install -yq \
         libcap2-bin \
         libguestfs-tools \
-        linux-image-5.8.0-63-generic \
+        linux-image-generic \
         autotools-dev \
         autoconf \
         automake \
@@ -86,12 +92,11 @@ ENV OPENSSL_INCLUDE_DIR=/usr/include/
 
 # Install the rust toolchain
 RUN export ARCH="$(uname -m)" \
-    && nohup curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN" \
+    && nohup curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" \
     && rustup target add $ARCH-unknown-linux-musl --toolchain "$RUST_TOOLCHAIN" \
-    && if [ "$TARGETARCH" = "amd64" ]; then rustup toolchain add $RUST_TOOLCHAIN-x86_64-unknown-linux-musl; fi \
+    && if [ "$TARGETARCH" = "amd64" ]; then rustup toolchain add --profile minimal $RUST_TOOLCHAIN-x86_64-unknown-linux-musl; fi \
     && if [ "$TARGETARCH" = "amd64" ]; then rustup component add rustfmt; fi \
     && if [ "$TARGETARCH" = "amd64" ]; then rustup component add clippy; fi \
-    && cargo install cargo-audit \
     && rm -rf "$CARGO_HOME/registry" \
     && ln -s "$CARGO_REGISTRY_DIR" "$CARGO_HOME/registry" \
     && rm -rf "$CARGO_HOME/git" \
@@ -102,25 +107,16 @@ RUN echo 'source $CARGO_HOME/env' >> $HOME/.bashrc \
     && mkdir $HOME/.cargo \
     && ln -s $CARGO_HOME/env $HOME/.cargo/env
 
-# install virtiofsd
-RUN git clone --depth 1 https://gitlab.com/virtio-fs/qemu.git -b qemu5.0-virtiofs-dax \
-    && cd qemu \
-    && ./configure --prefix=$PWD --target-list=x86_64-softmmu \
-    && make virtiofsd -j `nproc` \
-    && cp virtiofsd /usr/local/bin \
-    && cd .. && rm -rf qemu
-
 # install SPDK NVMe
 # only for 'x86_64' platform images as 'docker buildx' can't build 'spdk'
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
        git clone https://github.com/spdk/spdk \
        && cd spdk \
-       && git checkout a827fd7eeca67209d4c0aaad9a3ed55692e7e36e \
+       && git checkout 6301f8915de32baed10dba1eebed556a6749211a \
        && git submodule update --init \
-       && sed -i 's/pip3 install meson/pip3 install meson==0.59.2/g'  scripts/pkgdep/ubuntu.sh \
-       && sed -i 's/meson/meson==0.59.2/g'  scripts/pkgdep/requirements.txt \
        && apt-get update \
        && ./scripts/pkgdep.sh \
+       && apt-get clean \
        && ./configure --with-vfio-user \
        && make -j `nproc` \
        && mkdir /usr/local/bin/spdk-nvme \
@@ -128,3 +124,10 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
        && cp ./scripts/rpc.py /usr/local/bin/spdk-nvme \
        && cp -r ./scripts/rpc /usr/local/bin/spdk-nvme \
        && cd .. && rm -rf spdk; fi
+
+# install ethr tool for performance tests
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+    wget https://github.com/microsoft/ethr/releases/latest/download/ethr_linux.zip \
+    && unzip ethr_linux.zip \
+    && cp ethr /usr/local/bin \
+    && rm ethr_linux.zip; fi

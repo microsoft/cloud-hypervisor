@@ -9,19 +9,23 @@
 //
 
 #[cfg(target_arch = "aarch64")]
+use crate::aarch64::gic::KvmGicV3Its;
+#[cfg(target_arch = "aarch64")]
 pub use crate::aarch64::{
-    check_required_kvm_extensions, is_system_register, VcpuInit, VcpuKvmState as CpuState,
-    MPIDR_EL1,
+    check_required_kvm_extensions, gic::Gicv3ItsState as GicState, is_system_register, VcpuInit,
+    VcpuKvmState as CpuState, MPIDR_EL1,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::gic::Vgic;
 use crate::cpu;
 use crate::device;
 use crate::hypervisor;
 use crate::vec_with_array_field;
-use crate::vm::{self, VmmOps};
+use crate::vm::{self, InterruptSourceConfig, VmOps};
 #[cfg(target_arch = "aarch64")]
 use crate::{arm64_core_reg_id, offset__of};
 use kvm_ioctls::{NoDatamatch, VcpuFd, VmFd};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
@@ -31,9 +35,9 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_arch = "aarch64")]
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
-#[cfg(target_arch = "x86_64")]
-use vm_memory::Address;
 use vmm_sys_util::eventfd::EventFd;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
@@ -44,12 +48,11 @@ use crate::arch::x86::NUM_IOAPIC_PINS;
 use aarch64::{RegList, Register, StandardRegisters};
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
-    kvm_enable_cap, kvm_msr_entry, MsrList, KVM_CAP_HYPERV_SYNIC, KVM_CAP_SPLIT_IRQCHIP,
+    kvm_enable_cap, kvm_guest_debug, kvm_msr_entry, MsrList, KVM_CAP_HYPERV_SYNIC,
+    KVM_CAP_SPLIT_IRQCHIP, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
 };
 #[cfg(target_arch = "x86_64")]
-use x86_64::{
-    check_required_kvm_extensions, FpuState, SpecialRegisters, StandardRegisters, KVM_TSS_ADDRESS,
-};
+use x86_64::{check_required_kvm_extensions, FpuState, SpecialRegisters, StandardRegisters};
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
     CpuId, CpuIdEntry, ExtendedControlRegisters, LapicState, MsrEntries, VcpuKvmState as CpuState,
@@ -85,7 +88,7 @@ pub use {
     kvm_bindings::kvm_clock_data as ClockData, kvm_bindings::kvm_create_device as CreateDevice,
     kvm_bindings::kvm_device_attr as DeviceAttr,
     kvm_bindings::kvm_irq_routing_entry as IrqRoutingEntry, kvm_bindings::kvm_mp_state as MpState,
-    kvm_bindings::kvm_userspace_memory_region as MemoryRegion,
+    kvm_bindings::kvm_run, kvm_bindings::kvm_userspace_memory_region as MemoryRegion,
     kvm_bindings::kvm_vcpu_events as VcpuEvents, kvm_ioctls::DeviceFd, kvm_ioctls::IoEventAddress,
     kvm_ioctls::VcpuExit,
 };
@@ -94,17 +97,67 @@ pub use {
 const KVM_CAP_SGX_ATTRIBUTE: u32 = 196;
 
 #[cfg(feature = "tdx")]
+const KVM_EXIT_TDX: u32 = 35;
+#[cfg(feature = "tdx")]
+const TDG_VP_VMCALL_GET_QUOTE: u64 = 0x10002;
+#[cfg(feature = "tdx")]
+const TDG_VP_VMCALL_SETUP_EVENT_NOTIFY_INTERRUPT: u64 = 0x10004;
+#[cfg(feature = "tdx")]
+const TDG_VP_VMCALL_SUCCESS: u64 = 0;
+#[cfg(feature = "tdx")]
+const TDG_VP_VMCALL_INVALID_OPERAND: u64 = 0x8000000000000000;
+
+#[cfg(feature = "tdx")]
 ioctl_iowr_nr!(KVM_MEMORY_ENCRYPT_OP, KVMIO, 0xba, std::os::raw::c_ulong);
 
 #[cfg(feature = "tdx")]
 #[repr(u32)]
 enum TdxCommand {
-    #[allow(dead_code)]
     Capabilities = 0,
     InitVm,
     InitVcpu,
     InitMemRegion,
     Finalize,
+}
+
+#[cfg(feature = "tdx")]
+pub enum TdxExitDetails {
+    GetQuote,
+    SetupEventNotifyInterrupt,
+}
+
+#[cfg(feature = "tdx")]
+pub enum TdxExitStatus {
+    Success,
+    InvalidOperand,
+}
+
+#[cfg(feature = "tdx")]
+const TDX_MAX_NR_CPUID_CONFIGS: usize = 6;
+
+#[cfg(feature = "tdx")]
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct TdxCpuidConfig {
+    pub leaf: u32,
+    pub sub_leaf: u32,
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+}
+
+#[cfg(feature = "tdx")]
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct TdxCapabilities {
+    pub attrs_fixed0: u64,
+    pub attrs_fixed1: u64,
+    pub xfam_fixed0: u64,
+    pub xfam_fixed1: u64,
+    pub nr_cpuid_configs: u32,
+    pub padding: u32,
+    pub cpuid_configs: [TdxCpuidConfig; TDX_MAX_NR_CPUID_CONFIGS],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -139,6 +192,15 @@ pub struct KvmVm {
 /// vm.set/get().unwrap()
 ///
 impl vm::Vm for KvmVm {
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Sets the address of the one-page region in the VM's address space.
+    ///
+    fn set_identity_map_address(&self, address: u64) -> vm::Result<()> {
+        self.fd
+            .set_identity_map_address(address)
+            .map_err(|e| vm::HypervisorVmError::SetIdentityMapAddress(e.into()))
+    }
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the address of the three-page region in the VM's address space.
@@ -178,7 +240,7 @@ impl vm::Vm for KvmVm {
     fn create_vcpu(
         &self,
         id: u8,
-        vmmops: Option<Arc<dyn VmmOps>>,
+        vm_ops: Option<Arc<dyn VmOps>>,
     ) -> vm::Result<Arc<dyn cpu::Vcpu>> {
         let vc = self
             .fd
@@ -188,11 +250,36 @@ impl vm::Vm for KvmVm {
             fd: vc,
             #[cfg(target_arch = "x86_64")]
             msrs: self.msrs.clone(),
-            vmmops,
+            vm_ops,
             #[cfg(target_arch = "x86_64")]
             hyperv_synic: AtomicBool::new(false),
         };
         Ok(Arc::new(vcpu))
+    }
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Creates a virtual GIC device.
+    ///
+    fn create_vgic(
+        &self,
+        vcpu_count: u64,
+        dist_addr: u64,
+        dist_size: u64,
+        redist_size: u64,
+        msi_size: u64,
+        nr_irqs: u32,
+    ) -> vm::Result<Arc<Mutex<dyn Vgic>>> {
+        let gic_device = KvmGicV3Its::new(
+            self,
+            vcpu_count,
+            dist_addr,
+            dist_size,
+            redist_size,
+            msi_size,
+            nr_irqs,
+        )
+        .map_err(|e| vm::HypervisorVmError::CreateVgic(anyhow!("Vgic error {:?}", e)))?;
+        Ok(Arc::new(Mutex::new(gic_device)))
     }
     ///
     /// Registers an event to be signaled whenever a certain address is written to.
@@ -228,6 +315,64 @@ impl vm::Vm for KvmVm {
             .unregister_ioevent(fd, addr, NoDatamatch)
             .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
     }
+
+    ///
+    /// Constructs a routing entry
+    ///
+    fn make_routing_entry(
+        &self,
+        gsi: u32,
+        config: &InterruptSourceConfig,
+    ) -> kvm_irq_routing_entry {
+        match &config {
+            InterruptSourceConfig::MsiIrq(cfg) => {
+                let mut kvm_route = kvm_irq_routing_entry {
+                    gsi,
+                    type_: KVM_IRQ_ROUTING_MSI,
+                    ..Default::default()
+                };
+
+                kvm_route.u.msi.address_lo = cfg.low_addr;
+                kvm_route.u.msi.address_hi = cfg.high_addr;
+                kvm_route.u.msi.data = cfg.data;
+
+                if self.check_extension(crate::kvm::Cap::MsiDevid) {
+                    // On AArch64, there is limitation on the range of the 'devid',
+                    // it can not be greater than 65536 (the max of u16).
+                    //
+                    // BDF can not be used directly, because 'segment' is in high
+                    // 16 bits. The layout of the u32 BDF is:
+                    // |---- 16 bits ----|-- 8 bits --|-- 5 bits --|-- 3 bits --|
+                    // |      segment    |     bus    |   device   |  function  |
+                    //
+                    // Now that we support 1 bus only in a segment, we can build a
+                    // 'devid' by replacing the 'bus' bits with the low 8 bits of
+                    // 'segment' data.
+                    // This way we can resolve the range checking problem and give
+                    // different `devid` to all the devices. Limitation is that at
+                    // most 256 segments can be supported.
+                    //
+                    let modified_devid = (cfg.devid & 0x00ff_0000) >> 8 | cfg.devid & 0xff;
+
+                    kvm_route.flags = KVM_MSI_VALID_DEVID;
+                    kvm_route.u.msi.__bindgen_anon_1.devid = modified_devid;
+                }
+                kvm_route
+            }
+            InterruptSourceConfig::LegacyIrq(cfg) => {
+                let mut kvm_route = kvm_irq_routing_entry {
+                    gsi,
+                    type_: KVM_IRQ_ROUTING_IRQCHIP,
+                    ..Default::default()
+                };
+                kvm_route.u.irqchip.irqchip = cfg.irqchip;
+                kvm_route.u.irqchip.pin = cfg.pin;
+
+                kvm_route
+            }
+        }
+    }
+
     ///
     /// Sets the GSI routing table entries, overwriting any previously set
     /// entries, as per the `KVM_SET_GSI_ROUTING` ioctl.
@@ -238,6 +383,9 @@ impl vm::Vm for KvmVm {
         irq_routing[0].nr = entries.len() as u32;
         irq_routing[0].flags = 0;
 
+        // SAFETY: irq_routing initialized with entries.len() and now it is being turned into
+        // entries_slice with entries.len() again. It is guaranteed to be large enough to hold
+        // everything from entries.
         unsafe {
             let entries_slice: &mut [kvm_irq_routing_entry] =
                 irq_routing[0].entries.as_mut_slice(entries.len());
@@ -302,7 +450,7 @@ impl vm::Vm for KvmVm {
             region.flags = 0;
         }
 
-        // Safe because guest regions are guaranteed not to overlap.
+        // SAFETY: Safe because guest regions are guaranteed not to overlap.
         unsafe {
             self.fd
                 .set_user_memory_region(region)
@@ -320,7 +468,7 @@ impl vm::Vm for KvmVm {
 
         // Setting the size to 0 means "remove"
         region.memory_size = 0;
-        // Safe because guest regions are guaranteed not to overlap.
+        // SAFETY: Safe because guest regions are guaranteed not to overlap.
         unsafe {
             self.fd
                 .set_user_memory_region(region)
@@ -350,10 +498,6 @@ impl vm::Vm for KvmVm {
     }
     #[cfg(target_arch = "x86_64")]
     fn enable_split_irq(&self) -> vm::Result<()> {
-        // Set TSS
-        self.fd
-            .set_tss_address(KVM_TSS_ADDRESS.raw_value() as usize)
-            .map_err(|e| vm::HypervisorVmError::EnableSplitIrq(e.into()))?;
         // Create split irqchip
         // Only the local APIC is emulated in kernel, both PICs and IOAPIC
         // are not.
@@ -434,7 +578,7 @@ impl vm::Vm for KvmVm {
                 userspace_addr: s.userspace_addr,
                 flags: KVM_MEM_LOG_DIRTY_PAGES,
             };
-            // Safe because guest regions are guaranteed not to overlap.
+            // SAFETY: Safe because guest regions are guaranteed not to overlap.
             unsafe {
                 self.fd
                     .set_user_memory_region(region)
@@ -458,7 +602,7 @@ impl vm::Vm for KvmVm {
                 userspace_addr: s.userspace_addr,
                 flags: 0,
             };
-            // Safe because guest regions are guaranteed not to overlap.
+            // SAFETY: Safe because guest regions are guaranteed not to overlap.
             unsafe {
                 self.fd
                     .set_user_memory_region(region)
@@ -497,7 +641,7 @@ impl vm::Vm for KvmVm {
         let data = TdxInitVm {
             max_vcpus,
             tsc_khz: 0,
-            attributes: 1, // TDX1_TD_ATTRIBUTE_DEBUG,
+            attributes: 0,
             cpuid: cpuid.as_fam_struct_ptr() as u64,
             mrconfigid: [0; 6],
             mrowner: [0; 6],
@@ -574,6 +718,7 @@ fn tdx_command(
         metadata,
         data,
     };
+    // SAFETY: FFI call. All input parameters are valid.
     let ret = unsafe {
         ioctl_with_val(
             fd,
@@ -733,13 +878,34 @@ impl hypervisor::Hypervisor for KvmHypervisor {
     fn get_host_ipa_limit(&self) -> i32 {
         self.kvm.get_host_ipa_limit()
     }
+
+    ///
+    /// Retrieve TDX capabilities
+    ///
+    #[cfg(feature = "tdx")]
+    fn tdx_capabilities(&self) -> hypervisor::Result<TdxCapabilities> {
+        let data = TdxCapabilities {
+            nr_cpuid_configs: TDX_MAX_NR_CPUID_CONFIGS as u32,
+            ..Default::default()
+        };
+
+        tdx_command(
+            &self.kvm.as_raw_fd(),
+            TdxCommand::Capabilities,
+            0,
+            &data as *const _ as u64,
+        )
+        .map_err(|e| hypervisor::HypervisorError::TdxCapabilities(e.into()))?;
+
+        Ok(data)
+    }
 }
 /// Vcpu struct for KVM
 pub struct KvmVcpu {
     fd: VcpuFd,
     #[cfg(target_arch = "x86_64")]
     msrs: MsrEntries,
-    vmmops: Option<Arc<dyn vm::VmmOps>>,
+    vm_ops: Option<Arc<dyn vm::VmOps>>,
     #[cfg(target_arch = "x86_64")]
     hyperv_synic: AtomicBool,
 }
@@ -772,6 +938,27 @@ impl cpu::Vcpu for KvmVcpu {
             .set_regs(regs)
             .map_err(|e| cpu::HypervisorCpuError::SetStandardRegs(e.into()))
     }
+
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Set attribute for vcpu.
+    ///
+    fn set_vcpu_attr(&self, attr: &DeviceAttr) -> cpu::Result<()> {
+        self.fd
+            .set_device_attr(attr)
+            .map_err(|e| cpu::HypervisorCpuError::SetVcpuAttribute(e.into()))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Check if vcpu has a certain attribute.
+    ///
+    fn has_vcpu_attr(&self, attr: &DeviceAttr) -> cpu::Result<()> {
+        self.fd
+            .has_device_attr(attr)
+            .map_err(|e| cpu::HypervisorCpuError::HasVcpuAttribute(e.into()))
+    }
+
     #[cfg(target_arch = "x86_64")]
     ///
     /// Returns the vCPU special registers.
@@ -932,6 +1119,24 @@ impl cpu::Vcpu for KvmVcpu {
             .set_xcrs(xcrs)
             .map_err(|e| cpu::HypervisorCpuError::SetXcsr(e.into()))
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Translates guest virtual address to guest physical address using the `KVM_TRANSLATE` ioctl.
+    ///
+    fn translate_gva(&self, gva: u64, _flags: u64) -> cpu::Result<(u64, u32)> {
+        let tr = self
+            .fd
+            .translate_gva(gva)
+            .map_err(|e| cpu::HypervisorCpuError::TranslateVirtualAddress(e.into()))?;
+        // tr.valid is set if the GVA is mapped to valid GPA.
+        match tr.valid {
+            0 => Err(cpu::HypervisorCpuError::TranslateVirtualAddress(anyhow!(
+                "Invalid GVA: {:#x}",
+                gva
+            ))),
+            _ => Ok((tr.physical_address, 0)),
+        }
+    }
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
@@ -940,8 +1145,8 @@ impl cpu::Vcpu for KvmVcpu {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
-                    if let Some(vmmops) = &self.vmmops {
-                        return vmmops
+                    if let Some(vm_ops) = &self.vm_ops {
+                        return vm_ops
                             .pio_read(addr.into(), data)
                             .map(|_| cpu::VmExit::Ignore)
                             .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()));
@@ -951,8 +1156,8 @@ impl cpu::Vcpu for KvmVcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoOut(addr, data) => {
-                    if let Some(vmmops) = &self.vmmops {
-                        return vmmops
+                    if let Some(vm_ops) = &self.vm_ops {
+                        return vm_ops
                             .pio_write(addr.into(), data)
                             .map(|_| cpu::VmExit::Ignore)
                             .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()));
@@ -984,8 +1189,8 @@ impl cpu::Vcpu for KvmVcpu {
                 }
 
                 VcpuExit::MmioRead(addr, data) => {
-                    if let Some(vmmops) = &self.vmmops {
-                        return vmmops
+                    if let Some(vm_ops) = &self.vm_ops {
+                        return vm_ops
                             .mmio_read(addr, data)
                             .map(|_| cpu::VmExit::Ignore)
                             .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()));
@@ -994,8 +1199,8 @@ impl cpu::Vcpu for KvmVcpu {
                     Ok(cpu::VmExit::MmioRead(addr, data))
                 }
                 VcpuExit::MmioWrite(addr, data) => {
-                    if let Some(vmmops) = &self.vmmops {
-                        return vmmops
+                    if let Some(vm_ops) = &self.vm_ops {
+                        return vm_ops
                             .mmio_write(addr, data)
                             .map(|_| cpu::VmExit::Ignore)
                             .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()));
@@ -1004,6 +1209,9 @@ impl cpu::Vcpu for KvmVcpu {
                     Ok(cpu::VmExit::MmioWrite(addr, data))
                 }
                 VcpuExit::Hyperv => Ok(cpu::VmExit::Hyperv),
+                #[cfg(feature = "tdx")]
+                VcpuExit::Unsupported(KVM_EXIT_TDX) => Ok(cpu::VmExit::Tdx),
+                VcpuExit::Debug(_) => Ok(cpu::VmExit::Debug),
 
                 r => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unexpected exit reason on vcpu run: {:?}",
@@ -1046,9 +1254,55 @@ impl cpu::Vcpu for KvmVcpu {
     /// potential soft lockups when being resumed.
     ///
     fn notify_guest_clock_paused(&self) -> cpu::Result<()> {
+        if let Err(e) = self.fd.kvmclock_ctrl() {
+            // Linux kernel returns -EINVAL if the PV clock isn't yet initialised
+            // which could be because we're still in firmware or the guest doesn't
+            // use KVM clock.
+            if e.errno() != libc::EINVAL {
+                return Err(cpu::HypervisorCpuError::NotifyGuestClockPaused(e.into()));
+            }
+        }
+
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Sets debug registers to set hardware breakpoints and/or enable single step.
+    ///
+    fn set_guest_debug(
+        &self,
+        addrs: &[vm_memory::GuestAddress],
+        singlestep: bool,
+    ) -> cpu::Result<()> {
+        if addrs.len() > 4 {
+            return Err(cpu::HypervisorCpuError::SetDebugRegs(anyhow!(
+                "Support 4 breakpoints at most but {} addresses are passed",
+                addrs.len()
+            )));
+        }
+
+        let mut dbg = kvm_guest_debug {
+            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP,
+            ..Default::default()
+        };
+        if singlestep {
+            dbg.control |= KVM_GUESTDBG_SINGLESTEP;
+        }
+
+        // Set bits 9 and 10.
+        // bit 9: GE (global exact breakpoint enable) flag.
+        // bit 10: always 1.
+        dbg.arch.debugreg[7] = 0x0600;
+
+        for (i, addr) in addrs.iter().enumerate() {
+            dbg.arch.debugreg[i] = addr.0;
+            // Set global breakpoint enable flag
+            dbg.arch.debugreg[7] |= 2 << (i * 2);
+        }
+
         self.fd
-            .kvmclock_ctrl()
-            .map_err(|e| cpu::HypervisorCpuError::NotifyGuestClockPaused(e.into()))
+            .set_guest_debug(&dbg)
+            .map_err(|e| cpu::HypervisorCpuError::SetDebugRegs(e.into()))
     }
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     fn vcpu_init(&self, kvi: &VcpuInit) -> cpu::Result<()> {
@@ -1312,6 +1566,51 @@ impl cpu::Vcpu for KvmVcpu {
             .get_one_reg(MPIDR_EL1)
             .map_err(|e| cpu::HypervisorCpuError::GetSysRegister(e.into()))
     }
+    ///
+    /// Configure core registers for a given CPU.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn setup_regs(&self, cpu_id: u8, boot_ip: u64, fdt_start: u64) -> cpu::Result<()> {
+        #[allow(non_upper_case_globals)]
+        // PSR (Processor State Register) bits.
+        // Taken from arch/arm64/include/uapi/asm/ptrace.h.
+        const PSR_MODE_EL1h: u64 = 0x0000_0005;
+        const PSR_F_BIT: u64 = 0x0000_0040;
+        const PSR_I_BIT: u64 = 0x0000_0080;
+        const PSR_A_BIT: u64 = 0x0000_0100;
+        const PSR_D_BIT: u64 = 0x0000_0200;
+        // Taken from arch/arm64/kvm/inject_fault.c.
+        const PSTATE_FAULT_BITS_64: u64 =
+            PSR_MODE_EL1h | PSR_A_BIT | PSR_F_BIT | PSR_I_BIT | PSR_D_BIT;
+
+        let kreg_off = offset__of!(kvm_regs, regs);
+
+        // Get the register index of the PSTATE (Processor State) register.
+        let pstate = offset__of!(user_pt_regs, pstate) + kreg_off;
+        self.set_reg(
+            arm64_core_reg_id!(KVM_REG_SIZE_U64, pstate),
+            PSTATE_FAULT_BITS_64,
+        )
+        .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
+
+        // Other vCPUs are powered off initially awaiting PSCI wakeup.
+        if cpu_id == 0 {
+            // Setting the PC (Processor Counter) to the current program address (kernel address).
+            let pc = offset__of!(user_pt_regs, pc) + kreg_off;
+            self.set_reg(arm64_core_reg_id!(KVM_REG_SIZE_U64, pc), boot_ip as u64)
+                .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
+
+            // Last mandatory thing to set -> the address pointing to the FDT (also called DTB).
+            // "The device tree blob (dtb) must be placed on an 8-byte boundary and must
+            // not exceed 2 megabytes in size." -> https://www.kernel.org/doc/Documentation/arm64/booting.txt.
+            // We are choosing to place it the end of DRAM. See `get_fdt_addr`.
+            let regs0 = offset__of!(user_pt_regs, regs) + kreg_off;
+            self.set_reg(arm64_core_reg_id!(KVM_REG_SIZE_U64, regs0), fdt_start)
+                .map_err(|e| cpu::HypervisorCpuError::SetCoreRegister(e.into()))?;
+        }
+        Ok(())
+    }
+
     #[cfg(target_arch = "x86_64")]
     ///
     /// Get the current CPU state
@@ -1561,6 +1860,50 @@ impl cpu::Vcpu for KvmVcpu {
     fn tdx_init(&self, hob_address: u64) -> cpu::Result<()> {
         tdx_command(&self.fd.as_raw_fd(), TdxCommand::InitVcpu, 0, hob_address)
             .map_err(cpu::HypervisorCpuError::InitializeTdx)
+    }
+
+    ///
+    /// Set the "immediate_exit" state
+    ///
+    fn set_immediate_exit(&self, exit: bool) {
+        self.fd.set_kvm_immediate_exit(exit.into());
+    }
+
+    ///
+    /// Returns the details about TDX exit reason
+    ///
+    #[cfg(feature = "tdx")]
+    fn get_tdx_exit_details(&mut self) -> cpu::Result<TdxExitDetails> {
+        let kvm_run = self.fd.get_kvm_run();
+        let tdx_vmcall = unsafe { &mut kvm_run.__bindgen_anon_1.tdx.u.vmcall };
+
+        tdx_vmcall.status_code = TDG_VP_VMCALL_INVALID_OPERAND;
+
+        if tdx_vmcall.type_ != 0 {
+            return Err(cpu::HypervisorCpuError::UnknownTdxVmCall);
+        }
+
+        match tdx_vmcall.subfunction {
+            TDG_VP_VMCALL_GET_QUOTE => Ok(TdxExitDetails::GetQuote),
+            TDG_VP_VMCALL_SETUP_EVENT_NOTIFY_INTERRUPT => {
+                Ok(TdxExitDetails::SetupEventNotifyInterrupt)
+            }
+            _ => Err(cpu::HypervisorCpuError::UnknownTdxVmCall),
+        }
+    }
+
+    ///
+    /// Set the status code for TDX exit
+    ///
+    #[cfg(feature = "tdx")]
+    fn set_tdx_status(&mut self, status: TdxExitStatus) {
+        let kvm_run = self.fd.get_kvm_run();
+        let tdx_vmcall = unsafe { &mut kvm_run.__bindgen_anon_1.tdx.u.vmcall };
+
+        tdx_vmcall.status_code = match status {
+            TdxExitStatus::Success => TDG_VP_VMCALL_SUCCESS,
+            TdxExitStatus::InvalidOperand => TDG_VP_VMCALL_INVALID_OPERAND,
+        };
     }
 }
 

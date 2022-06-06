@@ -34,7 +34,6 @@ pub enum Thread {
 /// [`SeccompCondition`]: struct.SeccompCondition.html
 /// [`SeccompRule`]: struct.SeccompRule.html
 macro_rules! and {
-    ($($x:expr,)*) => (SeccompRule::new(vec![$($x),*]).unwrap());
     ($($x:expr),*) => (SeccompRule::new(vec![$($x),*]).unwrap())
 }
 
@@ -90,7 +89,6 @@ fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_io_uring_enter, vec![]),
         (libc::SYS_lseek, vec![]),
         (libc::SYS_mprotect, vec![]),
-        (libc::SYS_openat, vec![]),
         (libc::SYS_prctl, vec![]),
         (libc::SYS_pread64, vec![]),
         (libc::SYS_preadv, vec![]),
@@ -130,7 +128,6 @@ fn virtio_mem_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 
 fn virtio_net_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
-        (libc::SYS_openat, vec![]),
         (libc::SYS_readv, vec![]),
         (libc::SYS_timerfd_settime, vec![]),
         (libc::SYS_writev, vec![]),
@@ -162,6 +159,8 @@ fn virtio_vhost_fs_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_connect, vec![]),
         (libc::SYS_nanosleep, vec![]),
+        (libc::SYS_pread64, vec![]),
+        (libc::SYS_pwrite64, vec![]),
         (libc::SYS_recvmsg, vec![]),
         (libc::SYS_sendmsg, vec![]),
         (libc::SYS_sendto, vec![]),
@@ -180,7 +179,6 @@ fn virtio_vhost_net_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_getcwd, vec![]),
         (libc::SYS_listen, vec![]),
         (libc::SYS_recvmsg, vec![]),
-        (libc::SYS_rt_sigreturn, vec![]),
         (libc::SYS_sendmsg, vec![]),
         (libc::SYS_sendto, vec![]),
         (libc::SYS_socket, vec![]),
@@ -244,7 +242,6 @@ fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
 fn virtio_thread_common() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_brk, vec![]),
-        #[cfg(feature = "mshv")]
         (libc::SYS_clock_gettime, vec![]),
         (libc::SYS_close, vec![]),
         (libc::SYS_dup, vec![]),
@@ -258,8 +255,10 @@ fn virtio_thread_common() -> Vec<(i64, Vec<SeccompRule>)> {
         (libc::SYS_madvise, vec![]),
         (libc::SYS_mmap, vec![]),
         (libc::SYS_munmap, vec![]),
+        (libc::SYS_openat, vec![]),
         (libc::SYS_read, vec![]),
         (libc::SYS_rt_sigprocmask, vec![]),
+        (libc::SYS_rt_sigreturn, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (libc::SYS_write, vec![]),
     ]

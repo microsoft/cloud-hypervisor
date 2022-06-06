@@ -8,13 +8,14 @@
 //
 //
 use crate::arch::x86::{msr_index, SegmentRegisterOps, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 ///
 /// Export generically-named wrappers of mshv_bindings for Unix-based platforms
 ///
 pub use {
+    mshv_bindings::hv_cpuid_entry as CpuIdEntry,
     mshv_bindings::mshv_user_mem_region as MemoryRegion, mshv_bindings::msr_entry as MsrEntry,
     mshv_bindings::CpuId, mshv_bindings::DebugRegisters,
     mshv_bindings::FloatingPointUnit as FpuState, mshv_bindings::LapicState,
@@ -24,6 +25,9 @@ pub use {
     mshv_bindings::SuspendRegisters, mshv_bindings::VcpuEvents, mshv_bindings::XSave as Xsave,
     mshv_bindings::Xcrs as ExtendedControlRegisters,
 };
+
+pub const CPUID_FLAG_VALID_INDEX: u32 = 0;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VcpuMshvState {
     pub msrs: MsrEntries,

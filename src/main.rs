@@ -8,21 +8,17 @@ extern crate clap;
 #[macro_use]
 extern crate event_monitor;
 
-use clap::{App, Arg, ArgGroup, ArgMatches};
+use clap::{Arg, ArgGroup, ArgMatches, Command};
 use libc::EFD_NONBLOCK;
 use log::LevelFilter;
 use option_parser::OptionParser;
 use seccompiler::SeccompAction;
-use signal_hook::{
-    consts::SIGSYS,
-    iterator::{exfiltrator::WithRawSiginfo, SignalsInfo},
-};
+use signal_hook::consts::SIGSYS;
 use std::env;
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use thiserror::Error;
 use vmm::config;
 use vmm_sys_util::eventfd::EventFd;
@@ -32,6 +28,9 @@ use vmm_sys_util::signal::block_signal;
 enum Error {
     #[error("Failed to create API EventFd: {0}")]
     CreateApiEventFd(#[source] std::io::Error),
+    #[cfg(feature = "gdb")]
+    #[error("Failed to create Debug EventFd: {0}")]
+    CreateDebugEventFd(#[source] std::io::Error),
     #[cfg_attr(
         feature = "kvm",
         error("Failed to open hypervisor interface (is /dev/kvm available?): {0}")
@@ -65,6 +64,12 @@ enum Error {
     BareEventMonitor,
     #[error("Error doing event monitor I/O: {0}")]
     EventMonitorIo(std::io::Error),
+    #[cfg(feature = "gdb")]
+    #[error("Error parsing --gdb: {0}")]
+    ParsingGdb(option_parser::OptionParserError),
+    #[cfg(feature = "gdb")]
+    #[error("Error parsing --gdb: path required")]
+    BareGdb,
     #[error("Error creating log file: {0}")]
     LogFileCreation(std::io::Error),
     #[error("Error setting up logger: {0}")]
@@ -125,47 +130,44 @@ fn prepare_default_values() -> (String, String, String) {
     (default_vcpus, default_memory, default_rng)
 }
 
-fn create_app<'a, 'b>(
+fn create_app<'a>(
     default_vcpus: &'a str,
     default_memory: &'a str,
     default_rng: &'a str,
-) -> App<'a, 'b> {
-    #[cfg(target_arch = "x86_64")]
-    let mut app: App;
-    #[cfg(target_arch = "aarch64")]
-    let app: App;
-
-    app = App::new("cloud-hypervisor")
+) -> Command<'a> {
+    let app = Command::new("cloud-hypervisor")
         // 'BUILT_VERSION' is set by the build script 'build.rs' at
         // compile time
         .version(env!("BUILT_VERSION"))
         .author(crate_authors!())
         .about("Launch a cloud-hypervisor VMM.")
-        .group(ArgGroup::with_name("vm-config").multiple(true))
-        .group(ArgGroup::with_name("vmm-config").multiple(true))
-        .group(ArgGroup::with_name("logging").multiple(true))
+        .group(ArgGroup::new("vm-config").multiple(true))
+        .group(ArgGroup::new("vmm-config").multiple(true))
+        .group(ArgGroup::new("logging").multiple(true))
         .arg(
-            Arg::with_name("cpus")
+            Arg::new("cpus")
                 .long("cpus")
                 .help(
                     "boot=<boot_vcpus>,max=<max_vcpus>,\
                     topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,\
-                    kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>",
+                    kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>,\
+                    affinity=<list_of_vcpus_with_their_associated_cpuset>,\
+                    features=<list_of_features_to_enable>",
                 )
                 .default_value(default_vcpus)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("platform")
+            Arg::new("platform")
                 .long("platform")
                 .help(
-                    "num_pci_segments=<num pci segments>",
+                    "num_pci_segments=<num pci segments>,iommu_segments=<list_of_segments>,serial_number=<(DMI) device serial number>",
                 )
                 .takes_value(true)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("memory")
+            Arg::new("memory")
                 .long("memory")
                 .help(
                     "Memory parameters \
@@ -180,7 +182,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("memory-zone")
+            Arg::new("memory-zone")
                 .long("memory-zone")
                 .help(
                     "User defined memory zone parameters \
@@ -197,7 +199,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("kernel")
+            Arg::new("kernel")
                 .long("kernel")
                 .help(
                     "Path to loaded kernel. This may be a kernel or firmware that supports a PVH \
@@ -207,21 +209,21 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("initramfs")
+            Arg::new("initramfs")
                 .long("initramfs")
                 .help("Path to initramfs image")
                 .takes_value(true)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("cmdline")
+            Arg::new("cmdline")
                 .long("cmdline")
                 .help("Kernel command line")
                 .takes_value(true)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("disk")
+            Arg::new("disk")
                 .long("disk")
                 .help(config::DiskConfig::SYNTAX)
                 .takes_value(true)
@@ -229,7 +231,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("net")
+            Arg::new("net")
                 .long("net")
                 .help(config::NetConfig::SYNTAX)
                 .takes_value(true)
@@ -237,7 +239,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("rng")
+            Arg::new("rng")
                 .long("rng")
                 .help(
                     "Random number generator parameters \"src=<entropy_source_path>,iommu=on|off\"",
@@ -246,14 +248,14 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("balloon")
+            Arg::new("balloon")
                 .long("balloon")
                 .help(config::BalloonConfig::SYNTAX)
                 .takes_value(true)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("fs")
+            Arg::new("fs")
                 .long("fs")
                 .help(config::FsConfig::SYNTAX)
                 .takes_value(true)
@@ -261,7 +263,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("pmem")
+            Arg::new("pmem")
                 .long("pmem")
                 .help(config::PmemConfig::SYNTAX)
                 .takes_value(true)
@@ -269,14 +271,14 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("serial")
+            Arg::new("serial")
                 .long("serial")
                 .help("Control serial port: off|null|pty|tty|file=/path/to/a/file")
                 .default_value("null")
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("console")
+            Arg::new("console")
                 .long("console")
                 .help(
                     "Control (virtio) console: \"off|null|pty|tty|file=/path/to/a/file,iommu=on|off\"",
@@ -285,7 +287,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("device")
+            Arg::new("device")
                 .long("device")
                 .help(config::DeviceConfig::SYNTAX)
                 .takes_value(true)
@@ -293,7 +295,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("user-device")
+            Arg::new("user-device")
                 .long("user-device")
                 .help(config::UserDeviceConfig::SYNTAX)
                 .takes_value(true)
@@ -301,7 +303,15 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("vsock")
+            Arg::new("vdpa")
+                .long("vdpa")
+                .help(config::VdpaConfig::SYNTAX)
+                .takes_value(true)
+                .min_values(1)
+                .group("vm-config"),
+        )
+        .arg(
+            Arg::new("vsock")
                 .long("vsock")
                 .help(config::VsockConfig::SYNTAX)
                 .takes_value(true)
@@ -309,7 +319,7 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("numa")
+            Arg::new("numa")
                 .long("numa")
                 .help(config::NumaConfig::SYNTAX)
                 .takes_value(true)
@@ -317,21 +327,21 @@ fn create_app<'a, 'b>(
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("watchdog")
+            Arg::new("watchdog")
                 .long("watchdog")
                 .help("Enable virtio-watchdog")
                 .takes_value(false)
                 .group("vm-config"),
         )
         .arg(
-            Arg::with_name("v")
-                .short("v")
-                .multiple(true)
+            Arg::new("v")
+                .short('v')
+                .multiple_occurrences(true)
                 .help("Sets the level of debugging output")
                 .group("logging"),
         )
         .arg(
-            Arg::with_name("log-file")
+            Arg::new("log-file")
                 .long("log-file")
                 .help("Log file. Standard error is used if not specified")
                 .takes_value(true)
@@ -339,7 +349,7 @@ fn create_app<'a, 'b>(
                 .group("logging"),
         )
         .arg(
-            Arg::with_name("api-socket")
+            Arg::new("api-socket")
                 .long("api-socket")
                 .help("HTTP API socket (UNIX domain socket): path=</path/to/a/file> or fd=<fd>.")
                 .takes_value(true)
@@ -347,7 +357,7 @@ fn create_app<'a, 'b>(
                 .group("vmm-config"),
         )
         .arg(
-            Arg::with_name("event-monitor")
+            Arg::new("event-monitor")
                 .long("event-monitor")
                 .help("File to report events on: path=</path/to/a/file> or fd=<fd>")
                 .takes_value(true)
@@ -355,7 +365,7 @@ fn create_app<'a, 'b>(
                 .group("vmm-config"),
         )
         .arg(
-            Arg::with_name("restore")
+            Arg::new("restore")
                 .long("restore")
                 .help(config::RestoreConfig::SYNTAX)
                 .takes_value(true)
@@ -363,7 +373,7 @@ fn create_app<'a, 'b>(
                 .group("vmm-config"),
         )
         .arg(
-            Arg::with_name("seccomp")
+            Arg::new("seccomp")
                 .long("seccomp")
                 .takes_value(true)
                 .possible_values(&["true", "false", "log"])
@@ -371,27 +381,32 @@ fn create_app<'a, 'b>(
         );
 
     #[cfg(target_arch = "x86_64")]
-    {
-        app = app.arg(
-            Arg::with_name("sgx-epc")
-                .long("sgx-epc")
-                .help(config::SgxEpcConfig::SYNTAX)
-                .takes_value(true)
-                .min_values(1)
-                .group("vm-config"),
-        );
-    }
+    let app = app.arg(
+        Arg::new("sgx-epc")
+            .long("sgx-epc")
+            .help(config::SgxEpcConfig::SYNTAX)
+            .takes_value(true)
+            .min_values(1)
+            .group("vm-config"),
+    );
+
+    #[cfg(feature = "gdb")]
+    let app = app.arg(
+        Arg::new("gdb")
+            .long("gdb")
+            .help("GDB socket (UNIX domain socket): path=</path/to/a/file>")
+            .takes_value(true)
+            .group("vmm-config"),
+    );
 
     #[cfg(feature = "tdx")]
-    {
-        app = app.arg(
-            Arg::with_name("tdx")
-                .long("tdx")
-                .help("TDX Support: firmware=<tdvf path>")
-                .takes_value(true)
-                .group("vm-config"),
-        );
-    }
+    let app = app.arg(
+        Arg::new("tdx")
+            .long("tdx")
+            .help("TDX Support: firmware=<tdvf path>")
+            .takes_value(true)
+            .group("vm-config"),
+    );
 
     app
 }
@@ -485,35 +500,28 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         SeccompAction::Trap
     };
 
-    // See https://github.com/rust-lang/libc/issues/716 why we can't get the details from siginfo_t
     if seccomp_action == SeccompAction::Trap {
-        thread::Builder::new()
-            .name("seccomp_signal_handler".to_string())
-            .spawn(move || {
-                for si in SignalsInfo::<WithRawSiginfo>::new(&[SIGSYS])
-                    .unwrap()
-                    .forever()
-                {
-                    /* SYS_SECCOMP */
-                    if si.si_code == 1 {
-                        eprint!(
-                            "\n==== seccomp violation ====\n\
-                            Try running with `strace -ff` to identify the cause and open an issue: \
-                            https://github.com/cloud-hypervisor/cloud-hypervisor/issues/new\n"
-                        );
-
-                        signal_hook::low_level::emulate_default_handler(SIGSYS).unwrap();
-                    }
-                }
+        // SAFETY: We only using signal_hook for managing signals and only execute signal
+        // handler safe functions (writing to stderr) and manipulating signals.
+        unsafe {
+            signal_hook::low_level::register(signal_hook::consts::SIGSYS, || {
+                eprint!(
+                    "\n==== Possible seccomp violation ====\n\
+                Try running with `strace -ff` to identify the cause and open an issue: \
+                https://github.com/cloud-hypervisor/cloud-hypervisor/issues/new\n"
+                );
+                signal_hook::low_level::emulate_default_handler(SIGSYS).unwrap();
             })
-            .unwrap();
+        }
+        .map_err(|e| eprintln!("Error adding SIGSYS signal handler: {}", e))
+        .ok();
     }
 
     // Before we start any threads, mask the signals we'll be
     // installing handlers for, to make sure they only ever run on the
     // dedicated signal handling thread we'll start in a bit.
-    for sig in vmm::vm::HANDLED_SIGNALS {
-        if let Err(e) = block_signal(sig) {
+    for sig in &vmm::vm::HANDLED_SIGNALS {
+        if let Err(e) = block_signal(*sig) {
             eprintln!("Error blocking signals: {}", e);
         }
     }
@@ -521,6 +529,26 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     event!("vmm", "starting");
 
     let hypervisor = hypervisor::new().map_err(Error::CreateHypervisor)?;
+
+    #[cfg(feature = "gdb")]
+    let gdb_socket_path = if let Some(gdb_config) = cmd_arguments.value_of("gdb") {
+        let mut parser = OptionParser::new();
+        parser.add("path");
+        parser.parse(gdb_config).map_err(Error::ParsingGdb)?;
+
+        if parser.is_set("path") {
+            Some(std::path::PathBuf::from(parser.get("path").unwrap()))
+        } else {
+            return Err(Error::BareGdb);
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "gdb")]
+    let debug_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateDebugEventFd)?;
+    #[cfg(feature = "gdb")]
+    let vm_debug_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateDebugEventFd)?;
+
     let vmm_thread = vmm::start_vmm_thread(
         env!("CARGO_PKG_VERSION").to_string(),
         &api_socket_path,
@@ -528,14 +556,27 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         api_evt.try_clone().unwrap(),
         http_sender,
         api_request_receiver,
+        #[cfg(feature = "gdb")]
+        gdb_socket_path,
+        #[cfg(feature = "gdb")]
+        debug_evt.try_clone().unwrap(),
+        #[cfg(feature = "gdb")]
+        vm_debug_evt.try_clone().unwrap(),
         &seccomp_action,
         hypervisor,
     )
     .map_err(Error::StartVmmThread)?;
 
-    // Can't test for "vm-config" group as some have default values. The kernel
+    // Can't test for "vm-config" group as some have default values. The kernel (or tdx if enabled)
     // is the only required option for booting the VM.
-    if cmd_arguments.is_present("kernel") || cmd_arguments.is_present("tdx") {
+    #[cfg(feature = "tdx")]
+    let tdx_or_kernel_present =
+        cmd_arguments.is_present("kernel") || cmd_arguments.is_present("tdx");
+
+    #[cfg(not(feature = "tdx"))]
+    let tdx_or_kernel_present = cmd_arguments.is_present("kernel");
+
+    if tdx_or_kernel_present {
         let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
         let vm_config = config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
 
@@ -586,17 +627,13 @@ fn main() {
 }
 
 #[cfg(test)]
-#[macro_use]
-extern crate credibility;
-
-#[cfg(test)]
 mod unit_tests {
     use crate::config::HotplugMethod;
     use crate::{create_app, prepare_default_values};
     use std::path::PathBuf;
     use vmm::config::{
-        CmdlineConfig, ConsoleConfig, ConsoleOutputMode, CpusConfig, KernelConfig, MemoryConfig,
-        RngConfig, VmConfig, VmParams,
+        CmdlineConfig, ConsoleConfig, ConsoleOutputMode, CpuFeatures, CpusConfig, KernelConfig,
+        MemoryConfig, RngConfig, VmConfig, VmParams,
     };
 
     fn get_vm_config_from_vec(args: &[&str]) -> VmConfig {
@@ -617,15 +654,11 @@ mod unit_tests {
         let cli_vm_config = get_vm_config_from_vec(cli);
         let openapi_vm_config: VmConfig = serde_json::from_str(openapi).unwrap();
 
-        test_block!(tb, "", {
-            if equal {
-                aver_eq!(tb, cli_vm_config, openapi_vm_config);
-            } else {
-                aver_ne!(tb, cli_vm_config, openapi_vm_config);
-            }
-
-            Ok(())
-        });
+        if equal {
+            assert_eq!(cli_vm_config, openapi_vm_config);
+        } else {
+            assert_ne!(cli_vm_config, openapi_vm_config);
+        }
 
         (cli_vm_config, openapi_vm_config)
     }
@@ -639,69 +672,71 @@ mod unit_tests {
         let (result_vm_config, _) = compare_vm_config_cli_vs_json(&cli, openapi, true);
 
         // As a second step, we validate all the default values.
-        test_block!(tb, "", {
-            let expected_vm_config = VmConfig {
-                cpus: CpusConfig {
-                    boot_vcpus: 1,
-                    max_vcpus: 1,
-                    topology: None,
-                    kvm_hyperv: false,
-                    max_phys_bits: 46,
-                },
-                memory: MemoryConfig {
-                    size: 536_870_912,
-                    mergeable: false,
-                    hotplug_method: HotplugMethod::Acpi,
-                    hotplug_size: None,
-                    hotplugged_size: None,
-                    shared: false,
-                    hugepages: false,
-                    hugepage_size: None,
-                    prefault: false,
-                    zones: None,
-                },
-                kernel: Some(KernelConfig {
-                    path: PathBuf::from("/path/to/kernel"),
-                }),
-                initramfs: None,
-                cmdline: CmdlineConfig {
-                    args: String::from(""),
-                },
-                disks: None,
-                net: None,
-                rng: RngConfig {
-                    src: PathBuf::from("/dev/urandom"),
-                    iommu: false,
-                },
-                balloon: None,
-                fs: None,
-                pmem: None,
-                serial: ConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Null,
-                    iommu: false,
-                },
-                console: ConsoleConfig {
-                    file: None,
-                    mode: ConsoleOutputMode::Tty,
-                    iommu: false,
-                },
-                devices: None,
-                user_devices: None,
-                vsock: None,
+        let expected_vm_config = VmConfig {
+            cpus: CpusConfig {
+                boot_vcpus: 1,
+                max_vcpus: 1,
+                topology: None,
+                kvm_hyperv: false,
+                max_phys_bits: 46,
+                affinity: None,
+                features: CpuFeatures::default(),
+            },
+            memory: MemoryConfig {
+                size: 536_870_912,
+                mergeable: false,
+                hotplug_method: HotplugMethod::Acpi,
+                hotplug_size: None,
+                hotplugged_size: None,
+                shared: false,
+                hugepages: false,
+                hugepage_size: None,
+                prefault: false,
+                zones: None,
+            },
+            kernel: Some(KernelConfig {
+                path: PathBuf::from("/path/to/kernel"),
+            }),
+            initramfs: None,
+            cmdline: CmdlineConfig {
+                args: String::from(""),
+            },
+            disks: None,
+            net: None,
+            rng: RngConfig {
+                src: PathBuf::from("/dev/urandom"),
                 iommu: false,
-                #[cfg(target_arch = "x86_64")]
-                sgx_epc: None,
-                numa: None,
-                watchdog: false,
-                #[cfg(feature = "tdx")]
-                tdx: None,
-                platform: None,
-            };
+            },
+            balloon: None,
+            fs: None,
+            pmem: None,
+            serial: ConsoleConfig {
+                file: None,
+                mode: ConsoleOutputMode::Null,
+                iommu: false,
+            },
+            console: ConsoleConfig {
+                file: None,
+                mode: ConsoleOutputMode::Tty,
+                iommu: false,
+            },
+            devices: None,
+            user_devices: None,
+            vdpa: None,
+            vsock: None,
+            iommu: false,
+            #[cfg(target_arch = "x86_64")]
+            sgx_epc: None,
+            numa: None,
+            watchdog: false,
+            #[cfg(feature = "tdx")]
+            tdx: None,
+            #[cfg(feature = "gdb")]
+            gdb: false,
+            platform: None,
+        };
 
-            aver_eq!(tb, expected_vm_config, result_vm_config);
-            Ok(())
-        })
+        assert_eq!(expected_vm_config, result_vm_config);
     }
 
     #[test]
@@ -1225,125 +1260,6 @@ mod unit_tests {
                 }"#,
                 true,
             ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true", "--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,dax=on"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true", "--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,dax=on"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "dax": true}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true", "--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "dax": true}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true", "--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=8589934592"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true", "--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "cache_size": 8589934592}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true","--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=4294967296"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128, "cache_size": 4294967296}
-                    ]
-                }"#,
-                true,
-            ),
-            (
-                vec![
-                    "cloud-hypervisor", "--kernel", "/path/to/kernel",
-                    "--memory", "shared=true","--cpus", "boot=4",
-                    "--fs",
-                    "tag=virtiofs1,socket=/path/to/sock1,num_queues=4,queue_size=128,cache_size=4294967296"
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "memory" : { "shared": true, "size": 536870912 },
-                    "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
-                    "fs": [
-                        {"tag": "virtiofs1", "socket": "/path/to/sock1", "num_queues": 4, "queue_size": 128}
-                    ]
-                }"#,
-                false,
-            ),
         ]
         .iter()
         .for_each(|(cli, openapi, equal)| {
@@ -1406,40 +1322,6 @@ mod unit_tests {
                     ]
                 }"#,
                 false,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            (
-                vec![
-                    "cloud-hypervisor",
-                    "--kernel",
-                    "/path/to/kernel",
-                    "--pmem",
-                    "file=/path/to/img/1,size=1G,mergeable=on",
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "pmem": [
-                        {"file": "/path/to/img/1", "size": 1073741824, "mergeable": true}
-                    ]
-                }"#,
-                true,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            (
-                vec![
-                    "cloud-hypervisor",
-                    "--kernel",
-                    "/path/to/kernel",
-                    "--pmem",
-                    "file=/path/to/img/1,size=1G,mergeable=off",
-                ],
-                r#"{
-                    "kernel": {"path": "/path/to/kernel"},
-                    "pmem": [
-                        {"file": "/path/to/img/1", "size": 1073741824, "mergeable": false}
-                    ]
-                }"#,
-                true,
             ),
         ]
         .iter()
@@ -1637,6 +1519,51 @@ mod unit_tests {
                     ]
                 }"#,
                 true,
+            ),
+        ]
+        .iter()
+        .for_each(|(cli, openapi, equal)| {
+            compare_vm_config_cli_vs_json(cli, openapi, *equal);
+        });
+    }
+
+    #[test]
+    fn test_valid_vm_config_vdpa() {
+        vec![
+            (
+                vec![
+                    "cloud-hypervisor",
+                    "--kernel",
+                    "/path/to/kernel",
+                    "--vdpa",
+                    "path=/path/to/device/1",
+                    "path=/path/to/device/2,num_queues=2",
+                ],
+                r#"{
+                    "kernel": {"path": "/path/to/kernel"},
+                    "vdpa": [
+                        {"path": "/path/to/device/1", "num_queues": 1},
+                        {"path": "/path/to/device/2", "num_queues": 2}
+                    ]
+                }"#,
+                true,
+            ),
+            (
+                vec![
+                    "cloud-hypervisor",
+                    "--kernel",
+                    "/path/to/kernel",
+                    "--vdpa",
+                    "path=/path/to/device/1",
+                    "path=/path/to/device/2",
+                ],
+                r#"{
+                    "kernel": {"path": "/path/to/kernel"},
+                    "vdpa": [
+                        {"path": "/path/to/device/1"}
+                    ]
+                }"#,
+                false,
             ),
         ]
         .iter()

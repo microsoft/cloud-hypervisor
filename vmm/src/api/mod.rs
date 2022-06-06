@@ -34,13 +34,14 @@ pub use self::http::start_http_path_thread;
 pub mod http;
 pub mod http_endpoint;
 
-use crate::config::UserDeviceConfig;
 use crate::config::{
-    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, UserDeviceConfig,
+    VdpaConfig, VmConfig, VsockConfig,
 };
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
 use micro_http::Body;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::mpsc::{channel, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
@@ -98,6 +99,9 @@ pub enum ApiError {
     /// The VM could not restored.
     VmRestore(VmError),
 
+    /// The VM could not be coredumped.
+    VmCoredump(VmError),
+
     /// The VMM could not shutdown.
     VmmShutdown(VmError),
 
@@ -133,6 +137,9 @@ pub enum ApiError {
 
     /// The network device could not be added to the VM.
     VmAddNet(VmError),
+
+    /// The vDPA device could not be added to the VM.
+    VmAddVdpa(VmError),
 
     /// The vsock device could not be added to the VM.
     VmAddVsock(VmError),
@@ -186,6 +193,12 @@ pub struct VmSnapshotConfig {
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmCoredumpData {
+    /// The coredump destination file
+    pub destination_url: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
 pub struct VmReceiveMigrationData {
     /// URL for the reception of migration state
     pub receiver_url: String,
@@ -195,6 +208,9 @@ pub struct VmReceiveMigrationData {
 pub struct VmSendMigrationData {
     /// URL to migrate the VM to
     pub destination_url: String,
+    /// Send memory across socket without copying
+    #[serde(default)]
+    pub local: bool,
 }
 
 pub enum ApiResponsePayload {
@@ -208,7 +224,7 @@ pub enum ApiResponsePayload {
     VmmPing(VmmPingResponse),
 
     /// Vm action response
-    VmAction(Vec<u8>),
+    VmAction(Option<Vec<u8>>),
 }
 
 /// This is the response sent by the VMM API server through the mpsc channel.
@@ -291,6 +307,9 @@ pub enum ApiRequest {
     /// Add a network device to the VM.
     VmAddNet(Arc<NetConfig>, Sender<ApiResponse>),
 
+    /// Add a vDPA device to the VM.
+    VmAddVdpa(Arc<VdpaConfig>, Sender<ApiResponse>),
+
     /// Add a vsock device to the VM.
     VmAddVsock(Arc<VsockConfig>, Sender<ApiResponse>),
 
@@ -299,6 +318,10 @@ pub enum ApiRequest {
 
     /// Restore from a VM snapshot
     VmRestore(Arc<RestoreConfig>, Sender<ApiResponse>),
+
+    /// Take a VM coredump
+    #[cfg(feature = "guest_debug")]
+    VmCoredump(Arc<VmCoredumpData>, Sender<ApiResponse>),
 
     /// Incoming migration
     VmReceiveMigration(Arc<VmReceiveMigrationData>, Sender<ApiResponse>),
@@ -368,6 +391,9 @@ pub enum VmAction {
     /// Add network
     AddNet(Arc<NetConfig>),
 
+    /// Add vdpa
+    AddVdpa(Arc<VdpaConfig>),
+
     /// Add vsock
     AddVsock(Arc<VsockConfig>),
 
@@ -388,6 +414,10 @@ pub enum VmAction {
 
     /// Snapshot VM
     Snapshot(Arc<VmSnapshotConfig>),
+
+    /// Coredump VM
+    #[cfg(feature = "guest_debug")]
+    Coredump(Arc<VmCoredumpData>),
 
     /// Incoming migration
     ReceiveMigration(Arc<VmReceiveMigrationData>),
@@ -420,6 +450,7 @@ fn vm_action(
         AddFs(v) => ApiRequest::VmAddFs(v, response_sender),
         AddPmem(v) => ApiRequest::VmAddPmem(v, response_sender),
         AddNet(v) => ApiRequest::VmAddNet(v, response_sender),
+        AddVdpa(v) => ApiRequest::VmAddVdpa(v, response_sender),
         AddVsock(v) => ApiRequest::VmAddVsock(v, response_sender),
         AddUserDevice(v) => ApiRequest::VmAddUserDevice(v, response_sender),
         RemoveDevice(v) => ApiRequest::VmRemoveDevice(v, response_sender),
@@ -427,6 +458,8 @@ fn vm_action(
         ResizeZone(v) => ApiRequest::VmResizeZone(v, response_sender),
         Restore(v) => ApiRequest::VmRestore(v, response_sender),
         Snapshot(v) => ApiRequest::VmSnapshot(v, response_sender),
+        #[cfg(feature = "guest_debug")]
+        Coredump(v) => ApiRequest::VmCoredump(v, response_sender),
         ReceiveMigration(v) => ApiRequest::VmReceiveMigration(v, response_sender),
         SendMigration(v) => ApiRequest::VmSendMigration(v, response_sender),
         PowerButton => ApiRequest::VmPowerButton(response_sender),
@@ -437,7 +470,7 @@ fn vm_action(
     api_evt.write(1).map_err(ApiError::EventFdWrite)?;
 
     let body = match response_receiver.recv().map_err(ApiError::ResponseRecv)?? {
-        ApiResponsePayload::VmAction(response) => Some(Body::new(response)),
+        ApiResponsePayload::VmAction(response) => response.map(Body::new),
         ApiResponsePayload::Empty => None,
         _ => return Err(ApiError::ResponsePayloadType),
     };
@@ -510,6 +543,15 @@ pub fn vm_restore(
     data: Arc<RestoreConfig>,
 ) -> ApiResult<Option<Body>> {
     vm_action(api_evt, api_sender, VmAction::Restore(data))
+}
+
+#[cfg(feature = "guest_debug")]
+pub fn vm_coredump(
+    api_evt: EventFd,
+    api_sender: Sender<ApiRequest>,
+    data: Arc<VmCoredumpData>,
+) -> ApiResult<Option<Body>> {
+    vm_action(api_evt, api_sender, VmAction::Coredump(data))
 }
 
 pub fn vm_info(api_evt: EventFd, api_sender: Sender<ApiRequest>) -> ApiResult<VmInfo> {
@@ -629,6 +671,14 @@ pub fn vm_add_net(
     data: Arc<NetConfig>,
 ) -> ApiResult<Option<Body>> {
     vm_action(api_evt, api_sender, VmAction::AddNet(data))
+}
+
+pub fn vm_add_vdpa(
+    api_evt: EventFd,
+    api_sender: Sender<ApiRequest>,
+    data: Arc<VdpaConfig>,
+) -> ApiResult<Option<Body>> {
+    vm_action(api_evt, api_sender, VmAction::AddVdpa(data))
 }
 
 pub fn vm_add_vsock(

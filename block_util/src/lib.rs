@@ -20,27 +20,27 @@ pub mod raw_sync;
 pub mod vhd;
 pub mod vhdx_sync;
 
-use crate::async_io::{AsyncIo, AsyncIoError, AsyncIoResult, DiskFileError, DiskFileResult};
-#[cfg(feature = "io_uring")]
+use crate::async_io::{AsyncIo, AsyncIoError, AsyncIoResult};
 use io_uring::{opcode, IoUring, Probe};
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::cmp;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{self, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
-#[cfg(feature = "io_uring")]
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::MutexGuard;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_bindings::bindings::virtio_blk::*;
 use virtio_queue::DescriptorChain;
 use vm_memory::{
     bitmap::AtomicBitmap, bitmap::Bitmap, ByteValued, Bytes, GuestAddress, GuestMemory,
-    GuestMemoryAtomic, GuestMemoryError,
+    GuestMemoryError, GuestMemoryLoadGuard,
 };
+use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
@@ -115,6 +115,8 @@ pub enum ExecuteError {
     AsyncRead(AsyncIoError),
     AsyncWrite(AsyncIoError),
     AsyncFlush(AsyncIoError),
+    /// Failed allocating a temporary buffer.
+    TemporaryBufferAllocation(io::Error),
 }
 
 impl ExecuteError {
@@ -131,6 +133,7 @@ impl ExecuteError {
             ExecuteError::AsyncRead(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::AsyncWrite(_) => VIRTIO_BLK_S_IOERR,
             ExecuteError::AsyncFlush(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::TemporaryBufferAllocation(_) => VIRTIO_BLK_S_IOERR,
         }
     }
 }
@@ -169,17 +172,27 @@ fn sector(mem: &GuestMemoryMmap, desc_addr: GuestAddress) -> result::Result<u64,
 }
 
 #[derive(Debug)]
+pub struct AlignedOperation {
+    origin_ptr: u64,
+    aligned_ptr: u64,
+    size: usize,
+    layout: Layout,
+}
+
+#[derive(Debug)]
 pub struct Request {
     pub request_type: RequestType,
     pub sector: u64,
     pub data_descriptors: Vec<(GuestAddress, u32)>,
     pub status_addr: GuestAddress,
     pub writeback: bool,
+    pub aligned_operations: Vec<AlignedOperation>,
 }
 
 impl Request {
     pub fn parse(
-        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
     ) -> result::Result<Request, Error> {
         let hdr_desc = desc_chain
             .next()
@@ -194,12 +207,17 @@ impl Request {
             return Err(Error::UnexpectedWriteOnlyDescriptor);
         }
 
+        let hdr_desc_addr = hdr_desc
+            .addr()
+            .translate_gva(access_platform, hdr_desc.len() as usize);
+
         let mut req = Request {
-            request_type: request_type(desc_chain.memory(), hdr_desc.addr())?,
-            sector: sector(desc_chain.memory(), hdr_desc.addr())?,
+            request_type: request_type(desc_chain.memory(), hdr_desc_addr)?,
+            sector: sector(desc_chain.memory(), hdr_desc_addr)?,
             data_descriptors: Vec::new(),
             status_addr: GuestAddress(0),
             writeback: true,
+            aligned_operations: Vec::new(),
         };
 
         let status_desc;
@@ -229,7 +247,12 @@ impl Request {
                 if !desc.is_write_only() && req.request_type == RequestType::GetDeviceId {
                     return Err(Error::UnexpectedReadOnlyDescriptor);
                 }
-                req.data_descriptors.push((desc.addr(), desc.len()));
+
+                req.data_descriptors.push((
+                    desc.addr()
+                        .translate_gva(access_platform, desc.len() as usize),
+                    desc.len(),
+                ));
                 desc = desc_chain
                     .next()
                     .ok_or(Error::DescriptorChainTooShort)
@@ -250,18 +273,19 @@ impl Request {
             return Err(Error::DescriptorLengthTooSmall);
         }
 
-        req.status_addr = status_desc.addr();
+        req.status_addr = status_desc
+            .addr()
+            .translate_gva(access_platform, status_desc.len() as usize);
 
         Ok(req)
     }
 
-    #[allow(clippy::ptr_arg)]
     pub fn execute<T: Seek + Read + Write>(
         &self,
         disk: &mut T,
         disk_nsectors: u64,
         mem: &GuestMemoryMmap,
-        disk_id: &Vec<u8>,
+        disk_id: &[u8],
     ) -> result::Result<u32, ExecuteError> {
         disk.seek(SeekFrom::Start(self.sector << SECTOR_SHIFT))
             .map_err(ExecuteError::Seek)?;
@@ -296,7 +320,7 @@ impl Request {
                     if (*data_len as usize) < disk_id.len() {
                         return Err(ExecuteError::BadRequest(Error::InvalidOffset));
                     }
-                    mem.write_slice(disk_id.as_slice(), *data_addr)
+                    mem.write_slice(disk_id, *data_addr)
                         .map_err(ExecuteError::Write)?;
                 }
                 RequestType::Unsupported(t) => return Err(ExecuteError::Unsupported(t)),
@@ -306,7 +330,7 @@ impl Request {
     }
 
     pub fn execute_async(
-        &self,
+        &mut self,
         mem: &GuestMemoryMmap,
         disk_nsectors: u64,
         disk_image: &mut dyn AsyncIo,
@@ -319,6 +343,9 @@ impl Request {
 
         let mut iovecs = Vec::new();
         for (data_addr, data_len) in &self.data_descriptors {
+            if *data_len == 0 {
+                continue;
+            }
             let mut top: u64 = u64::from(*data_len) / SECTOR_SIZE;
             if u64::from(*data_len) % SECTOR_SIZE != 0 {
                 top += 1;
@@ -330,12 +357,52 @@ impl Request {
                 return Err(ExecuteError::BadRequest(Error::InvalidOffset));
             }
 
-            let buf = mem
+            let origin_ptr = mem
                 .get_slice(*data_addr, *data_len as usize)
                 .map_err(ExecuteError::GetHostAddress)?
                 .as_ptr();
+
+            // Verify the buffer alignment.
+            // In case it's not properly aligned, an intermediate buffer is
+            // created with the correct alignment, and a copy from/to the
+            // origin buffer is performed, depending on the type of operation.
+            let iov_base = if (origin_ptr as u64) % SECTOR_SIZE != 0 {
+                let layout =
+                    Layout::from_size_align(*data_len as usize, SECTOR_SIZE as usize).unwrap();
+                // Safe because layout has non-zero size
+                let aligned_ptr = unsafe { alloc_zeroed(layout) };
+                if aligned_ptr.is_null() {
+                    return Err(ExecuteError::TemporaryBufferAllocation(
+                        io::Error::last_os_error(),
+                    ));
+                }
+
+                // We need to perform the copy beforehand in case we're writing
+                // data out.
+                if request_type == RequestType::Out {
+                    // Safe because destination buffer has been allocated with
+                    // the proper size.
+                    unsafe {
+                        std::ptr::copy(origin_ptr as *const u8, aligned_ptr, *data_len as usize)
+                    };
+                }
+
+                // Store both origin and aligned pointers for complete_async()
+                // to process them.
+                self.aligned_operations.push(AlignedOperation {
+                    origin_ptr: origin_ptr as u64,
+                    aligned_ptr: aligned_ptr as u64,
+                    size: *data_len as usize,
+                    layout,
+                });
+
+                aligned_ptr as *mut libc::c_void
+            } else {
+                origin_ptr as *mut libc::c_void
+            };
+
             let iovec = libc::iovec {
-                iov_base: buf as *mut libc::c_void,
+                iov_base,
                 iov_len: *data_len as libc::size_t,
             };
             iovecs.push(iovec);
@@ -383,6 +450,36 @@ impl Request {
         Ok(true)
     }
 
+    pub fn complete_async(&mut self) -> result::Result<(), Error> {
+        for aligned_operation in self.aligned_operations.drain(..) {
+            // We need to perform the copy after the data has been read inside
+            // the aligned buffer in case we're reading data in.
+            if self.request_type == RequestType::In {
+                // Safe because origin buffer has been allocated with the
+                // proper size.
+                unsafe {
+                    std::ptr::copy(
+                        aligned_operation.aligned_ptr as *const u8,
+                        aligned_operation.origin_ptr as *mut u8,
+                        aligned_operation.size,
+                    )
+                };
+            }
+
+            // Free the temporary aligned buffer.
+            // Safe because aligned_ptr was allocated by alloc_zeroed with the same
+            // layout
+            unsafe {
+                dealloc(
+                    aligned_operation.aligned_ptr as *mut u8,
+                    aligned_operation.layout,
+                )
+            };
+        }
+
+        Ok(())
+    }
+
     pub fn set_writeback(&mut self, writeback: bool) {
         self.writeback = writeback
     }
@@ -411,8 +508,6 @@ pub struct VirtioBlockConfig {
     pub write_zeroes_may_unmap: u8,
     pub unused1: [u8; 3],
 }
-unsafe impl ByteValued for VirtioBlockConfig {}
-
 #[derive(Copy, Clone, Debug, Default, Versionize)]
 #[repr(C, packed)]
 pub struct VirtioBlockGeometry {
@@ -420,11 +515,13 @@ pub struct VirtioBlockGeometry {
     pub heads: u8,
     pub sectors: u8,
 }
+
+// SAFETY: these data structures only contain a series of integers
+unsafe impl ByteValued for VirtioBlockConfig {}
 unsafe impl ByteValued for VirtioBlockGeometry {}
 
 /// Check if io_uring for block device can be used on the current system, as
 /// it correctly supports the expected io_uring features.
-#[cfg(feature = "io_uring")]
 pub fn block_io_uring_is_supported() -> bool {
     let error_msg = "io_uring not supported:";
 
@@ -439,25 +536,6 @@ pub fn block_io_uring_is_supported() -> bool {
     };
 
     let submitter = io_uring.submitter();
-
-    let event_fd = match EventFd::new(libc::EFD_NONBLOCK) {
-        Ok(fd) => fd,
-        Err(e) => {
-            info!("{} failed to create eventfd: {}", error_msg, e);
-            return false;
-        }
-    };
-
-    // Check we can register an eventfd as this is going to be needed while
-    // using io_uring with the virtio block device. This also validates that
-    // io_uring_register() syscall is supported.
-    match submitter.register_eventfd(event_fd.as_raw_fd()) {
-        Ok(_) => {}
-        Err(e) => {
-            info!("{} failed to register eventfd: {}", error_msg, e);
-            return false;
-        }
-    }
 
     let mut probe = Probe::new();
 
@@ -491,119 +569,98 @@ pub fn block_io_uring_is_supported() -> bool {
     true
 }
 
-#[cfg(not(feature = "io_uring"))]
-pub fn block_io_uring_is_supported() -> bool {
-    false
-}
+pub trait AsyncAdaptor<F>
+where
+    F: Read + Write + Seek,
+{
+    fn read_vectored_sync(
+        &mut self,
+        offset: libc::off_t,
+        iovecs: Vec<libc::iovec>,
+        user_data: u64,
+        eventfd: &EventFd,
+        completion_list: &mut Vec<(u64, i32)>,
+    ) -> AsyncIoResult<()> {
+        // Convert libc::iovec into IoSliceMut
+        let mut slices = Vec::new();
+        for iovec in iovecs.iter() {
+            slices.push(IoSliceMut::new(unsafe { std::mem::transmute(*iovec) }));
+        }
 
-pub fn disk_size(file: &mut dyn Seek, semaphore: &mut Arc<Mutex<()>>) -> DiskFileResult<u64> {
-    // Take the semaphore to ensure other threads are not interacting with
-    // the underlying file.
-    let _lock = semaphore.lock().unwrap();
+        let result = {
+            let mut file = self.file();
 
-    Ok(file.seek(SeekFrom::End(0)).map_err(DiskFileError::Size)? as u64)
-}
+            // Move the cursor to the right offset
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(AsyncIoError::ReadVectored)?;
 
-pub trait ReadSeekFile: Read + Seek {}
-impl<F: Read + Seek> ReadSeekFile for F {}
+            // Read vectored
+            file.read_vectored(slices.as_mut_slice())
+                .map_err(AsyncIoError::ReadVectored)?
+        };
 
-pub fn read_vectored_sync(
-    offset: libc::off_t,
-    iovecs: Vec<libc::iovec>,
-    user_data: u64,
-    file: &mut dyn ReadSeekFile,
-    eventfd: &EventFd,
-    completion_list: &mut Vec<(u64, i32)>,
-    semaphore: &mut Arc<Mutex<()>>,
-) -> AsyncIoResult<()> {
-    // Convert libc::iovec into IoSliceMut
-    let mut slices = Vec::new();
-    for iovec in iovecs.iter() {
-        slices.push(IoSliceMut::new(unsafe { std::mem::transmute(*iovec) }));
-    }
-
-    let result = {
-        // Take the semaphore to ensure other threads are not interacting
-        // with the underlying file.
-        let _lock = semaphore.lock().unwrap();
-
-        // Move the cursor to the right offset
-        file.seek(SeekFrom::Start(offset as u64))
-            .map_err(AsyncIoError::ReadVectored)?;
-
-        // Read vectored
-        file.read_vectored(slices.as_mut_slice())
-            .map_err(AsyncIoError::ReadVectored)?
-    };
-
-    completion_list.push((user_data, result as i32));
-    eventfd.write(1).unwrap();
-
-    Ok(())
-}
-
-pub trait WriteSeekFile: Write + Seek {}
-impl<F: Write + Seek> WriteSeekFile for F {}
-
-pub fn write_vectored_sync(
-    offset: libc::off_t,
-    iovecs: Vec<libc::iovec>,
-    user_data: u64,
-    file: &mut dyn WriteSeekFile,
-    eventfd: &EventFd,
-    completion_list: &mut Vec<(u64, i32)>,
-    semaphore: &mut Arc<Mutex<()>>,
-) -> AsyncIoResult<()> {
-    // Convert libc::iovec into IoSlice
-    let mut slices = Vec::new();
-    for iovec in iovecs.iter() {
-        slices.push(IoSlice::new(unsafe { std::mem::transmute(*iovec) }));
-    }
-
-    let result = {
-        // Take the semaphore to ensure other threads are not interacting
-        // with the underlying file.
-        let _lock = semaphore.lock().unwrap();
-
-        // Move the cursor to the right offset
-        file.seek(SeekFrom::Start(offset as u64))
-            .map_err(AsyncIoError::WriteVectored)?;
-
-        // Write vectored
-        file.write_vectored(slices.as_slice())
-            .map_err(AsyncIoError::WriteVectored)?
-    };
-
-    completion_list.push((user_data, result as i32));
-    eventfd.write(1).unwrap();
-
-    Ok(())
-}
-
-pub fn fsync_sync(
-    user_data: Option<u64>,
-    file: &mut dyn Write,
-    eventfd: &EventFd,
-    completion_list: &mut Vec<(u64, i32)>,
-    semaphore: &mut Arc<Mutex<()>>,
-) -> AsyncIoResult<()> {
-    let result: i32 = {
-        // Take the semaphore to ensure other threads are not interacting
-        // with the underlying file.
-        let _lock = semaphore.lock().unwrap();
-
-        // Flush
-        file.flush().map_err(AsyncIoError::Fsync)?;
-
-        0
-    };
-
-    if let Some(user_data) = user_data {
-        completion_list.push((user_data, result));
+        completion_list.push((user_data, result as i32));
         eventfd.write(1).unwrap();
+
+        Ok(())
     }
 
-    Ok(())
+    fn write_vectored_sync(
+        &mut self,
+        offset: libc::off_t,
+        iovecs: Vec<libc::iovec>,
+        user_data: u64,
+        eventfd: &EventFd,
+        completion_list: &mut Vec<(u64, i32)>,
+    ) -> AsyncIoResult<()> {
+        // Convert libc::iovec into IoSlice
+        let mut slices = Vec::new();
+        for iovec in iovecs.iter() {
+            slices.push(IoSlice::new(unsafe { std::mem::transmute(*iovec) }));
+        }
+
+        let result = {
+            let mut file = self.file();
+
+            // Move the cursor to the right offset
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(AsyncIoError::WriteVectored)?;
+
+            // Write vectored
+            file.write_vectored(slices.as_slice())
+                .map_err(AsyncIoError::WriteVectored)?
+        };
+
+        completion_list.push((user_data, result as i32));
+        eventfd.write(1).unwrap();
+
+        Ok(())
+    }
+
+    fn fsync_sync(
+        &mut self,
+        user_data: Option<u64>,
+        eventfd: &EventFd,
+        completion_list: &mut Vec<(u64, i32)>,
+    ) -> AsyncIoResult<()> {
+        let result: i32 = {
+            let mut file = self.file();
+
+            // Flush
+            file.flush().map_err(AsyncIoError::Fsync)?;
+
+            0
+        };
+
+        if let Some(user_data) = user_data {
+            completion_list.push((user_data, result));
+            eventfd.write(1).unwrap();
+        }
+
+        Ok(())
+    }
+
+    fn file(&mut self) -> MutexGuard<F>;
 }
 
 pub enum ImageType {

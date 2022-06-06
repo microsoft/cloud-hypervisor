@@ -22,7 +22,7 @@ __Prerequisites__
 - QEMU, version >=5.0.0 is recommended.
 - Windows installation ISO. Obtained through MSDN, Visual Studio subscription, evaluation center, etc. 
 - [VirtIO driver ISO](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/)
-- Suitable [OVMF](uefi.md) firmware 
+- Suitable firmware for Cloud Hypervisor (`CLOUDHV.fd`) and for QEMU (`OVMF.fd`)
 - With the suggested image size of 30G, there should be enough free disk space to hold the installation ISO and any other necessary files
 
 This step currently requires QEMU to install Windows onto the guest. QEMU is only used at the preparation stage, the resulting image is then fully functional with Cloud Hypervisor.
@@ -67,7 +67,7 @@ The basic command to boot a Windows image. The configuration section should be c
 
 ```shell
 cloud-hypervisor \
-	--kernel ./$OVMF_DIR/OVMF.fd \
+	--kernel ./$OVMF_DIR/CLOUDHV.fd \
 	--disk path=./$IMG_FILE \
 	--cpus boot=1,kvm_hyperv=on \
 	--memory size=4G \

@@ -88,6 +88,9 @@ Reboot the VM                      | `/vm.reboot`         | N/A                 
 Trigger power button of the VM     | `/vm.power-button`   | N/A                       | N/A                      | The VM is booted
 Pause the VM                       | `/vm.pause`          | N/A                       | N/A                      | The VM is booted
 Resume the VM                      | `/vm.resume`         | N/A                       | N/A                      | The VM is paused
+Task a snapshot of the VM          | `/vm.snapshot`       | `/schemas/VmSnapshotConfig`| N/A                     | The VM is paused
+Perform a coredump of the VM       | `/vm.coredump`       | `/schemas/VmCoredumpData` | N/A                      | The VM is paused
+Restore the VM from a snapshot     | `/vm.restore`        | `/schemas/RestoreConfig`  | N/A                      | The VM is created but not booted
 Add/remove CPUs to/from the VM     | `/vm.resize`         | `/schemas/VmResize`       | N/A                      | The VM is booted
 Add/remove memory from the VM      | `/vm.resize`         | `/schemas/VmResize`       | N/A                      | The VM is booted
 Add/remove memory from a zone      | `/vm.resize-zone`    | `/schemas/VmResizeZone`   | N/A                      | The VM is booted
@@ -98,6 +101,7 @@ Add fs device to the VM            | `/vm.add-fs`         | `/schemas/FsConfig` 
 Add pmem device to the VM          | `/vm.add-pmem`       | `/schemas/PmemConfig`     | `/schemas/PciDeviceInfo` | The VM is booted
 Add network device to the VM       | `/vm.add-net`        | `/schemas/NetConfig`      | `/schemas/PciDeviceInfo` | The VM is booted
 Add userspace PCI device to the VM | `/vm.add-user-device`| `/schemas/VmAddUserDevice`| `/schemas/PciDeviceInfo` | The VM is booted
+Add vdpa device to the VM          | `/vm.add-vdpa`       | `/schemas/VdpaConfig`     | `/schemas/PciDeviceInfo` | The VM is booted
 Add vsock device to the VM         | `/vm.add-vsock`      | `/schemas/VsockConfig`    | `/schemas/PciDeviceInfo` | The VM is booted
 Remove device from the VM          | `/vm.remove-device`  | `/schemas/VmRemoveDevice` | N/A                      | The VM is booted
 Dump the VM counters               | `/vm.counters`       | N/A                       | `/schemas/VmCounters`    | The VM is booted

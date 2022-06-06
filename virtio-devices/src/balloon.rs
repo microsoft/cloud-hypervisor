@@ -12,48 +12,55 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{
-    ActivateError, ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, VirtioCommon,
-    VirtioDevice, VirtioDeviceType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_VERSION_1,
+use crate::{
+    seccomp_filters::Thread, thread_helper::spawn_virtio_thread, ActivateError, ActivateResult,
+    EpollHelper, EpollHelperError, EpollHelperHandler, GuestMemoryMmap, VirtioCommon, VirtioDevice,
+    VirtioDeviceType, VirtioInterrupt, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST,
+    VIRTIO_F_VERSION_1,
 };
-use crate::seccomp_filters::Thread;
-use crate::thread_helper::spawn_virtio_thread;
-use crate::GuestMemoryMmap;
-use crate::{VirtioInterrupt, VirtioInterruptType};
 use libc::EFD_NONBLOCK;
 use seccompiler::SeccompAction;
 use std::io;
 use std::mem::size_of;
 use std::os::unix::io::AsRawFd;
 use std::result;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Barrier, Mutex,
+};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::Queue;
-use vm_memory::GuestMemory;
-use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError};
-use vm_migration::VersionMapped;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryAtomic, GuestMemoryError,
+    GuestMemoryRegion,
+};
+use vm_migration::{
+    Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 128;
-const NUM_QUEUES: usize = 2;
-const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE; NUM_QUEUES];
+const REPORTING_QUEUE_SIZE: u16 = 32;
+const MIN_NUM_QUEUES: usize = 2;
 
-// Get resize event.
+// Resize event.
 const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
-// New descriptors are pending on the virtio queue.
+// Inflate virtio queue event.
 const INFLATE_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
-// New descriptors are pending on the virtio queue.
+// Deflate virtio queue event.
 const DEFLATE_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 3;
+// Reporting virtio queue event.
+const REPORTING_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 4;
 
 // Size of a PFN in the balloon interface.
 const VIRTIO_BALLOON_PFN_SHIFT: u64 = 12;
 
 // Deflate balloon on OOM
 const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u64 = 2;
+// Enable an additional virtqueue to let the guest notify the host about free
+// pages.
+const VIRTIO_BALLOON_F_REPORTING: u64 = 5;
 
 #[derive(Debug)]
 pub enum Error {
@@ -75,8 +82,8 @@ pub enum Error {
     MpscRecvFail(mpsc::RecvError),
     // Resize invalid argument
     ResizeInval(String),
-    // process_queue got wrong ev_type
-    ProcessQueueWrongEvType(u16),
+    // Invalid queue index
+    InvalidQueueIndex(usize),
     // Fail tp signal
     FailedSignal(io::Error),
     /// Descriptor chain is too short
@@ -100,7 +107,7 @@ pub struct VirtioBalloonConfig {
 const CONFIG_ACTUAL_OFFSET: u64 = 4;
 const CONFIG_ACTUAL_SIZE: usize = 4;
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioBalloonConfig {}
 
 struct VirtioBalloonResizeReceiver {
@@ -160,39 +167,91 @@ struct BalloonEpollHandler {
     interrupt_cb: Arc<dyn VirtioInterrupt>,
     inflate_queue_evt: EventFd,
     deflate_queue_evt: EventFd,
+    reporting_queue_evt: Option<EventFd>,
     kill_evt: EventFd,
     pause_evt: EventFd,
 }
 
 impl BalloonEpollHandler {
-    fn signal(
-        &self,
-        int_type: &VirtioInterruptType,
-        queue: Option<&Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
-    ) -> result::Result<(), Error> {
-        self.interrupt_cb.trigger(int_type, queue).map_err(|e| {
+    fn signal(&self, int_type: VirtioInterruptType) -> result::Result<(), Error> {
+        self.interrupt_cb.trigger(int_type).map_err(|e| {
             error!("Failed to signal used queue: {:?}", e);
             Error::FailedSignal(e)
         })
     }
 
-    fn process_queue(&mut self, ev_type: u16) -> result::Result<(), Error> {
-        let queue_index = match ev_type {
-            INFLATE_QUEUE_EVENT => 0,
-            DEFLATE_QUEUE_EVENT => 1,
-            _ => return Err(Error::ProcessQueueWrongEvType(ev_type)),
-        };
+    fn advise_memory_range(
+        memory: &GuestMemoryMmap,
+        range_base: GuestAddress,
+        range_len: usize,
+        advice: libc::c_int,
+    ) -> result::Result<(), Error> {
+        let hva = memory
+            .get_host_address(range_base)
+            .map_err(Error::GuestMemory)?;
+        // Need unsafe to do syscall madvise
+        let res =
+            unsafe { libc::madvise(hva as *mut libc::c_void, range_len as libc::size_t, advice) };
+        if res != 0 {
+            return Err(Error::MadviseFail(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
 
-        let mut used_desc_heads = [0; QUEUE_SIZE as usize];
-        let mut used_count = 0;
+    fn release_memory_range(
+        memory: &GuestMemoryMmap,
+        range_base: GuestAddress,
+        range_len: usize,
+    ) -> result::Result<(), Error> {
+        let region = memory.find_region(range_base).ok_or(Error::GuestMemory(
+            GuestMemoryError::InvalidGuestAddress(range_base),
+        ))?;
+        if let Some(f_off) = region.file_offset() {
+            let offset = range_base.0 - region.start_addr().0;
+            let res = unsafe {
+                libc::fallocate64(
+                    f_off.file().as_raw_fd(),
+                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                    (offset as u64 + f_off.start()) as libc::off64_t,
+                    range_len as libc::off64_t,
+                )
+            };
+
+            if res != 0 {
+                return Err(Error::FallocateFail(io::Error::last_os_error()));
+            }
+        }
+
+        Self::advise_memory_range(memory, range_base, range_len, libc::MADV_DONTNEED)
+    }
+
+    fn notify_queue(
+        &mut self,
+        queue_index: usize,
+        used_descs: Vec<(u16, u32)>,
+    ) -> result::Result<(), Error> {
+        for (desc_index, len) in used_descs.iter() {
+            self.queues[queue_index]
+                .add_used(*desc_index, *len)
+                .map_err(Error::QueueAddUsed)?;
+        }
+
+        if !used_descs.is_empty() {
+            self.signal(VirtioInterruptType::Queue(queue_index as u16))?;
+        }
+
+        Ok(())
+    }
+
+    fn process_queue(&mut self, queue_index: usize) -> result::Result<(), Error> {
+        let mut used_descs = Vec::new();
         for mut desc_chain in self.queues[queue_index]
             .iter()
             .map_err(Error::QueueIterator)?
         {
             let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
 
-            used_desc_heads[used_count] = desc_chain.head_index();
-            used_count += 1;
+            used_descs.push((desc_chain.head_index(), desc.len()));
 
             let data_chunk_size = size_of::<u32>();
 
@@ -215,63 +274,46 @@ impl BalloonEpollHandler {
                     .map_err(Error::GuestMemory)?;
                 offset += data_chunk_size as u64;
 
-                let gpa = (pfn as u64) << VIRTIO_BALLOON_PFN_SHIFT;
-                if let Ok(hva) = desc_chain.memory().get_host_address(GuestAddress(gpa)) {
-                    let advice = match ev_type {
-                        INFLATE_QUEUE_EVENT => {
-                            let region = desc_chain.memory().find_region(GuestAddress(gpa)).ok_or(
-                                Error::GuestMemory(GuestMemoryError::InvalidGuestAddress(
-                                    GuestAddress(gpa),
-                                )),
-                            )?;
-                            if let Some(f_off) = region.file_offset() {
-                                let offset = hva as usize - region.as_ptr() as usize;
-                                let res = unsafe {
-                                    libc::fallocate64(
-                                        f_off.file().as_raw_fd(),
-                                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-                                        (offset as u64 + f_off.start()) as libc::off64_t,
-                                        (1 << VIRTIO_BALLOON_PFN_SHIFT) as libc::off64_t,
-                                    )
-                                };
+                let range_base = GuestAddress((pfn as u64) << VIRTIO_BALLOON_PFN_SHIFT);
+                let range_len = 1 << VIRTIO_BALLOON_PFN_SHIFT;
 
-                                if res != 0 {
-                                    return Err(Error::FallocateFail(io::Error::last_os_error()));
-                                }
-                            }
-                            libc::MADV_DONTNEED
-                        }
-                        DEFLATE_QUEUE_EVENT => libc::MADV_WILLNEED,
-                        _ => return Err(Error::ProcessQueueWrongEvType(ev_type)),
-                    };
-                    // Need unsafe to do syscall madvise
-                    let res = unsafe {
-                        libc::madvise(
-                            hva as *mut libc::c_void,
-                            (1 << VIRTIO_BALLOON_PFN_SHIFT) as libc::size_t,
-                            advice,
-                        )
-                    };
-                    if res != 0 {
-                        return Err(Error::MadviseFail(io::Error::last_os_error()));
+                match queue_index {
+                    0 => {
+                        Self::release_memory_range(desc_chain.memory(), range_base, range_len)?;
                     }
-                } else {
-                    error!("Address 0x{:x} is not available", gpa);
-                    return Err(Error::InvalidRequest);
+                    1 => {
+                        Self::advise_memory_range(
+                            desc_chain.memory(),
+                            range_base,
+                            range_len,
+                            libc::MADV_WILLNEED,
+                        )?;
+                    }
+                    _ => return Err(Error::InvalidQueueIndex(queue_index)),
                 }
             }
         }
 
-        for &desc_index in &used_desc_heads[..used_count] {
-            self.queues[queue_index]
-                .add_used(desc_index, 0)
-                .map_err(Error::QueueAddUsed)?;
-        }
-        if used_count > 0 {
-            self.signal(&VirtioInterruptType::Queue, Some(&self.queues[queue_index]))?;
+        self.notify_queue(queue_index, used_descs)
+    }
+
+    fn process_reporting_queue(&mut self, queue_index: usize) -> result::Result<(), Error> {
+        let mut used_descs = Vec::new();
+
+        for mut desc_chain in self.queues[queue_index]
+            .iter()
+            .map_err(Error::QueueIterator)?
+        {
+            let mut descs_len = 0;
+            while let Some(desc) = desc_chain.next() {
+                descs_len += desc.len();
+                Self::release_memory_range(desc_chain.memory(), desc.addr(), desc.len() as usize)?;
+            }
+
+            used_descs.push((desc_chain.head_index(), descs_len));
         }
 
-        Ok(())
+        self.notify_queue(queue_index, used_descs)
     }
 
     fn run(
@@ -283,6 +325,9 @@ impl BalloonEpollHandler {
         helper.add_event(self.resize_receiver.evt.as_raw_fd(), RESIZE_EVENT)?;
         helper.add_event(self.inflate_queue_evt.as_raw_fd(), INFLATE_QUEUE_EVENT)?;
         helper.add_event(self.deflate_queue_evt.as_raw_fd(), DEFLATE_QUEUE_EVENT)?;
+        if let Some(reporting_queue_evt) = self.reporting_queue_evt.as_ref() {
+            helper.add_event(reporting_queue_evt.as_raw_fd(), REPORTING_QUEUE_EVENT)?;
+        }
         helper.run(paused, paused_sync, self)?;
 
         Ok(())
@@ -303,7 +348,7 @@ impl EpollHelperHandler for BalloonEpollHandler {
                     let mut config = self.config.lock().unwrap();
                     config.num_pages =
                         (self.resize_receiver.get_size() >> VIRTIO_BALLOON_PFN_SHIFT) as u32;
-                    if let Err(e) = self.signal(&VirtioInterruptType::Config, None) {
+                    if let Err(e) = self.signal(VirtioInterruptType::Config) {
                         signal_error = true;
                         Err(e)
                     } else {
@@ -326,7 +371,7 @@ impl EpollHelperHandler for BalloonEpollHandler {
                 if let Err(e) = self.inflate_queue_evt.read() {
                     error!("Failed to get inflate queue event: {:?}", e);
                     return true;
-                } else if let Err(e) = self.process_queue(ev_type) {
+                } else if let Err(e) = self.process_queue(0) {
                     error!("Failed to signal used inflate queue: {:?}", e);
                     return true;
                 }
@@ -335,8 +380,22 @@ impl EpollHelperHandler for BalloonEpollHandler {
                 if let Err(e) = self.deflate_queue_evt.read() {
                     error!("Failed to get deflate queue event: {:?}", e);
                     return true;
-                } else if let Err(e) = self.process_queue(ev_type) {
+                } else if let Err(e) = self.process_queue(1) {
                     error!("Failed to signal used deflate queue: {:?}", e);
+                    return true;
+                }
+            }
+            REPORTING_QUEUE_EVENT => {
+                if let Some(reporting_queue_evt) = self.reporting_queue_evt.as_ref() {
+                    if let Err(e) = reporting_queue_evt.read() {
+                        error!("Failed to get reporting queue event: {:?}", e);
+                        return true;
+                    } else if let Err(e) = self.process_reporting_queue(2) {
+                        error!("Failed to signal used inflate queue: {:?}", e);
+                        return true;
+                    }
+                } else {
+                    error!("Invalid reporting queue event as no eventfd registered");
                     return true;
                 }
             }
@@ -375,12 +434,18 @@ impl Balloon {
         id: String,
         size: u64,
         deflate_on_oom: bool,
+        free_page_reporting: bool,
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
     ) -> io::Result<Self> {
+        let mut queue_sizes = vec![QUEUE_SIZE; MIN_NUM_QUEUES];
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
         if deflate_on_oom {
             avail_features |= 1u64 << VIRTIO_BALLOON_F_DEFLATE_ON_OOM;
+        }
+        if free_page_reporting {
+            avail_features |= 1u64 << VIRTIO_BALLOON_F_REPORTING;
+            queue_sizes.push(REPORTING_QUEUE_SIZE);
         }
 
         let config = VirtioBalloonConfig {
@@ -393,8 +458,8 @@ impl Balloon {
                 device_type: VirtioDeviceType::Balloon as u32,
                 avail_features,
                 paused_sync: Some(Arc::new(Barrier::new(2))),
-                queue_sizes: QUEUE_SIZES.to_vec(),
-                min_queues: NUM_QUEUES as u16,
+                queue_sizes,
+                min_queues: MIN_NUM_QUEUES as u16,
                 ..Default::default()
             },
             id,
@@ -483,6 +548,15 @@ impl VirtioDevice for Balloon {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
+        let inflate_queue_evt = queue_evts.remove(0);
+        let deflate_queue_evt = queue_evts.remove(0);
+        let reporting_queue_evt =
+            if self.common.feature_acked(VIRTIO_BALLOON_F_REPORTING) && !queue_evts.is_empty() {
+                Some(queue_evts.remove(0))
+            } else {
+                None
+            };
+
         let mut handler = BalloonEpollHandler {
             config: self.config.clone(),
             resize_receiver: self.resize.get_receiver().map_err(|e| {
@@ -491,8 +565,9 @@ impl VirtioDevice for Balloon {
             })?,
             queues,
             interrupt_cb,
-            inflate_queue_evt: queue_evts.remove(0),
-            deflate_queue_evt: queue_evts.remove(0),
+            inflate_queue_evt,
+            deflate_queue_evt,
+            reporting_queue_evt,
             kill_evt,
             pause_evt,
         };

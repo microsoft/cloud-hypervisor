@@ -10,20 +10,15 @@
 //
 
 use crate::device_manager::{AddressManager, DeviceManagerError, DeviceManagerResult};
-#[cfg(feature = "acpi")]
 use acpi_tables::aml::{self, Aml};
 use arch::layout;
 use pci::{DeviceRelocation, PciBdf, PciBus, PciConfigMmio, PciRoot};
 #[cfg(target_arch = "x86_64")]
 use pci::{PciConfigIo, PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "acpi")]
 use uuid::Uuid;
 use vm_allocator::AddressAllocator;
 use vm_device::BusDevice;
-
-// One bus with potentially 256 devices (32 slots x 8 functions).
-const PCI_MMIO_CONFIG_SIZE: u64 = 4096 * 256;
 
 pub(crate) struct PciSegment {
     pub(crate) id: u16,
@@ -62,14 +57,15 @@ impl PciSegment {
         )));
 
         let pci_config_mmio = Arc::new(Mutex::new(PciConfigMmio::new(Arc::clone(&pci_bus))));
-        let mmio_config_address = layout::PCI_MMCONFIG_START.0 + PCI_MMIO_CONFIG_SIZE * id as u64;
+        let mmio_config_address =
+            layout::PCI_MMCONFIG_START.0 + layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT * id as u64;
 
         address_manager
             .mmio_bus
             .insert(
                 Arc::clone(&pci_config_mmio) as Arc<Mutex<dyn BusDevice>>,
                 mmio_config_address,
-                PCI_MMIO_CONFIG_SIZE,
+                layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT,
             )
             .map_err(DeviceManagerError::BusError)?;
 
@@ -170,12 +166,10 @@ impl PciSegment {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct PciDevSlot {
     device_id: u8,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for PciDevSlot {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let sun = self.device_id;
@@ -200,12 +194,10 @@ impl Aml for PciDevSlot {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct PciDevSlotNotify {
     device_id: u8,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for PciDevSlotNotify {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let device_id_mask: u32 = 1 << self.device_id;
@@ -219,10 +211,8 @@ impl Aml for PciDevSlotNotify {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct PciDevSlotMethods {}
 
-#[cfg(feature = "acpi")]
 impl Aml for PciDevSlotMethods {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let mut device_notifies = Vec::new();
@@ -258,10 +248,8 @@ impl Aml for PciDevSlotMethods {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct PciDsmMethod {}
 
-#[cfg(feature = "acpi")]
 impl Aml for PciDsmMethod {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         // Refer to ACPI spec v6.3 Ch 9.1.1 and PCI Firmware spec v3.3 Ch 4.6.1
@@ -323,7 +311,6 @@ impl Aml for PciDsmMethod {
     }
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for PciSegment {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let mut pci_dsdt_inner_data: Vec<&dyn aml::Aml> = Vec::new();
@@ -363,7 +350,7 @@ impl Aml for PciSegment {
                     &aml::Memory32Fixed::new(
                         true,
                         self.mmio_config_address as u32,
-                        PCI_MMIO_CONFIG_SIZE as u32,
+                        layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
                     ),
                     &aml::AddressSpace::new_memory(
                         aml::AddressSpaceCachable::NotCacheable,
@@ -392,7 +379,7 @@ impl Aml for PciSegment {
                     &aml::Memory32Fixed::new(
                         true,
                         self.mmio_config_address as u32,
-                        PCI_MMIO_CONFIG_SIZE as u32,
+                        layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
                     ),
                     &aml::AddressSpace::new_memory(
                         aml::AddressSpaceCachable::NotCacheable,

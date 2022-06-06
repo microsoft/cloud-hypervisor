@@ -3,29 +3,30 @@ name = "cloud-hypervisor-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
-edition = "2018"
+edition = "2021"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 block_util = { path = "../block_util" }
-libc = "0.2.106"
-libfuzzer-sys = "0.4.2"
+libc = "0.2.126"
+libfuzzer-sys = "0.4.3"
 qcow = { path = "../qcow" }
 seccompiler = "0.2.0"
 vhdx = { path = "../vhdx" }
 virtio-devices = { path = "../virtio-devices" }
-virtio-queue = { path = "../virtio-queue" }
+virtio-queue = "0.3.0"
 vmm-sys-util = "0.9.0"
 vm-virtio = { path = "../vm-virtio" }
-vm-memory = "0.6.0"
+vm-memory = "0.8.0"
 
 [dependencies.cloud-hypervisor]
 path = ".."
 
 [patch.crates-io]
-kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.5.0", features = ["with-serde", "fam-wrappers"] }
+kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.5.0-tdx" }
+kvm-ioctls = { git = "https://github.com/rust-vmm/kvm-ioctls", branch = "main" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
 # Prevent this from interfering with workspaces

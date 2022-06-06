@@ -5,10 +5,13 @@
 #[cfg(target_arch = "x86_64")]
 use crate::config::SgxEpcConfig;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
+#[cfg(feature = "guest_debug")]
+use crate::coredump::{CoredumpMemoryRegion, CoredumpMemoryRegions};
+#[cfg(feature = "guest_debug")]
+use crate::coredump::{DumpState, GuestDebuggableError};
 use crate::migration::url_to_path;
 use crate::MEMORY_MANAGER_SNAPSHOT_ID;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
-#[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml};
 use anyhow::anyhow;
 #[cfg(target_arch = "x86_64")]
@@ -18,6 +21,9 @@ use arch::{layout, RegionType};
 use devices::ioapic;
 #[cfg(target_arch = "x86_64")]
 use libc::{MAP_NORESERVE, MAP_POPULATE, MAP_SHARED, PROT_READ, PROT_WRITE};
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "guest_debug")]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi;
@@ -46,7 +52,6 @@ use vm_migration::{
     Snapshot, SnapshotDataSection, Snapshottable, Transportable, VersionMapped,
 };
 
-#[cfg(feature = "acpi")]
 pub const MEMORY_MANAGER_ACPI_SIZE: usize = 0x18;
 
 const DEFAULT_MEMORY_ZONE: &str = "mem0";
@@ -55,6 +60,9 @@ const SNAPSHOT_FILENAME: &str = "memory-ranges";
 
 #[cfg(target_arch = "x86_64")]
 const X86_64_IRQ_BASE: u32 = 5;
+
+#[cfg(target_arch = "x86_64")]
+const SGX_PAGE_SIZE: u64 = 1 << 12;
 
 const HOTPLUG_COUNT: usize = 8;
 
@@ -169,14 +177,14 @@ pub struct MemoryManager {
     log_dirty: bool, // Enable dirty logging for created RAM regions
     arch_mem_regions: Vec<ArchMemRegion>,
     ram_allocator: AddressAllocator,
+    dynamic: bool,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
     // slots that the mapping is created in.
     guest_ram_mappings: Vec<GuestRamMapping>,
 
-    #[cfg(feature = "acpi")]
-    pub acpi_address: GuestAddress,
+    pub acpi_address: Option<GuestAddress>,
 }
 
 #[derive(Debug)]
@@ -477,6 +485,7 @@ impl MemoryManager {
                     zone.hugepages,
                     zone.hugepage_size,
                     zone.host_numa_node,
+                    None,
                 )?;
 
                 // Add region to the list of regions associated with the
@@ -528,6 +537,7 @@ impl MemoryManager {
         guest_ram_mappings: &[GuestRamMapping],
         zones_config: &[MemoryZoneConfig],
         prefault: Option<bool>,
+        mut existing_memory_files: HashMap<u32, File>,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut memory_regions = Vec::new();
         let mut memory_zones = HashMap::new();
@@ -552,6 +562,7 @@ impl MemoryManager {
                         zone_config.hugepages,
                         zone_config.hugepage_size,
                         zone_config.host_numa_node,
+                        existing_memory_files.remove(&guest_ram_mapping.slot),
                     )?;
                     memory_regions.push(Arc::clone(&region));
                     if let Some(memory_zone) = memory_zones.get_mut(&guest_ram_mapping.zone_id) {
@@ -814,6 +825,7 @@ impl MemoryManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vm: Arc<dyn hypervisor::Vm>,
         config: &MemoryConfig,
@@ -821,6 +833,7 @@ impl MemoryManager {
         phys_bits: u8,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         restore_data: Option<&MemoryManagerSnapshotData>,
+        existing_memory_files: Option<HashMap<u32, File>>,
         #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         let user_provided_zones = config.size == 0;
@@ -850,8 +863,12 @@ impl MemoryManager {
             selected_slot,
             next_hotplug_slot,
         ) = if let Some(data) = restore_data {
-            let (regions, memory_zones) =
-                Self::restore_memory_regions_and_zones(&data.guest_ram_mappings, &zones, prefault)?;
+            let (regions, memory_zones) = Self::restore_memory_regions_and_zones(
+                &data.guest_ram_mappings,
+                &zones,
+                prefault,
+                existing_memory_files.unwrap_or_default(),
+            )?;
             let guest_memory =
                 GuestMemoryMmap::from_arc_regions(regions).map_err(Error::GuestMemory)?;
             let boot_guest_memory = guest_memory.clone();
@@ -936,6 +953,7 @@ impl MemoryManager {
                                 zone.hugepages,
                                 zone.hugepage_size,
                                 zone.host_numa_node,
+                                None,
                             )?;
 
                             guest_memory = guest_memory
@@ -1007,17 +1025,25 @@ impl MemoryManager {
             .ok_or(Error::CreateSystemAllocator)?,
         ));
 
-        #[cfg(feature = "acpi")]
-        let acpi_address = allocator
-            .lock()
-            .unwrap()
-            .allocate_platform_mmio_addresses(None, MEMORY_MANAGER_ACPI_SIZE as u64, None)
-            .ok_or(Error::AllocateMmioAddress)?;
-
         #[cfg(not(feature = "tdx"))]
-        let log_dirty = true;
+        let dynamic = true;
         #[cfg(feature = "tdx")]
-        let log_dirty = !tdx_enabled; // Cannot log dirty pages on a TD
+        let dynamic = !tdx_enabled;
+
+        let acpi_address = if dynamic
+            && config.hotplug_method == HotplugMethod::Acpi
+            && (config.hotplug_size.unwrap_or_default() > 0)
+        {
+            Some(
+                allocator
+                    .lock()
+                    .unwrap()
+                    .allocate_platform_mmio_addresses(None, MEMORY_MANAGER_ACPI_SIZE as u64, None)
+                    .ok_or(Error::AllocateMmioAddress)?,
+            )
+        } else {
+            None
+        };
 
         // If running on SGX the start of device area and RAM area may diverge but
         // at this point they are next to each other.
@@ -1036,7 +1062,7 @@ impl MemoryManager {
             selected_slot,
             mergeable: config.mergeable,
             allocator,
-            hotplug_method: config.hotplug_method.clone(),
+            hotplug_method: config.hotplug_method,
             boot_ram,
             current_ram,
             next_hotplug_slot,
@@ -1050,11 +1076,11 @@ impl MemoryManager {
             snapshot_memory_ranges: MemoryRangeTable::default(),
             memory_zones,
             guest_ram_mappings: Vec::new(),
-            #[cfg(feature = "acpi")]
             acpi_address,
-            log_dirty,
+            log_dirty: dynamic, // Cannot log dirty pages on a TD
             arch_mem_regions,
             ram_allocator,
+            dynamic,
         };
 
         memory_manager.allocate_address_space()?;
@@ -1090,6 +1116,7 @@ impl MemoryManager {
                 #[cfg(feature = "tdx")]
                 false,
                 Some(&mem_snapshot),
+                None,
                 #[cfg(target_arch = "x86_64")]
                 None,
             )?;
@@ -1141,18 +1168,13 @@ impl MemoryManager {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn create_ram_region(
+    fn open_memory_file(
         backing_file: &Option<PathBuf>,
         file_offset: u64,
-        start_addr: GuestAddress,
         size: usize,
-        prefault: bool,
-        shared: bool,
         hugepages: bool,
         hugepage_size: Option<u64>,
-        host_numa_node: Option<u32>,
-    ) -> Result<Arc<GuestRegionMmap>, Error> {
+    ) -> Result<(File, u64), Error> {
         let (f, f_off) = match backing_file {
             Some(ref file) => {
                 if file.is_dir() {
@@ -1213,6 +1235,28 @@ impl MemoryManager {
 
                 (f, 0)
             }
+        };
+
+        Ok((f, f_off))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_ram_region(
+        backing_file: &Option<PathBuf>,
+        file_offset: u64,
+        start_addr: GuestAddress,
+        size: usize,
+        prefault: bool,
+        shared: bool,
+        hugepages: bool,
+        hugepage_size: Option<u64>,
+        host_numa_node: Option<u32>,
+        existing_memory_file: Option<File>,
+    ) -> Result<Arc<GuestRegionMmap>, Error> {
+        let (f, f_off) = if let Some(f) = existing_memory_file {
+            (f, file_offset)
+        } else {
+            Self::open_memory_file(backing_file, file_offset, size, hugepages, hugepage_size)?
         };
 
         let mut mmap_flags = libc::MAP_NORESERVE
@@ -1290,8 +1334,7 @@ impl MemoryManager {
     // If memory hotplug is allowed, the start address needs to be aligned
     // (rounded-up) to 128MiB boundary.
     // If memory hotplug is not allowed, there is no alignment required.
-    // On x86_64, it must also start at the 64bit start.
-    #[allow(clippy::let_and_return)]
+    // And it must also start at the 64bit start.
     fn start_addr(mem_end: GuestAddress, allow_mem_hotplug: bool) -> Result<GuestAddress, Error> {
         let mut start_addr = if allow_mem_hotplug {
             GuestAddress(mem_end.0 | ((128 << 20) - 1))
@@ -1303,7 +1346,6 @@ impl MemoryManager {
             .checked_add(1)
             .ok_or(Error::GuestAddressOverFlow)?;
 
-        #[cfg(target_arch = "x86_64")]
         if mem_end < arch::layout::MEM_32BIT_RESERVED_START {
             return Ok(arch::layout::RAM_64BIT_START);
         }
@@ -1326,6 +1368,7 @@ impl MemoryManager {
             self.shared,
             self.hugepages,
             self.hugepage_size,
+            None,
             None,
         )?;
 
@@ -1439,6 +1482,11 @@ impl MemoryManager {
             userspace_addr,
             readonly,
             log_dirty,
+        );
+
+        info!(
+            "Creating userspace mapping: {:x} -> {:x} {:x}, slot {}",
+            guest_phys_addr, userspace_addr, memory_size, slot
         );
 
         self.vm
@@ -1572,12 +1620,20 @@ impl MemoryManager {
         match self.hotplug_method {
             HotplugMethod::VirtioMem => {
                 if desired_ram >= self.boot_ram {
+                    if !self.dynamic {
+                        return Ok(region);
+                    }
+
                     self.virtio_mem_resize(DEFAULT_MEMORY_ZONE, desired_ram - self.boot_ram)?;
                     self.current_ram = desired_ram;
                 }
             }
             HotplugMethod::Acpi => {
                 if desired_ram > self.current_ram {
+                    if !self.dynamic {
+                        return Ok(region);
+                    }
+
                     region =
                         Some(self.hotplug_ram_region((desired_ram - self.current_ram) as usize)?);
                     self.current_ram = desired_ram;
@@ -1617,7 +1673,7 @@ impl MemoryManager {
             if epc_section.size == 0 {
                 return Err(Error::EpcSectionSizeInvalid);
             }
-            if epc_section.size & 0x0fff != 0 {
+            if epc_section.size & (SGX_PAGE_SIZE - 1) != 0 {
                 return Err(Error::EpcSectionSizeInvalid);
             }
 
@@ -1625,8 +1681,10 @@ impl MemoryManager {
         }
 
         // Place the SGX EPC region on a 4k boundary between the RAM and the device area
-        let epc_region_start =
-            GuestAddress(((self.start_of_device_area.0 + 0xfff) / 0x1000) * 0x1000);
+        let epc_region_start = GuestAddress(
+            ((self.start_of_device_area.0 + SGX_PAGE_SIZE - 1) / SGX_PAGE_SIZE) * SGX_PAGE_SIZE,
+        );
+
         self.start_of_device_area = epc_region_start
             .checked_add(epc_region_size)
             .ok_or(Error::GuestAddressOverFlow)?;
@@ -1774,14 +1832,98 @@ impl MemoryManager {
             next_hotplug_slot: self.next_hotplug_slot,
         }
     }
+
+    pub fn memory_slot_fds(&self) -> HashMap<u32, RawFd> {
+        let mut memory_slot_fds = HashMap::new();
+        for guest_ram_mapping in &self.guest_ram_mappings {
+            let slot = guest_ram_mapping.slot;
+            let guest_memory = self.guest_memory.memory();
+            let file = guest_memory
+                .find_region(GuestAddress(guest_ram_mapping.gpa))
+                .unwrap()
+                .file_offset()
+                .unwrap()
+                .file();
+            memory_slot_fds.insert(slot, file.as_raw_fd());
+        }
+        memory_slot_fds
+    }
+
+    pub fn acpi_address(&self) -> Option<GuestAddress> {
+        self.acpi_address
+    }
+
+    pub fn num_guest_ram_mappings(&self) -> u32 {
+        self.guest_ram_mappings.len() as u32
+    }
+
+    #[cfg(feature = "guest_debug")]
+    pub fn coredump_memory_regions(&self, mem_offset: u64) -> CoredumpMemoryRegions {
+        let mut mapping_sorted_by_gpa = self.guest_ram_mappings.clone();
+        mapping_sorted_by_gpa.sort_by_key(|m| m.gpa);
+
+        let mut mem_offset_in_elf = mem_offset;
+        let mut ram_maps = BTreeMap::new();
+        for mapping in mapping_sorted_by_gpa.iter() {
+            ram_maps.insert(
+                mapping.gpa,
+                CoredumpMemoryRegion {
+                    mem_offset_in_elf,
+                    mem_size: mapping.size,
+                },
+            );
+            mem_offset_in_elf += mapping.size;
+        }
+
+        CoredumpMemoryRegions { ram_maps }
+    }
+
+    #[cfg(feature = "guest_debug")]
+    pub fn coredump_iterate_save_mem(
+        &mut self,
+        dump_state: &DumpState,
+    ) -> std::result::Result<(), GuestDebuggableError> {
+        let snapshot_memory_ranges = self
+            .memory_range_table(false)
+            .map_err(|e| GuestDebuggableError::Coredump(e.into()))?;
+
+        if snapshot_memory_ranges.is_empty() {
+            return Ok(());
+        }
+
+        let mut coredump_file = dump_state.file.as_ref().unwrap();
+
+        let guest_memory = self.guest_memory.memory();
+        let mut total_bytes: u64 = 0;
+
+        for range in snapshot_memory_ranges.regions() {
+            let mut offset: u64 = 0;
+            loop {
+                let bytes_written = guest_memory
+                    .write_to(
+                        GuestAddress(range.gpa + offset),
+                        &mut coredump_file,
+                        (range.length - offset) as usize,
+                    )
+                    .map_err(|e| GuestDebuggableError::Coredump(e.into()))?;
+                offset += bytes_written as u64;
+                total_bytes += bytes_written as u64;
+
+                if offset == range.length {
+                    break;
+                }
+            }
+        }
+
+        debug!("coredump total bytes {}", total_bytes);
+        Ok(())
+    }
 }
 
-#[cfg(feature = "acpi")]
 struct MemoryNotify {
     slot_id: usize,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for MemoryNotify {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         let object = aml::Path::new(&format!("M{:03}", self.slot_id));
@@ -1793,12 +1935,10 @@ impl Aml for MemoryNotify {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct MemorySlot {
     slot_id: usize,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for MemorySlot {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         aml::Device::new(
@@ -1842,12 +1982,10 @@ impl Aml for MemorySlot {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct MemorySlots {
     slots: usize,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for MemorySlots {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         for slot_id in 0..self.slots {
@@ -1856,12 +1994,10 @@ impl Aml for MemorySlots {
     }
 }
 
-#[cfg(feature = "acpi")]
 struct MemoryMethods {
     slots: usize,
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for MemoryMethods {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         // Add "MTFY" notification method
@@ -2004,84 +2140,96 @@ impl Aml for MemoryMethods {
     }
 }
 
-#[cfg(feature = "acpi")]
 impl Aml for MemoryManager {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
-        // Memory Hotplug Controller
-        aml::Device::new(
-            "_SB_.MHPC".into(),
-            vec![
-                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
-                &aml::Name::new("_UID".into(), &"Memory Hotplug Controller"),
-                // Mutex to protect concurrent access as we write to choose slot and then read back status
-                &aml::Mutex::new("MLCK".into(), 0),
-                &aml::Name::new(
-                    "_CRS".into(),
-                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
-                        true,
-                        self.acpi_address.0 as u64,
-                        self.acpi_address.0 + MEMORY_MANAGER_ACPI_SIZE as u64 - 1,
-                    )]),
-                ),
-                // OpRegion and Fields map MMIO range into individual field values
-                &aml::OpRegion::new(
-                    "MHPR".into(),
-                    aml::OpRegionSpace::SystemMemory,
-                    self.acpi_address.0 as usize,
-                    MEMORY_MANAGER_ACPI_SIZE,
-                ),
-                &aml::Field::new(
-                    "MHPR".into(),
-                    aml::FieldAccessType::DWord,
-                    aml::FieldUpdateRule::Preserve,
-                    vec![
-                        aml::FieldEntry::Named(*b"MHBL", 32), // Base (low 4 bytes)
-                        aml::FieldEntry::Named(*b"MHBH", 32), // Base (high 4 bytes)
-                        aml::FieldEntry::Named(*b"MHLL", 32), // Length (low 4 bytes)
-                        aml::FieldEntry::Named(*b"MHLH", 32), // Length (high 4 bytes)
-                    ],
-                ),
-                &aml::Field::new(
-                    "MHPR".into(),
-                    aml::FieldAccessType::DWord,
-                    aml::FieldUpdateRule::Preserve,
-                    vec![
-                        aml::FieldEntry::Reserved(128),
-                        aml::FieldEntry::Named(*b"MHPX", 32), // PXM
-                    ],
-                ),
-                &aml::Field::new(
-                    "MHPR".into(),
-                    aml::FieldAccessType::Byte,
-                    aml::FieldUpdateRule::WriteAsZeroes,
-                    vec![
-                        aml::FieldEntry::Reserved(160),
-                        aml::FieldEntry::Named(*b"MEN_", 1), // Enabled
-                        aml::FieldEntry::Named(*b"MINS", 1), // Inserting
-                        aml::FieldEntry::Named(*b"MRMV", 1), // Removing
-                        aml::FieldEntry::Named(*b"MEJ0", 1), // Ejecting
-                    ],
-                ),
-                &aml::Field::new(
-                    "MHPR".into(),
-                    aml::FieldAccessType::DWord,
-                    aml::FieldUpdateRule::Preserve,
-                    vec![
-                        aml::FieldEntry::Named(*b"MSEL", 32), // Selector
-                        aml::FieldEntry::Named(*b"MOEV", 32), // Event
-                        aml::FieldEntry::Named(*b"MOSC", 32), // OSC
-                    ],
-                ),
-                &MemoryMethods {
-                    slots: self.hotplug_slots.len(),
-                },
-                &MemorySlots {
-                    slots: self.hotplug_slots.len(),
-                },
-            ],
-        )
-        .append_aml_bytes(bytes);
+        if let Some(acpi_address) = self.acpi_address {
+            // Memory Hotplug Controller
+            aml::Device::new(
+                "_SB_.MHPC".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
+                    &aml::Name::new("_UID".into(), &"Memory Hotplug Controller"),
+                    // Mutex to protect concurrent access as we write to choose slot and then read back status
+                    &aml::Mutex::new("MLCK".into(), 0),
+                    &aml::Name::new(
+                        "_CRS".into(),
+                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                            aml::AddressSpaceCachable::NotCacheable,
+                            true,
+                            acpi_address.0 as u64,
+                            acpi_address.0 + MEMORY_MANAGER_ACPI_SIZE as u64 - 1,
+                        )]),
+                    ),
+                    // OpRegion and Fields map MMIO range into individual field values
+                    &aml::OpRegion::new(
+                        "MHPR".into(),
+                        aml::OpRegionSpace::SystemMemory,
+                        acpi_address.0 as usize,
+                        MEMORY_MANAGER_ACPI_SIZE,
+                    ),
+                    &aml::Field::new(
+                        "MHPR".into(),
+                        aml::FieldAccessType::DWord,
+                        aml::FieldUpdateRule::Preserve,
+                        vec![
+                            aml::FieldEntry::Named(*b"MHBL", 32), // Base (low 4 bytes)
+                            aml::FieldEntry::Named(*b"MHBH", 32), // Base (high 4 bytes)
+                            aml::FieldEntry::Named(*b"MHLL", 32), // Length (low 4 bytes)
+                            aml::FieldEntry::Named(*b"MHLH", 32), // Length (high 4 bytes)
+                        ],
+                    ),
+                    &aml::Field::new(
+                        "MHPR".into(),
+                        aml::FieldAccessType::DWord,
+                        aml::FieldUpdateRule::Preserve,
+                        vec![
+                            aml::FieldEntry::Reserved(128),
+                            aml::FieldEntry::Named(*b"MHPX", 32), // PXM
+                        ],
+                    ),
+                    &aml::Field::new(
+                        "MHPR".into(),
+                        aml::FieldAccessType::Byte,
+                        aml::FieldUpdateRule::WriteAsZeroes,
+                        vec![
+                            aml::FieldEntry::Reserved(160),
+                            aml::FieldEntry::Named(*b"MEN_", 1), // Enabled
+                            aml::FieldEntry::Named(*b"MINS", 1), // Inserting
+                            aml::FieldEntry::Named(*b"MRMV", 1), // Removing
+                            aml::FieldEntry::Named(*b"MEJ0", 1), // Ejecting
+                        ],
+                    ),
+                    &aml::Field::new(
+                        "MHPR".into(),
+                        aml::FieldAccessType::DWord,
+                        aml::FieldUpdateRule::Preserve,
+                        vec![
+                            aml::FieldEntry::Named(*b"MSEL", 32), // Selector
+                            aml::FieldEntry::Named(*b"MOEV", 32), // Event
+                            aml::FieldEntry::Named(*b"MOSC", 32), // OSC
+                        ],
+                    ),
+                    &MemoryMethods {
+                        slots: self.hotplug_slots.len(),
+                    },
+                    &MemorySlots {
+                        slots: self.hotplug_slots.len(),
+                    },
+                ],
+            )
+            .append_aml_bytes(bytes);
+        } else {
+            aml::Device::new(
+                "_SB_.MHPC".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
+                    &aml::Name::new("_UID".into(), &"Memory Hotplug Controller"),
+                    // Empty MSCN for GED
+                    &aml::Method::new("MSCN".into(), 0, true, vec![]),
+                ],
+            )
+            .append_aml_bytes(bytes);
+        }
 
         #[cfg(target_arch = "x86_64")]
         {

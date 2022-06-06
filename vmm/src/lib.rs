@@ -9,21 +9,20 @@ extern crate event_monitor;
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
-#[cfg(test)]
-#[macro_use]
-extern crate credibility;
 
 use crate::api::{
     ApiError, ApiRequest, ApiResponse, ApiResponsePayload, VmInfo, VmReceiveMigrationData,
     VmSendMigrationData, VmmPingResponse,
 };
 use crate::config::{
-    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, UserDeviceConfig,
-    VmConfig, VsockConfig,
+    add_to_config, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig,
+    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
-use crate::migration::{get_vm_snapshot, recv_vm_snapshot};
+#[cfg(feature = "guest_debug")]
+use crate::coredump::GuestDebuggable;
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+use crate::migration::get_vm_snapshot;
+use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
@@ -31,7 +30,9 @@ use libc::EFD_NONBLOCK;
 use memory_manager::MemoryManagerSnapshotData;
 use pci::PciBdf;
 use seccompiler::{apply_filter, SeccompAction};
-use serde::ser::{Serialize, SerializeStruct, Serializer};
+use serde::ser::{SerializeStruct, Serializer};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
@@ -47,15 +48,19 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
-#[cfg(feature = "acpi")]
 mod acpi;
 pub mod api;
 mod clone3;
 pub mod config;
+#[cfg(feature = "guest_debug")]
+mod coredump;
 pub mod cpu;
 pub mod device_manager;
 pub mod device_tree;
+#[cfg(feature = "gdb")]
+mod gdb;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
@@ -144,6 +149,20 @@ pub enum Error {
     /// Error binding API server socket
     #[error("Error creation API server's socket {0:?}")]
     CreateApiServerSocket(#[source] io::Error),
+
+    #[cfg(feature = "gdb")]
+    #[error("Failed to start the GDB thread: {0}")]
+    GdbThreadSpawn(io::Error),
+
+    /// GDB request receive error
+    #[cfg(feature = "gdb")]
+    #[error("Error receiving GDB request: {0}")]
+    GdbRequestRecv(#[source] RecvError),
+
+    /// GDB response send error
+    #[cfg(feature = "gdb")]
+    #[error("Error sending GDB request: {0}")]
+    GdbResponseSend(#[source] SendError<gdb::GdbResponse>),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -154,6 +173,7 @@ pub enum EpollDispatch {
     Reset = 1,
     Api = 2,
     ActivateVirtioDevices = 3,
+    Debug = 4,
     Unknown,
 }
 
@@ -165,6 +185,7 @@ impl From<u64> for EpollDispatch {
             1 => Reset,
             2 => Api,
             3 => ActivateVirtioDevices,
+            4 => Debug,
             _ => Unknown,
         }
     }
@@ -178,6 +199,7 @@ impl EpollContext {
     pub fn new() -> result::Result<EpollContext, io::Error> {
         let epoll_fd = epoll::create(true)?;
         // Use 'File' to enforce closing on 'epoll_fd'
+        // SAFETY: the epoll_fd returned by epoll::create is valid and owned by us.
         let epoll_file = unsafe { File::from_raw_fd(epoll_fd) };
 
         Ok(EpollContext { epoll_file })
@@ -225,6 +247,7 @@ impl Serialize for PciDeviceInfo {
     }
 }
 
+#[allow(unused_variables)]
 #[allow(clippy::too_many_arguments)]
 pub fn start_vmm_thread(
     vmm_version: String,
@@ -233,9 +256,19 @@ pub fn start_vmm_thread(
     api_event: EventFd,
     api_sender: Sender<ApiRequest>,
     api_receiver: Receiver<ApiRequest>,
+    #[cfg(feature = "gdb")] debug_path: Option<PathBuf>,
+    #[cfg(feature = "gdb")] debug_event: EventFd,
+    #[cfg(feature = "gdb")] vm_debug_event: EventFd,
     seccomp_action: &SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
 ) -> Result<thread::JoinHandle<Result<()>>> {
+    #[cfg(feature = "gdb")]
+    let (gdb_sender, gdb_receiver) = std::sync::mpsc::channel();
+    #[cfg(feature = "gdb")]
+    let gdb_debug_event = debug_event.try_clone().map_err(Error::EventFdClone)?;
+    #[cfg(feature = "gdb")]
+    let gdb_vm_debug_event = vm_debug_event.try_clone().map_err(Error::EventFdClone)?;
+
     let http_api_event = api_event.try_clone().map_err(Error::EventFdClone)?;
 
     // Retrieve seccomp filter
@@ -257,12 +290,20 @@ pub fn start_vmm_thread(
                 let mut vmm = Vmm::new(
                     vmm_version.to_string(),
                     api_event,
+                    #[cfg(feature = "gdb")]
+                    debug_event,
+                    #[cfg(feature = "gdb")]
+                    vm_debug_event,
                     vmm_seccomp_action,
                     hypervisor,
                     exit_evt,
                 )?;
 
-                vmm.control_loop(Arc::new(api_receiver))
+                vmm.control_loop(
+                    Arc::new(api_receiver),
+                    #[cfg(feature = "gdb")]
+                    Arc::new(gdb_receiver),
+                )
             })
             .map_err(Error::VmmThreadSpawn)?
     };
@@ -285,6 +326,16 @@ pub fn start_vmm_thread(
             exit_evt,
         )?;
     }
+
+    #[cfg(feature = "gdb")]
+    if let Some(debug_path) = debug_path {
+        let target = gdb::GdbStub::new(gdb_sender, gdb_debug_event, gdb_vm_debug_event);
+        thread::Builder::new()
+            .name("gdb".to_owned())
+            .spawn(move || gdb::gdb_thread(target, &debug_path))
+            .map_err(Error::GdbThreadSpawn)?;
+    }
+
     Ok(thread)
 }
 
@@ -292,7 +343,7 @@ pub fn start_vmm_thread(
 struct VmMigrationConfig {
     vm_config: Arc<Mutex<VmConfig>>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-    common_cpuid: hypervisor::CpuId,
+    common_cpuid: hypervisor::x86_64::CpuId,
     memory_manager_data: MemoryManagerSnapshotData,
 }
 
@@ -301,6 +352,10 @@ pub struct Vmm {
     exit_evt: EventFd,
     reset_evt: EventFd,
     api_evt: EventFd,
+    #[cfg(feature = "gdb")]
+    debug_evt: EventFd,
+    #[cfg(feature = "gdb")]
+    vm_debug_evt: EventFd,
     version: String,
     vm: Option<Vm>,
     vm_config: Option<Arc<Mutex<VmConfig>>>,
@@ -313,6 +368,8 @@ impl Vmm {
     fn new(
         vmm_version: String,
         api_evt: EventFd,
+        #[cfg(feature = "gdb")] debug_evt: EventFd,
+        #[cfg(feature = "gdb")] vm_debug_evt: EventFd,
         seccomp_action: SeccompAction,
         hypervisor: Arc<dyn hypervisor::Hypervisor>,
         exit_evt: EventFd,
@@ -337,11 +394,20 @@ impl Vmm {
             .add_event(&api_evt, EpollDispatch::Api)
             .map_err(Error::Epoll)?;
 
+        #[cfg(feature = "gdb")]
+        epoll
+            .add_event(&debug_evt, EpollDispatch::Debug)
+            .map_err(Error::Epoll)?;
+
         Ok(Vmm {
             epoll,
             exit_evt,
             reset_evt,
             api_evt,
+            #[cfg(feature = "gdb")]
+            debug_evt,
+            #[cfg(feature = "gdb")]
+            vm_debug_evt,
             version: vmm_version,
             vm: None,
             vm_config: None,
@@ -372,6 +438,11 @@ impl Vmm {
         if self.vm.is_none() {
             let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
             let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+            #[cfg(feature = "gdb")]
+            let vm_debug_evt = self
+                .vm_debug_evt
+                .try_clone()
+                .map_err(VmError::EventFdClone)?;
             let activate_evt = self
                 .activate_evt
                 .try_clone()
@@ -382,6 +453,8 @@ impl Vmm {
                     Arc::clone(vm_config),
                     exit_evt,
                     reset_evt,
+                    #[cfg(feature = "gdb")]
+                    vm_debug_evt,
                     &self.seccomp_action,
                     self.hypervisor.clone(),
                     activate_evt,
@@ -438,22 +511,31 @@ impl Vmm {
 
         let source_url = restore_cfg.source_url.as_path().to_str();
         if source_url.is_none() {
-            return Err(VmError::RestoreSourceUrlPathToStr);
+            return Err(VmError::InvalidRestoreSourceUrl);
         }
         // Safe to unwrap as we checked it was Some(&str).
         let source_url = source_url.unwrap();
 
-        let snapshot = recv_vm_snapshot(source_url).map_err(VmError::Restore)?;
+        let vm_config = Arc::new(Mutex::new(
+            recv_vm_config(source_url).map_err(VmError::Restore)?,
+        ));
+        let snapshot = recv_vm_state(source_url).map_err(VmError::Restore)?;
+        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        self.vm_check_cpuid_compatibility(&vm_snapshot.config, &vm_snapshot.common_cpuid)
+        self.vm_check_cpuid_compatibility(&vm_config, &vm_snapshot.common_cpuid)
             .map_err(VmError::Restore)?;
 
-        self.vm_config = Some(Arc::clone(&vm_snapshot.config));
+        self.vm_config = Some(Arc::clone(&vm_config));
 
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+        #[cfg(feature = "gdb")]
+        let debug_evt = self
+            .vm_debug_evt
+            .try_clone()
+            .map_err(VmError::EventFdClone)?;
         let activate_evt = self
             .activate_evt
             .try_clone()
@@ -461,8 +543,11 @@ impl Vmm {
 
         let vm = Vm::new_from_snapshot(
             &snapshot,
+            vm_config,
             exit_evt,
             reset_evt,
+            #[cfg(feature = "gdb")]
+            debug_evt,
             Some(source_url),
             restore_cfg.prefault,
             &self.seccomp_action,
@@ -479,6 +564,15 @@ impl Vmm {
         }
     }
 
+    #[cfg(feature = "guest_debug")]
+    fn vm_coredump(&mut self, destination_url: &str) -> result::Result<(), VmError> {
+        if let Some(ref mut vm) = self.vm {
+            vm.coredump(destination_url).map_err(VmError::Coredump)
+        } else {
+            Err(VmError::VmNotRunning)
+        }
+    }
+
     fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
         if let Some(ref mut vm) = self.vm.take() {
             vm.shutdown()
@@ -488,59 +582,62 @@ impl Vmm {
     }
 
     fn vm_reboot(&mut self) -> result::Result<(), VmError> {
-        // Without ACPI, a reset is equivalent to a shutdown
-        // On AArch64, before ACPI is supported, we simply jump over this check and continue to reset.
-        #[cfg(all(target_arch = "x86_64", not(feature = "acpi")))]
-        {
-            if self.vm.is_some() {
-                self.exit_evt.write(1).unwrap();
-                return Ok(());
-            }
+        // First we stop the current VM
+        let (config, serial_pty, console_pty, console_resize_pipe) =
+            if let Some(mut vm) = self.vm.take() {
+                let config = vm.get_config();
+                let serial_pty = vm.serial_pty();
+                let console_pty = vm.console_pty();
+                let console_resize_pipe = vm
+                    .console_resize_pipe()
+                    .as_ref()
+                    .map(|pipe| pipe.try_clone().unwrap());
+                vm.shutdown()?;
+                (config, serial_pty, console_pty, console_resize_pipe)
+            } else {
+                return Err(VmError::VmNotCreated);
+            };
+
+        let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
+        let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
+        #[cfg(feature = "gdb")]
+        let debug_evt = self
+            .vm_debug_evt
+            .try_clone()
+            .map_err(VmError::EventFdClone)?;
+        let activate_evt = self
+            .activate_evt
+            .try_clone()
+            .map_err(VmError::EventFdClone)?;
+
+        // The Linux kernel fires off an i8042 reset after doing the ACPI reset so there may be
+        // an event sitting in the shared reset_evt. Without doing this we get very early reboots
+        // during the boot process.
+        if self.reset_evt.read().is_ok() {
+            warn!("Spurious second reset event received. Ignoring.");
         }
 
-        // First we stop the current VM and create a new one.
-        if let Some(ref mut vm) = self.vm {
-            let config = vm.get_config();
-            let serial_pty = vm.serial_pty();
-            let console_pty = vm.console_pty();
-            let console_resize_pipe = vm
-                .console_resize_pipe()
-                .as_ref()
-                .map(|pipe| pipe.try_clone().unwrap());
-            self.vm_shutdown()?;
+        // Then we create the new VM
+        let mut vm = Vm::new(
+            config,
+            exit_evt,
+            reset_evt,
+            #[cfg(feature = "gdb")]
+            debug_evt,
+            &self.seccomp_action,
+            self.hypervisor.clone(),
+            activate_evt,
+            serial_pty,
+            console_pty,
+            console_resize_pipe,
+        )?;
 
-            let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
-            let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
-            let activate_evt = self
-                .activate_evt
-                .try_clone()
-                .map_err(VmError::EventFdClone)?;
+        // And we boot it
+        vm.boot()?;
 
-            // The Linux kernel fires off an i8042 reset after doing the ACPI reset so there may be
-            // an event sitting in the shared reset_evt. Without doing this we get very early reboots
-            // during the boot process.
-            if self.reset_evt.read().is_ok() {
-                warn!("Spurious second reset event received. Ignoring.");
-            }
-            self.vm = Some(Vm::new(
-                config,
-                exit_evt,
-                reset_evt,
-                &self.seccomp_action,
-                self.hypervisor.clone(),
-                activate_evt,
-                serial_pty,
-                console_pty,
-                console_resize_pipe,
-            )?);
-        }
+        self.vm = Some(vm);
 
-        // Then we start the new VM.
-        if let Some(ref mut vm) = self.vm {
-            vm.boot()
-        } else {
-            Err(VmError::VmNotCreated)
-        }
+        Ok(())
     }
 
     fn vm_info(&self) -> result::Result<VmInfo, VmError> {
@@ -606,6 +703,8 @@ impl Vmm {
         desired_ram: Option<u64>,
         desired_balloon: Option<u64>,
     ) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
         if let Some(ref mut vm) = self.vm {
             if let Err(e) = vm.resize(desired_vcpus, desired_ram, desired_balloon) {
                 error!("Error when resizing VM: {:?}", e);
@@ -614,11 +713,25 @@ impl Vmm {
                 Ok(())
             }
         } else {
-            Err(VmError::VmNotRunning)
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            if let Some(desired_vcpus) = desired_vcpus {
+                config.cpus.boot_vcpus = desired_vcpus;
+            }
+            if let Some(desired_ram) = desired_ram {
+                config.memory.size = desired_ram;
+            }
+            if let Some(desired_balloon) = desired_balloon {
+                if let Some(balloon_config) = &mut config.balloon {
+                    balloon_config.size = desired_balloon;
+                }
+            }
+            Ok(())
         }
     }
 
     fn vm_resize_zone(&mut self, id: String, desired_ram: u64) -> result::Result<(), VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
         if let Some(ref mut vm) = self.vm {
             if let Err(e) = vm.resize_zone(id, desired_ram) {
                 error!("Error when resizing VM: {:?}", e);
@@ -627,34 +740,78 @@ impl Vmm {
                 Ok(())
             }
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by setting the new desired ram.
+            let memory_config = &mut self.vm_config.as_ref().unwrap().lock().unwrap().memory;
+
+            if let Some(zones) = &mut memory_config.zones {
+                for zone in zones.iter_mut() {
+                    if zone.id == id {
+                        zone.size = desired_ram;
+                        return Ok(());
+                    }
+                }
+            }
+
+            error!("Could not find the memory zone {} for the resize", id);
+            Err(VmError::ResizeZone)
         }
     }
 
-    fn vm_add_device(&mut self, device_cfg: DeviceConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_device(
+        &mut self,
+        device_cfg: DeviceConfig,
+    ) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.devices, device_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_device(device_cfg).map_err(|e| {
                 error!("Error when adding new device to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.devices, device_cfg);
+            Ok(None)
         }
     }
 
     fn vm_add_user_device(
         &mut self,
         device_cfg: UserDeviceConfig,
-    ) -> result::Result<Vec<u8>, VmError> {
+    ) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.user_devices, device_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_user_device(device_cfg).map_err(|e| {
                 error!("Error when adding new user device to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.user_devices, device_cfg);
+            Ok(None)
         }
     }
 
@@ -671,73 +828,176 @@ impl Vmm {
         }
     }
 
-    fn vm_add_disk(&mut self, disk_cfg: DiskConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_disk(&mut self, disk_cfg: DiskConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.disks, disk_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_disk(disk_cfg).map_err(|e| {
                 error!("Error when adding new disk to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.disks, disk_cfg);
+            Ok(None)
         }
     }
 
-    fn vm_add_fs(&mut self, fs_cfg: FsConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_fs(&mut self, fs_cfg: FsConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.fs, fs_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_fs(fs_cfg).map_err(|e| {
                 error!("Error when adding new fs to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.fs, fs_cfg);
+            Ok(None)
         }
     }
 
-    fn vm_add_pmem(&mut self, pmem_cfg: PmemConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_pmem(&mut self, pmem_cfg: PmemConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.pmem, pmem_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_pmem(pmem_cfg).map_err(|e| {
                 error!("Error when adding new pmem device to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.pmem, pmem_cfg);
+            Ok(None)
         }
     }
 
-    fn vm_add_net(&mut self, net_cfg: NetConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_net(&mut self, net_cfg: NetConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.net, net_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_net(net_cfg).map_err(|e| {
                 error!("Error when adding new network device to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.net, net_cfg);
+            Ok(None)
         }
     }
 
-    fn vm_add_vsock(&mut self, vsock_cfg: VsockConfig) -> result::Result<Vec<u8>, VmError> {
+    fn vm_add_vdpa(&mut self, vdpa_cfg: VdpaConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.vdpa, vdpa_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_vdpa(vdpa_cfg).map_err(|e| {
+                error!("Error when adding new vDPA device to the VM: {:?}", e);
+                e
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.vdpa, vdpa_cfg);
+            Ok(None)
+        }
+    }
+
+    fn vm_add_vsock(&mut self, vsock_cfg: VsockConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+
+            if config.vsock.is_some() {
+                return Err(VmError::TooManyVsockDevices);
+            }
+
+            config.vsock = Some(vsock_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
         if let Some(ref mut vm) = self.vm {
             let info = vm.add_vsock(vsock_cfg).map_err(|e| {
                 error!("Error when adding new vsock device to the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
-            Err(VmError::VmNotRunning)
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            config.vsock = Some(vsock_cfg);
+            Ok(None)
         }
     }
 
-    fn vm_counters(&mut self) -> result::Result<Vec<u8>, VmError> {
+    fn vm_counters(&mut self) -> result::Result<Option<Vec<u8>>, VmError> {
         if let Some(ref mut vm) = self.vm {
             let info = vm.counters().map_err(|e| {
                 error!("Error when getting counters from the VM: {:?}", e);
                 e
             })?;
-            serde_json::to_vec(&info).map_err(VmError::SerializeJson)
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
         } else {
             Err(VmError::VmNotRunning)
         }
@@ -755,15 +1015,14 @@ impl Vmm {
         &mut self,
         req: &Request,
         socket: &mut T,
+        existing_memory_files: Option<HashMap<u32, File>>,
     ) -> std::result::Result<Vm, MigratableError>
     where
         T: Read + Write,
     {
         // Read in config data along with memory manager data
-        let mut data = Vec::with_capacity(req.length() as usize);
-        unsafe {
-            data.set_len(req.length() as usize);
-        }
+        let mut data: Vec<u8> = Vec::new();
+        data.resize_with(req.length() as usize, Default::default);
         socket
             .read_exact(&mut data)
             .map_err(MigratableError::MigrateSocket)?;
@@ -785,6 +1044,10 @@ impl Vmm {
         let reset_evt = self.reset_evt.try_clone().map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error cloning reset EventFd: {}", e))
         })?;
+        #[cfg(feature = "gdb")]
+        let debug_evt = self.vm_debug_evt.try_clone().map_err(|e| {
+            MigratableError::MigrateReceive(anyhow!("Error cloning debug EventFd: {}", e))
+        })?;
         let activate_evt = self.activate_evt.try_clone().map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error cloning activate EventFd: {}", e))
         })?;
@@ -794,10 +1057,13 @@ impl Vmm {
             self.vm_config.clone().unwrap(),
             exit_evt,
             reset_evt,
+            #[cfg(feature = "gdb")]
+            debug_evt,
             &self.seccomp_action,
             self.hypervisor.clone(),
             activate_evt,
             &vm_migration_config.memory_manager_data,
+            existing_memory_files,
         )
         .map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error creating VM from snapshot: {:?}", e))
@@ -818,20 +1084,14 @@ impl Vmm {
         T: Read + Write,
     {
         // Read in state data
-        let mut data = Vec::with_capacity(req.length() as usize);
-        unsafe {
-            data.set_len(req.length() as usize);
-        }
+        let mut data: Vec<u8> = Vec::new();
+        data.resize_with(req.length() as usize, Default::default);
         socket
             .read_exact(&mut data)
             .map_err(MigratableError::MigrateSocket)?;
         let snapshot: Snapshot = serde_json::from_slice(&data).map_err(|e| {
             MigratableError::MigrateReceive(anyhow!("Error deserialising snapshot: {}", e))
         })?;
-
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        vm.load_clock_from_snapshot(&snapshot)
-            .map_err(|e| MigratableError::MigrateReceive(anyhow!("Error resume clock: {:?}", e)))?;
 
         // Create VM
         vm.restore(snapshot).map_err(|e| {
@@ -896,7 +1156,7 @@ impl Vmm {
 
         let mut started = false;
         let mut vm: Option<Vm> = None;
-
+        let mut existing_memory_files = None;
         loop {
             let req = Request::read_from(&mut socket)?;
             match req.command() {
@@ -915,7 +1175,11 @@ impl Vmm {
                         Response::error().write_to(&mut socket)?;
                         continue;
                     }
-                    vm = Some(self.vm_receive_config(&req, &mut socket)?);
+                    vm = Some(self.vm_receive_config(
+                        &req,
+                        &mut socket,
+                        existing_memory_files.take(),
+                    )?);
                 }
                 Command::State => {
                     info!("State Command Received");
@@ -946,6 +1210,34 @@ impl Vmm {
                         warn!("Configuration not sent yet");
                         Response::error().write_to(&mut socket)?;
                     }
+                }
+                Command::MemoryFd => {
+                    info!("MemoryFd Command Received");
+
+                    if !started {
+                        warn!("Migration not started yet");
+                        Response::error().write_to(&mut socket)?;
+                        continue;
+                    }
+
+                    let mut buf = [0u8; 4];
+                    let (_, file) = socket.recv_with_fd(&mut buf).map_err(|e| {
+                        MigratableError::MigrateReceive(anyhow!(
+                            "Error receiving slot from socket: {}",
+                            e
+                        ))
+                    })?;
+
+                    if existing_memory_files.is_none() {
+                        existing_memory_files = Some(HashMap::default())
+                    }
+
+                    if let Some(ref mut existing_memory_files) = existing_memory_files {
+                        let slot = u32::from_le_bytes(buf);
+                        existing_memory_files.insert(slot, file.unwrap());
+                    }
+
+                    Response::ok().write_to(&mut socket)?;
                 }
                 Command::Complete => {
                     info!("Complete Command Received");
@@ -1040,6 +1332,7 @@ impl Vmm {
                 None,
                 None,
                 phys_bits,
+                #[cfg(feature = "kvm")]
                 vm_config.lock().unwrap().cpus.kvm_hyperv,
                 #[cfg(feature = "tdx")]
                 tdx_enabled,
@@ -1048,6 +1341,10 @@ impl Vmm {
                 MigratableError::MigrateReceive(anyhow!("Error generating common cpuid': {:?}", e))
             })?
         };
+
+        if send_data_migration.local {
+            vm.send_memory_fds(&mut socket)?;
+        }
 
         let vm_migration_config = VmMigrationConfig {
             vm_config,
@@ -1070,42 +1367,52 @@ impl Vmm {
             )));
         }
 
-        // Start logging dirty pages
-        vm.start_dirty_log()?;
+        // Let every Migratable object know about the migration being started.
+        vm.start_migration()?;
 
-        // Send memory table
-        let table = vm.memory_range_table()?;
-        Request::memory(table.length())
-            .write_to(&mut socket)
-            .unwrap();
-        table.write_to(&mut socket)?;
-        // And then the memory itself
-        vm.send_memory_regions(&table, &mut socket)?;
-        let res = Response::read_from(&mut socket)?;
-        if res.status() != Status::Ok {
-            warn!("Error during memory migration");
-            Request::abandon().write_to(&mut socket)?;
-            Response::read_from(&mut socket).ok();
-            return Err(MigratableError::MigrateSend(anyhow!(
-                "Error during memory migration"
-            )));
-        }
+        if send_data_migration.local {
+            // Now pause VM
+            vm.pause()?;
+        } else {
+            // Start logging dirty pages
+            vm.start_dirty_log()?;
 
-        // Try at most 5 passes of dirty memory sending
-        const MAX_DIRTY_MIGRATIONS: usize = 5;
-        for i in 0..MAX_DIRTY_MIGRATIONS {
-            info!("Dirty memory migration {} of {}", i, MAX_DIRTY_MIGRATIONS);
-            if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
-                break;
+            // Send memory table
+            let table = vm.memory_range_table()?;
+            Request::memory(table.length())
+                .write_to(&mut socket)
+                .unwrap();
+            table.write_to(&mut socket)?;
+            // And then the memory itself
+            vm.send_memory_regions(&table, &mut socket)?;
+            let res = Response::read_from(&mut socket)?;
+            if res.status() != Status::Ok {
+                warn!("Error during memory migration");
+                Request::abandon().write_to(&mut socket)?;
+                Response::read_from(&mut socket).ok();
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Error during memory migration"
+                )));
             }
+
+            // Try at most 5 passes of dirty memory sending
+            const MAX_DIRTY_MIGRATIONS: usize = 5;
+            for i in 0..MAX_DIRTY_MIGRATIONS {
+                info!("Dirty memory migration {} of {}", i, MAX_DIRTY_MIGRATIONS);
+                if !Self::vm_maybe_send_dirty_pages(vm, &mut socket)? {
+                    break;
+                }
+            }
+
+            // Now pause VM
+            vm.pause()?;
+
+            // Send last batch of dirty pages
+            Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
+
+            // Stop logging dirty pages
+            vm.stop_dirty_log()?;
         }
-
-        // Now pause VM
-        vm.pause()?;
-
-        // Send last batch of dirty pages
-        Self::vm_maybe_send_dirty_pages(vm, &mut socket)?;
-
         // Capture snapshot and send it
         let vm_snapshot = vm.snapshot()?;
         let snapshot_data = serde_json::to_vec(&vm_snapshot).unwrap();
@@ -1137,12 +1444,7 @@ impl Vmm {
         info!("Migration complete");
 
         // Let every Migratable object know about the migration being complete
-        vm.complete_migration()?;
-
-        // Stop logging dirty pages
-        vm.stop_dirty_log()?;
-
-        Ok(())
+        vm.complete_migration()
     }
 
     fn vm_send_migration(
@@ -1150,9 +1452,25 @@ impl Vmm {
         send_data_migration: VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
         info!(
-            "Sending migration: destination_url = {}",
-            send_data_migration.destination_url
+            "Sending migration: destination_url = {}, local = {}",
+            send_data_migration.destination_url, send_data_migration.local
         );
+
+        if !self
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .memory
+            .shared
+            && send_data_migration.local
+        {
+            return Err(MigratableError::MigrateSend(anyhow!(
+                "Local migration requires shared memory enabled"
+            )));
+        }
+
         if let Some(vm) = self.vm.as_mut() {
             Self::send_migration(
                 vm,
@@ -1193,7 +1511,7 @@ impl Vmm {
     fn vm_check_cpuid_compatibility(
         &self,
         src_vm_config: &Arc<Mutex<VmConfig>>,
-        src_vm_cpuid: &hypervisor::CpuId,
+        src_vm_cpuid: &hypervisor::x86_64::CpuId,
     ) -> result::Result<(), MigratableError> {
         // We check the `CPUID` compatibility of between the source vm and destination, which is
         // mostly about feature compatibility and "topology/sgx" leaves are not relevant.
@@ -1208,6 +1526,7 @@ impl Vmm {
                 None,
                 None,
                 phys_bits,
+                #[cfg(feature = "kvm")]
                 vm_config.cpus.kvm_hyperv,
                 #[cfg(feature = "tdx")]
                 tdx_enabled,
@@ -1224,7 +1543,11 @@ impl Vmm {
         })
     }
 
-    fn control_loop(&mut self, api_receiver: Arc<Receiver<ApiRequest>>) -> Result<()> {
+    fn control_loop(
+        &mut self,
+        api_receiver: Arc<Receiver<ApiRequest>>,
+        #[cfg(feature = "gdb")] gdb_receiver: Arc<Receiver<gdb::GdbRequest>>,
+    ) -> Result<()> {
         const EPOLL_EVENTS_LEN: usize = 100;
 
         let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); EPOLL_EVENTS_LEN];
@@ -1374,6 +1697,15 @@ impl Vmm {
 
                                 sender.send(response).map_err(Error::ApiResponseSend)?;
                             }
+                            #[cfg(feature = "guest_debug")]
+                            ApiRequest::VmCoredump(coredump_data, sender) => {
+                                let response = self
+                                    .vm_coredump(&coredump_data.destination_url)
+                                    .map_err(ApiError::VmCoredump)
+                                    .map(|_| ApiResponsePayload::Empty);
+
+                                sender.send(response).map_err(Error::ApiResponseSend)?;
+                            }
                             ApiRequest::VmmShutdown(sender) => {
                                 let response = self
                                     .vmm_shutdown()
@@ -1454,6 +1786,13 @@ impl Vmm {
                                     .map(ApiResponsePayload::VmAction);
                                 sender.send(response).map_err(Error::ApiResponseSend)?;
                             }
+                            ApiRequest::VmAddVdpa(add_vdpa_data, sender) => {
+                                let response = self
+                                    .vm_add_vdpa(add_vdpa_data.as_ref().clone())
+                                    .map_err(ApiError::VmAddVdpa)
+                                    .map(ApiResponsePayload::VmAction);
+                                sender.send(response).map_err(Error::ApiResponseSend)?;
+                            }
                             ApiRequest::VmAddVsock(add_vsock_data, sender) => {
                                 let response = self
                                     .vm_add_vsock(add_vsock_data.as_ref().clone())
@@ -1466,7 +1805,6 @@ impl Vmm {
                                     .vm_counters()
                                     .map_err(ApiError::VmInfo)
                                     .map(ApiResponsePayload::VmAction);
-
                                 sender.send(response).map_err(Error::ApiResponseSend)?;
                             }
                             ApiRequest::VmReceiveMigration(receive_migration_data, sender) => {
@@ -1493,6 +1831,28 @@ impl Vmm {
                             }
                         }
                     }
+                    #[cfg(feature = "gdb")]
+                    EpollDispatch::Debug => {
+                        // Consume the event.
+                        self.debug_evt.read().map_err(Error::EventFdRead)?;
+
+                        // Read from the API receiver channel
+                        let gdb_request = gdb_receiver.recv().map_err(Error::GdbRequestRecv)?;
+
+                        let response = if let Some(ref mut vm) = self.vm {
+                            vm.debug_request(&gdb_request.payload, gdb_request.cpu_id)
+                        } else {
+                            Err(VmError::VmNotRunning)
+                        }
+                        .map_err(gdb::Error::Vm);
+
+                        gdb_request
+                            .sender
+                            .send(response)
+                            .map_err(Error::GdbResponseSend)?;
+                    }
+                    #[cfg(not(feature = "gdb"))]
+                    EpollDispatch::Debug => {}
                 }
             }
         }
@@ -1504,3 +1864,474 @@ impl Vmm {
 const CPU_MANAGER_SNAPSHOT_ID: &str = "cpu-manager";
 const MEMORY_MANAGER_SNAPSHOT_ID: &str = "memory-manager";
 const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use config::{
+        CmdlineConfig, ConsoleConfig, ConsoleOutputMode, CpusConfig, HotplugMethod, KernelConfig,
+        MemoryConfig, RngConfig, VmConfig,
+    };
+
+    fn create_dummy_vmm() -> Vmm {
+        Vmm::new(
+            "dummy".to_string(),
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            #[cfg(feature = "gdb")]
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            #[cfg(feature = "gdb")]
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            SeccompAction::Allow,
+            hypervisor::new().unwrap(),
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn create_dummy_vm_config() -> Arc<Mutex<VmConfig>> {
+        Arc::new(Mutex::new(VmConfig {
+            cpus: CpusConfig {
+                boot_vcpus: 1,
+                max_vcpus: 1,
+                topology: None,
+                kvm_hyperv: false,
+                max_phys_bits: 46,
+                affinity: None,
+                features: config::CpuFeatures::default(),
+            },
+            memory: MemoryConfig {
+                size: 536_870_912,
+                mergeable: false,
+                hotplug_method: HotplugMethod::Acpi,
+                hotplug_size: None,
+                hotplugged_size: None,
+                shared: true,
+                hugepages: false,
+                hugepage_size: None,
+                prefault: false,
+                zones: None,
+            },
+            kernel: Some(KernelConfig {
+                path: PathBuf::from("/path/to/kernel"),
+            }),
+            initramfs: None,
+            cmdline: CmdlineConfig {
+                args: String::from(""),
+            },
+            disks: None,
+            net: None,
+            rng: RngConfig {
+                src: PathBuf::from("/dev/urandom"),
+                iommu: false,
+            },
+            balloon: None,
+            fs: None,
+            pmem: None,
+            serial: ConsoleConfig {
+                file: None,
+                mode: ConsoleOutputMode::Null,
+                iommu: false,
+            },
+            console: ConsoleConfig {
+                file: None,
+                mode: ConsoleOutputMode::Tty,
+                iommu: false,
+            },
+            devices: None,
+            user_devices: None,
+            vdpa: None,
+            vsock: None,
+            iommu: false,
+            #[cfg(target_arch = "x86_64")]
+            sgx_epc: None,
+            numa: None,
+            watchdog: false,
+            #[cfg(feature = "tdx")]
+            tdx: None,
+            #[cfg(feature = "gdb")]
+            gdb: false,
+            platform: None,
+        }))
+    }
+
+    #[test]
+    fn test_vmm_vm_create() {
+        let mut vmm = create_dummy_vmm();
+        let config = create_dummy_vm_config();
+
+        assert!(matches!(vmm.vm_create(config.clone()), Ok(())));
+        assert!(matches!(
+            vmm.vm_create(config),
+            Err(VmError::VmAlreadyCreated)
+        ));
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_device() {
+        let mut vmm = create_dummy_vmm();
+        let device_config = DeviceConfig::parse("path=/path/to/device").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_device(device_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .devices
+            .is_none());
+
+        let result = vmm.vm_add_device(device_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .devices
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .devices
+                .clone()
+                .unwrap()[0],
+            device_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_user_device() {
+        let mut vmm = create_dummy_vmm();
+        let user_device_config =
+            UserDeviceConfig::parse("socket=/path/to/socket,id=8,pci_segment=2").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_user_device(user_device_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .user_devices
+            .is_none());
+
+        let result = vmm.vm_add_user_device(user_device_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .user_devices
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .user_devices
+                .clone()
+                .unwrap()[0],
+            user_device_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_disk() {
+        let mut vmm = create_dummy_vmm();
+        let disk_config = DiskConfig::parse("path=/path/to_file").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_disk(disk_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .disks
+            .is_none());
+
+        let result = vmm.vm_add_disk(disk_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .disks
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .disks
+                .clone()
+                .unwrap()[0],
+            disk_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_fs() {
+        let mut vmm = create_dummy_vmm();
+        let fs_config = FsConfig::parse("tag=mytag,socket=/tmp/sock").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_fs(fs_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm.vm_config.as_ref().unwrap().lock().unwrap().fs.is_none());
+
+        let result = vmm.vm_add_fs(fs_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .fs
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .fs
+                .clone()
+                .unwrap()[0],
+            fs_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_pmem() {
+        let mut vmm = create_dummy_vmm();
+        let pmem_config = PmemConfig::parse("file=/tmp/pmem,size=128M").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_pmem(pmem_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .pmem
+            .is_none());
+
+        let result = vmm.vm_add_pmem(pmem_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .pmem
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .pmem
+                .clone()
+                .unwrap()[0],
+            pmem_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_net() {
+        let mut vmm = create_dummy_vmm();
+        let net_config = NetConfig::parse(
+            "mac=de:ad:be:ef:12:34,host_mac=12:34:de:ad:be:ef,vhost_user=true,socket=/tmp/sock",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_net(net_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .net
+            .is_none());
+
+        let result = vmm.vm_add_net(net_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .net
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .net
+                .clone()
+                .unwrap()[0],
+            net_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_vdpa() {
+        let mut vmm = create_dummy_vmm();
+        let vdpa_config = VdpaConfig::parse("path=/dev/vhost-vdpa,num_queues=2").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_vdpa(vdpa_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .vdpa
+            .is_none());
+
+        let result = vmm.vm_add_vdpa(vdpa_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .vdpa
+                .clone()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .vdpa
+                .clone()
+                .unwrap()[0],
+            vdpa_config
+        );
+    }
+
+    #[test]
+    fn test_vmm_vm_cold_add_vsock() {
+        let mut vmm = create_dummy_vmm();
+        let vsock_config = VsockConfig::parse("socket=/tmp/sock,cid=1,iommu=on").unwrap();
+
+        assert!(matches!(
+            vmm.vm_add_vsock(vsock_config.clone()),
+            Err(VmError::VmNotCreated)
+        ));
+
+        let _ = vmm.vm_create(create_dummy_vm_config());
+        assert!(vmm
+            .vm_config
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .vsock
+            .is_none());
+
+        let result = vmm.vm_add_vsock(vsock_config.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            vmm.vm_config
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .vsock
+                .clone()
+                .unwrap(),
+            vsock_config
+        );
+    }
+}

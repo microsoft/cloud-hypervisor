@@ -19,15 +19,19 @@ use std::mem::size_of;
 use std::ops::Bound::Included;
 use std::os::unix::io::AsRawFd;
 use std::result;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Mutex, RwLock};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use virtio_queue::{AccessPlatform, DescriptorChain, Queue};
+use virtio_queue::{DescriptorChain, Queue};
 use vm_device::dma_mapping::ExternalDmaMapping;
-use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError};
+use vm_memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError,
+    GuestMemoryLoadGuard,
+};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
 /// Queues sizes
@@ -65,7 +69,6 @@ const VIRTIO_IOMMU_F_BYPASS: u32 = 3;
 const VIRTIO_IOMMU_F_PROBE: u32 = 4;
 #[allow(unused)]
 const VIRTIO_IOMMU_F_MMIO: u32 = 5;
-#[allow(unused)]
 const VIRTIO_IOMMU_F_BYPASS_CONFIG: u32 = 6;
 
 // Support 2MiB and 4KiB page sizes.
@@ -79,8 +82,6 @@ struct VirtioIommuRange32 {
     end: u32,
 }
 
-unsafe impl ByteValued for VirtioIommuRange32 {}
-
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(packed)]
 #[allow(dead_code)]
@@ -88,8 +89,6 @@ struct VirtioIommuRange64 {
     start: u64,
     end: u64,
 }
-
-unsafe impl ByteValued for VirtioIommuRange64 {}
 
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(packed)]
@@ -102,8 +101,6 @@ struct VirtioIommuConfig {
     bypass: u8,
     _reserved: [u8; 7],
 }
-
-unsafe impl ByteValued for VirtioIommuConfig {}
 
 /// Virtio IOMMU request type
 const VIRTIO_IOMMU_T_ATTACH: u8 = 1;
@@ -118,8 +115,6 @@ struct VirtioIommuReqHead {
     type_: u8,
     _reserved: [u8; 3],
 }
-
-unsafe impl ByteValued for VirtioIommuReqHead {}
 
 /// Virtio IOMMU request status
 const VIRTIO_IOMMU_S_OK: u8 = 0;
@@ -148,18 +143,17 @@ struct VirtioIommuReqTail {
     _reserved: [u8; 3],
 }
 
-unsafe impl ByteValued for VirtioIommuReqTail {}
-
 /// ATTACH request
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(packed)]
 struct VirtioIommuReqAttach {
     domain: u32,
     endpoint: u32,
-    _reserved: [u8; 8],
+    flags: u32,
+    _reserved: [u8; 4],
 }
 
-unsafe impl ByteValued for VirtioIommuReqAttach {}
+const VIRTIO_IOMMU_ATTACH_F_BYPASS: u32 = 1;
 
 /// DETACH request
 #[derive(Copy, Clone, Debug, Default)]
@@ -169,8 +163,6 @@ struct VirtioIommuReqDetach {
     endpoint: u32,
     _reserved: [u8; 8],
 }
-
-unsafe impl ByteValued for VirtioIommuReqDetach {}
 
 /// Virtio IOMMU request MAP flags
 #[allow(unused)]
@@ -194,8 +186,6 @@ struct VirtioIommuReqMap {
     _flags: u32,
 }
 
-unsafe impl ByteValued for VirtioIommuReqMap {}
-
 /// UNMAP request
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(packed)]
@@ -205,8 +195,6 @@ struct VirtioIommuReqUnmap {
     virt_end: u64,
     _reserved: [u8; 4],
 }
-
-unsafe impl ByteValued for VirtioIommuReqUnmap {}
 
 /// Virtio IOMMU request PROBE types
 #[allow(unused)]
@@ -224,8 +212,6 @@ struct VirtioIommuReqProbe {
     _reserved: [u64; 8],
 }
 
-unsafe impl ByteValued for VirtioIommuReqProbe {}
-
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(packed)]
 #[allow(dead_code)]
@@ -233,8 +219,6 @@ struct VirtioIommuProbeProperty {
     type_: u16,
     length: u16,
 }
-
-unsafe impl ByteValued for VirtioIommuProbeProperty {}
 
 /// Virtio IOMMU request PROBE property RESV_MEM subtypes
 #[allow(unused)]
@@ -250,8 +234,6 @@ struct VirtioIommuProbeResvMem {
     start: u64,
     end: u64,
 }
-
-unsafe impl ByteValued for VirtioIommuProbeResvMem {}
 
 /// Virtio IOMMU fault flags
 #[allow(unused)]
@@ -284,6 +266,19 @@ struct VirtioIommuFault {
     address: u64,
 }
 
+// SAFETY: these data structures only contain integers and have no implicit padding
+unsafe impl ByteValued for VirtioIommuRange32 {}
+unsafe impl ByteValued for VirtioIommuRange64 {}
+unsafe impl ByteValued for VirtioIommuConfig {}
+unsafe impl ByteValued for VirtioIommuReqHead {}
+unsafe impl ByteValued for VirtioIommuReqTail {}
+unsafe impl ByteValued for VirtioIommuReqAttach {}
+unsafe impl ByteValued for VirtioIommuReqDetach {}
+unsafe impl ByteValued for VirtioIommuReqMap {}
+unsafe impl ByteValued for VirtioIommuReqUnmap {}
+unsafe impl ByteValued for VirtioIommuReqProbe {}
+unsafe impl ByteValued for VirtioIommuProbeProperty {}
+unsafe impl ByteValued for VirtioIommuProbeResvMem {}
 unsafe impl ByteValued for VirtioIommuFault {}
 
 #[derive(Debug)]
@@ -306,8 +301,16 @@ enum Error {
     InvalidDetachRequest,
     /// Guest sent us invalid MAP request.
     InvalidMapRequest,
+    /// Invalid to map because the domain is in bypass mode.
+    InvalidMapRequestBypassDomain,
+    /// Invalid to map because the domain is missing.
+    InvalidMapRequestMissingDomain,
     /// Guest sent us invalid UNMAP request.
     InvalidUnmapRequest,
+    /// Invalid to unmap because the domain is in bypass mode.
+    InvalidUnmapRequestBypassDomain,
+    /// Invalid to unmap because the domain is missing.
+    InvalidUnmapRequestMissingDomain,
     /// Guest sent us invalid PROBE request.
     InvalidProbeRequest,
     /// Failed to performing external mapping.
@@ -328,7 +331,19 @@ impl Display for Error {
             InvalidAttachRequest => write!(f, "invalid attach request"),
             InvalidDetachRequest => write!(f, "invalid detach request"),
             InvalidMapRequest => write!(f, "invalid map request"),
+            InvalidMapRequestBypassDomain => {
+                write!(f, "invalid map request because domain in bypass mode")
+            }
+            InvalidMapRequestMissingDomain => {
+                write!(f, "invalid map request because missing domain")
+            }
             InvalidUnmapRequest => write!(f, "invalid unmap request"),
+            InvalidUnmapRequestBypassDomain => {
+                write!(f, "invalid unmap request because domain in bypass mode")
+            }
+            InvalidUnmapRequestMissingDomain => {
+                write!(f, "invalid unmap request because missing domain")
+            }
             InvalidProbeRequest => write!(f, "invalid probe request"),
             UnexpectedReadOnlyDescriptor => write!(f, "unexpected read-only descriptor"),
             UnexpectedWriteOnlyDescriptor => write!(f, "unexpected write-only descriptor"),
@@ -350,10 +365,9 @@ impl Request {
     // is created based on the information provided from the guest driver for
     // virtio-iommu (giving the link device_id <=> domain).
     fn parse(
-        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
         mapping: &Arc<IommuMapping>,
         ext_mapping: &BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
-        ext_domain_mapping: &mut BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
         msi_iova_space: (u64, u64),
     ) -> result::Result<usize, Error> {
         let desc = desc_chain
@@ -389,162 +403,230 @@ impl Request {
 
         // Create the reply
         let mut reply: Vec<u8> = Vec::new();
+        let mut status = VIRTIO_IOMMU_S_OK;
+        let mut hdr_len = 0;
 
-        let hdr_len = match req_head.type_ {
-            VIRTIO_IOMMU_T_ATTACH => {
-                if desc_size_left != size_of::<VirtioIommuReqAttach>() {
-                    return Err(Error::InvalidAttachRequest);
+        let result = (|| {
+            match req_head.type_ {
+                VIRTIO_IOMMU_T_ATTACH => {
+                    if desc_size_left != size_of::<VirtioIommuReqAttach>() {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidAttachRequest);
+                    }
+
+                    let req: VirtioIommuReqAttach = desc_chain
+                        .memory()
+                        .read_obj(req_addr as GuestAddress)
+                        .map_err(Error::GuestMemory)?;
+                    debug!("Attach request {:?}", req);
+
+                    // Copy the value to use it as a proper reference.
+                    let domain_id = req.domain;
+                    let endpoint = req.endpoint;
+                    let bypass =
+                        (req.flags & VIRTIO_IOMMU_ATTACH_F_BYPASS) == VIRTIO_IOMMU_ATTACH_F_BYPASS;
+
+                    // Add endpoint associated with specific domain
+                    mapping
+                        .endpoints
+                        .write()
+                        .unwrap()
+                        .insert(endpoint, domain_id);
+
+                    // Add new domain with no mapping if the entry didn't exist yet
+                    let mut domains = mapping.domains.write().unwrap();
+                    let domain = Domain {
+                        mappings: BTreeMap::new(),
+                        bypass,
+                    };
+                    domains.entry(domain_id).or_insert_with(|| domain);
                 }
+                VIRTIO_IOMMU_T_DETACH => {
+                    if desc_size_left != size_of::<VirtioIommuReqDetach>() {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidDetachRequest);
+                    }
 
-                let req: VirtioIommuReqAttach = desc_chain
-                    .memory()
-                    .read_obj(req_addr as GuestAddress)
-                    .map_err(Error::GuestMemory)?;
-                debug!("Attach request {:?}", req);
+                    let req: VirtioIommuReqDetach = desc_chain
+                        .memory()
+                        .read_obj(req_addr as GuestAddress)
+                        .map_err(Error::GuestMemory)?;
+                    debug!("Detach request {:?}", req);
 
-                // Copy the value to use it as a proper reference.
-                let domain = req.domain;
-                let endpoint = req.endpoint;
+                    // Copy the value to use it as a proper reference.
+                    let domain_id = req.domain;
+                    let endpoint = req.endpoint;
 
-                // Add endpoint associated with specific domain
-                mapping.endpoints.write().unwrap().insert(endpoint, domain);
+                    // Remove endpoint associated with specific domain
+                    mapping.endpoints.write().unwrap().remove(&endpoint);
 
-                // If the endpoint is part of the list of devices with an
-                // external mapping, insert a new entry for the corresponding
-                // domain, with the same reference to the trait.
-                if let Some(map) = ext_mapping.get(&endpoint) {
-                    ext_domain_mapping.insert(domain, map.clone());
+                    // After all endpoints have been successfully detached from a
+                    // domain, the domain can be removed. This means we must remove
+                    // the mappings associated with this domain.
+                    if mapping
+                        .endpoints
+                        .write()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, &d)| d == domain_id)
+                        .count()
+                        == 0
+                    {
+                        mapping.domains.write().unwrap().remove(&domain_id);
+                    }
                 }
+                VIRTIO_IOMMU_T_MAP => {
+                    if desc_size_left != size_of::<VirtioIommuReqMap>() {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidMapRequest);
+                    }
 
-                // Add new domain with no mapping if the entry didn't exist yet
-                let mut mappings = mapping.mappings.write().unwrap();
-                mappings.entry(domain).or_insert_with(BTreeMap::new);
+                    let req: VirtioIommuReqMap = desc_chain
+                        .memory()
+                        .read_obj(req_addr as GuestAddress)
+                        .map_err(Error::GuestMemory)?;
+                    debug!("Map request {:?}", req);
 
-                0
+                    // Copy the value to use it as a proper reference.
+                    let domain_id = req.domain;
+
+                    if let Some(domain) = mapping.domains.read().unwrap().get(&domain_id) {
+                        if domain.bypass {
+                            status = VIRTIO_IOMMU_S_INVAL;
+                            return Err(Error::InvalidMapRequestBypassDomain);
+                        }
+                    } else {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidMapRequestMissingDomain);
+                    }
+
+                    // Find the list of endpoints attached to the given domain.
+                    let endpoints: Vec<u32> = mapping
+                        .endpoints
+                        .write()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, &d)| d == domain_id)
+                        .map(|(&e, _)| e)
+                        .collect();
+
+                    // Trigger external mapping if necessary.
+                    for endpoint in endpoints {
+                        if let Some(ext_map) = ext_mapping.get(&endpoint) {
+                            let size = req.virt_end - req.virt_start + 1;
+                            ext_map
+                                .map(req.virt_start, req.phys_start, size)
+                                .map_err(Error::ExternalMapping)?;
+                        }
+                    }
+
+                    // Add new mapping associated with the domain
+                    mapping
+                        .domains
+                        .write()
+                        .unwrap()
+                        .get_mut(&domain_id)
+                        .unwrap()
+                        .mappings
+                        .insert(
+                            req.virt_start,
+                            Mapping {
+                                gpa: req.phys_start,
+                                size: req.virt_end - req.virt_start + 1,
+                            },
+                        );
+                }
+                VIRTIO_IOMMU_T_UNMAP => {
+                    if desc_size_left != size_of::<VirtioIommuReqUnmap>() {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidUnmapRequest);
+                    }
+
+                    let req: VirtioIommuReqUnmap = desc_chain
+                        .memory()
+                        .read_obj(req_addr as GuestAddress)
+                        .map_err(Error::GuestMemory)?;
+                    debug!("Unmap request {:?}", req);
+
+                    // Copy the value to use it as a proper reference.
+                    let domain_id = req.domain;
+                    let virt_start = req.virt_start;
+
+                    if let Some(domain) = mapping.domains.read().unwrap().get(&domain_id) {
+                        if domain.bypass {
+                            status = VIRTIO_IOMMU_S_INVAL;
+                            return Err(Error::InvalidUnmapRequestBypassDomain);
+                        }
+                    } else {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidUnmapRequestMissingDomain);
+                    }
+
+                    // Find the list of endpoints attached to the given domain.
+                    let endpoints: Vec<u32> = mapping
+                        .endpoints
+                        .write()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, &d)| d == domain_id)
+                        .map(|(&e, _)| e)
+                        .collect();
+
+                    // Trigger external unmapping if necessary.
+                    for endpoint in endpoints {
+                        if let Some(ext_map) = ext_mapping.get(&endpoint) {
+                            let size = req.virt_end - virt_start + 1;
+                            ext_map
+                                .unmap(virt_start, size)
+                                .map_err(Error::ExternalUnmapping)?;
+                        }
+                    }
+
+                    // Remove mapping associated with the domain
+                    mapping
+                        .domains
+                        .write()
+                        .unwrap()
+                        .get_mut(&domain_id)
+                        .unwrap()
+                        .mappings
+                        .remove(&virt_start);
+                }
+                VIRTIO_IOMMU_T_PROBE => {
+                    if desc_size_left != size_of::<VirtioIommuReqProbe>() {
+                        status = VIRTIO_IOMMU_S_INVAL;
+                        return Err(Error::InvalidProbeRequest);
+                    }
+
+                    let req: VirtioIommuReqProbe = desc_chain
+                        .memory()
+                        .read_obj(req_addr as GuestAddress)
+                        .map_err(Error::GuestMemory)?;
+                    debug!("Probe request {:?}", req);
+
+                    let probe_prop = VirtioIommuProbeProperty {
+                        type_: VIRTIO_IOMMU_PROBE_T_RESV_MEM,
+                        length: size_of::<VirtioIommuProbeResvMem>() as u16,
+                    };
+                    reply.extend_from_slice(probe_prop.as_slice());
+
+                    let resv_mem = VirtioIommuProbeResvMem {
+                        subtype: VIRTIO_IOMMU_RESV_MEM_T_MSI,
+                        start: msi_iova_start,
+                        end: msi_iova_end,
+                        ..Default::default()
+                    };
+                    reply.extend_from_slice(resv_mem.as_slice());
+
+                    hdr_len = PROBE_PROP_SIZE;
+                }
+                _ => {
+                    status = VIRTIO_IOMMU_S_INVAL;
+                    return Err(Error::InvalidRequest);
+                }
             }
-            VIRTIO_IOMMU_T_DETACH => {
-                if desc_size_left != size_of::<VirtioIommuReqDetach>() {
-                    return Err(Error::InvalidDetachRequest);
-                }
-
-                let req: VirtioIommuReqDetach = desc_chain
-                    .memory()
-                    .read_obj(req_addr as GuestAddress)
-                    .map_err(Error::GuestMemory)?;
-                debug!("Detach request {:?}", req);
-
-                // Copy the value to use it as a proper reference.
-                let domain = req.domain;
-                let endpoint = req.endpoint;
-
-                // If the endpoint is part of the list of devices with an
-                // external mapping, remove the entry for the corresponding
-                // domain.
-                if ext_mapping.contains_key(&endpoint) {
-                    ext_domain_mapping.remove(&domain);
-                }
-
-                // Remove endpoint associated with specific domain
-                mapping.endpoints.write().unwrap().remove(&endpoint);
-
-                0
-            }
-            VIRTIO_IOMMU_T_MAP => {
-                if desc_size_left != size_of::<VirtioIommuReqMap>() {
-                    return Err(Error::InvalidMapRequest);
-                }
-
-                let req: VirtioIommuReqMap = desc_chain
-                    .memory()
-                    .read_obj(req_addr as GuestAddress)
-                    .map_err(Error::GuestMemory)?;
-                debug!("Map request {:?}", req);
-
-                // Copy the value to use it as a proper reference.
-                let domain = req.domain;
-
-                // Trigger external mapping if necessary.
-                if let Some(ext_map) = ext_domain_mapping.get(&domain) {
-                    let size = req.virt_end - req.virt_start + 1;
-                    ext_map
-                        .map(req.virt_start, req.phys_start, size)
-                        .map_err(Error::ExternalMapping)?;
-                }
-
-                // Add new mapping associated with the domain
-                if let Some(entry) = mapping.mappings.write().unwrap().get_mut(&domain) {
-                    entry.insert(
-                        req.virt_start,
-                        Mapping {
-                            gpa: req.phys_start,
-                            size: req.virt_end - req.virt_start + 1,
-                        },
-                    );
-                } else {
-                    return Err(Error::InvalidMapRequest);
-                }
-
-                0
-            }
-            VIRTIO_IOMMU_T_UNMAP => {
-                if desc_size_left != size_of::<VirtioIommuReqUnmap>() {
-                    return Err(Error::InvalidUnmapRequest);
-                }
-
-                let req: VirtioIommuReqUnmap = desc_chain
-                    .memory()
-                    .read_obj(req_addr as GuestAddress)
-                    .map_err(Error::GuestMemory)?;
-                debug!("Unmap request {:?}", req);
-
-                // Copy the value to use it as a proper reference.
-                let domain = req.domain;
-                let virt_start = req.virt_start;
-
-                // Trigger external unmapping if necessary.
-                if let Some(ext_map) = ext_domain_mapping.get(&domain) {
-                    let size = req.virt_end - virt_start + 1;
-                    ext_map
-                        .unmap(virt_start, size)
-                        .map_err(Error::ExternalUnmapping)?;
-                }
-
-                // Add new mapping associated with the domain
-                if let Some(entry) = mapping.mappings.write().unwrap().get_mut(&domain) {
-                    entry.remove(&virt_start);
-                }
-
-                0
-            }
-            VIRTIO_IOMMU_T_PROBE => {
-                if desc_size_left != size_of::<VirtioIommuReqProbe>() {
-                    return Err(Error::InvalidProbeRequest);
-                }
-
-                let req: VirtioIommuReqProbe = desc_chain
-                    .memory()
-                    .read_obj(req_addr as GuestAddress)
-                    .map_err(Error::GuestMemory)?;
-                debug!("Probe request {:?}", req);
-
-                let probe_prop = VirtioIommuProbeProperty {
-                    type_: VIRTIO_IOMMU_PROBE_T_RESV_MEM,
-                    length: size_of::<VirtioIommuProbeResvMem>() as u16,
-                };
-                reply.extend_from_slice(probe_prop.as_slice());
-
-                let resv_mem = VirtioIommuProbeResvMem {
-                    subtype: VIRTIO_IOMMU_RESV_MEM_T_MSI,
-                    start: msi_iova_start,
-                    end: msi_iova_end,
-                    ..Default::default()
-                };
-                reply.extend_from_slice(resv_mem.as_slice());
-
-                PROBE_PROP_SIZE
-            }
-            _ => return Err(Error::InvalidRequest),
-        };
+            Ok(())
+        })();
 
         let status_desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
 
@@ -558,15 +640,20 @@ impl Request {
         }
 
         let tail = VirtioIommuReqTail {
-            status: VIRTIO_IOMMU_S_OK,
+            status,
             ..Default::default()
         };
         reply.extend_from_slice(tail.as_slice());
 
+        // Make sure we return the result of the request to the guest before
+        // we return a potential error internally.
         desc_chain
             .memory()
             .write_slice(reply.as_slice(), status_desc.addr())
             .map_err(Error::GuestMemory)?;
+
+        // Return the error if the result was not Ok().
+        result?;
 
         Ok((hdr_len as usize) + size_of::<VirtioIommuReqTail>())
     }
@@ -579,8 +666,7 @@ struct IommuEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     mapping: Arc<IommuMapping>,
-    ext_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
-    ext_domain_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
+    ext_mapping: Arc<Mutex<BTreeMap<u32, Arc<dyn ExternalDmaMapping>>>>,
     msi_iova_space: (u64, u64),
 }
 
@@ -592,8 +678,7 @@ impl IommuEpollHandler {
             let len = match Request::parse(
                 &mut desc_chain,
                 &self.mapping,
-                &self.ext_mapping,
-                &mut self.ext_domain_mapping,
+                &self.ext_mapping.lock().unwrap(),
                 self.msi_iova_space,
             ) {
                 Ok(len) => len as u32,
@@ -617,12 +702,9 @@ impl IommuEpollHandler {
         false
     }
 
-    fn signal_used_queue(
-        &self,
-        queue: &Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
-    ) -> result::Result<(), DeviceError> {
+    fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(queue))
+            .trigger(VirtioInterruptType::Queue(queue_index))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -652,7 +734,7 @@ impl EpollHelperHandler for IommuEpollHandler {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
                 } else if self.request_queue() {
-                    if let Err(e) = self.signal_used_queue(&self.queues[0]) {
+                    if let Err(e) = self.signal_used_queue(0) {
                         error!("Failed to signal used queue: {:?}", e);
                         return true;
                     }
@@ -663,7 +745,7 @@ impl EpollHelperHandler for IommuEpollHandler {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
                 } else if self.event_queue() {
-                    if let Err(e) = self.signal_used_queue(&self.queues[1]) {
+                    if let Err(e) = self.signal_used_queue(1) {
                         error!("Failed to signal used queue: {:?}", e);
                         return true;
                     }
@@ -684,36 +766,86 @@ struct Mapping {
     size: u64,
 }
 
+#[derive(Clone, Debug)]
+struct Domain {
+    mappings: BTreeMap<u64, Mapping>,
+    bypass: bool,
+}
+
 #[derive(Debug)]
 pub struct IommuMapping {
     // Domain related to an endpoint.
     endpoints: Arc<RwLock<BTreeMap<u32, u32>>>,
-    // List of mappings per domain.
-    mappings: Arc<RwLock<BTreeMap<u32, BTreeMap<u64, Mapping>>>>,
+    // Information related to each domain.
+    domains: Arc<RwLock<BTreeMap<u32, Domain>>>,
+    // Global flag indicating if endpoints that are not attached to any domain
+    // are in bypass mode.
+    bypass: AtomicBool,
 }
 
 impl DmaRemapping for IommuMapping {
-    fn translate(&self, id: u32, addr: u64) -> std::result::Result<u64, std::io::Error> {
-        debug!("Translate addr 0x{:x}", addr);
-        if let Some(domain) = self.endpoints.read().unwrap().get(&id) {
-            if let Some(mapping) = self.mappings.read().unwrap().get(domain) {
+    fn translate_gva(&self, id: u32, addr: u64) -> std::result::Result<u64, std::io::Error> {
+        debug!("Translate GVA addr 0x{:x}", addr);
+        if let Some(domain_id) = self.endpoints.read().unwrap().get(&id) {
+            if let Some(domain) = self.domains.read().unwrap().get(domain_id) {
+                // Directly return identity mapping in case the domain is in
+                // bypass mode.
+                if domain.bypass {
+                    return Ok(addr);
+                }
+
                 let range_start = if VIRTIO_IOMMU_PAGE_SIZE_MASK > addr {
                     0
                 } else {
                     addr - VIRTIO_IOMMU_PAGE_SIZE_MASK
                 };
-                for (&key, &value) in mapping.range((Included(&range_start), Included(&addr))) {
+                for (&key, &value) in domain
+                    .mappings
+                    .range((Included(&range_start), Included(&addr)))
+                {
                     if addr >= key && addr < key + value.size {
                         let new_addr = addr - key + value.gpa;
-                        debug!("Into new_addr 0x{:x}", new_addr);
+                        debug!("Into GPA addr 0x{:x}", new_addr);
                         return Ok(new_addr);
                     }
                 }
             }
+        } else if self.bypass.load(Ordering::Acquire) {
+            return Ok(addr);
         }
 
-        debug!("Into same addr...");
-        Ok(addr)
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to translate GVA addr 0x{:x}", addr),
+        ))
+    }
+
+    fn translate_gpa(&self, id: u32, addr: u64) -> std::result::Result<u64, std::io::Error> {
+        debug!("Translate GPA addr 0x{:x}", addr);
+        if let Some(domain_id) = self.endpoints.read().unwrap().get(&id) {
+            if let Some(domain) = self.domains.read().unwrap().get(domain_id) {
+                // Directly return identity mapping in case the domain is in
+                // bypass mode.
+                if domain.bypass {
+                    return Ok(addr);
+                }
+
+                for (&key, &value) in domain.mappings.iter() {
+                    if addr >= value.gpa && addr < value.gpa + value.size {
+                        let new_addr = addr - value.gpa + key;
+                        debug!("Into GVA addr 0x{:x}", new_addr);
+                        return Ok(new_addr);
+                    }
+                }
+            }
+        } else if self.bypass.load(Ordering::Acquire) {
+            return Ok(addr);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to translate GPA addr 0x{:x}", addr),
+        ))
     }
 }
 
@@ -730,8 +862,11 @@ impl AccessPlatformMapping {
 }
 
 impl AccessPlatform for AccessPlatformMapping {
-    fn translate(&self, base: u64, _size: u64) -> std::result::Result<u64, std::io::Error> {
-        self.mapping.translate(self.id, base)
+    fn translate_gva(&self, base: u64, _size: u64) -> std::result::Result<u64, std::io::Error> {
+        self.mapping.translate_gva(self.id, base)
+    }
+    fn translate_gpa(&self, base: u64, _size: u64) -> std::result::Result<u64, std::io::Error> {
+        self.mapping.translate_gpa(self.id, base)
     }
 }
 
@@ -740,18 +875,21 @@ pub struct Iommu {
     id: String,
     config: VirtioIommuConfig,
     mapping: Arc<IommuMapping>,
-    ext_mapping: BTreeMap<u32, Arc<dyn ExternalDmaMapping>>,
+    ext_mapping: Arc<Mutex<BTreeMap<u32, Arc<dyn ExternalDmaMapping>>>>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
     msi_iova_space: (u64, u64),
 }
 
+type EndpointsState = Vec<(u32, u32)>;
+type DomainsState = Vec<(u32, (Vec<(u64, Mapping)>, bool))>;
+
 #[derive(Versionize)]
 struct IommuState {
     avail_features: u64,
     acked_features: u64,
-    endpoints: Vec<(u32, u32)>,
-    mappings: Vec<(u32, Vec<(u64, Mapping)>)>,
+    endpoints: EndpointsState,
+    domains: DomainsState,
 }
 
 impl VersionMapped for IommuState {}
@@ -771,7 +909,8 @@ impl Iommu {
 
         let mapping = Arc::new(IommuMapping {
             endpoints: Arc::new(RwLock::new(BTreeMap::new())),
-            mappings: Arc::new(RwLock::new(BTreeMap::new())),
+            domains: Arc::new(RwLock::new(BTreeMap::new())),
+            bypass: AtomicBool::new(true),
         });
 
         Ok((
@@ -782,13 +921,14 @@ impl Iommu {
                     queue_sizes: QUEUE_SIZES.to_vec(),
                     avail_features: 1u64 << VIRTIO_F_VERSION_1
                         | 1u64 << VIRTIO_IOMMU_F_MAP_UNMAP
-                        | 1u64 << VIRTIO_IOMMU_F_PROBE,
+                        | 1u64 << VIRTIO_IOMMU_F_PROBE
+                        | 1u64 << VIRTIO_IOMMU_F_BYPASS_CONFIG,
                     paused_sync: Some(Arc::new(Barrier::new(2))),
                     ..Default::default()
                 },
                 config,
                 mapping: mapping.clone(),
-                ext_mapping: BTreeMap::new(),
+                ext_mapping: Arc::new(Mutex::new(BTreeMap::new())),
                 seccomp_action,
                 exit_evt,
                 msi_iova_space,
@@ -809,14 +949,14 @@ impl Iommu {
                 .clone()
                 .into_iter()
                 .collect(),
-            mappings: self
+            domains: self
                 .mapping
-                .mappings
+                .domains
                 .read()
                 .unwrap()
                 .clone()
                 .into_iter()
-                .map(|(k, v)| (k, v.into_iter().collect()))
+                .map(|(k, v)| (k, (v.mappings.into_iter().collect(), v.bypass)))
                 .collect(),
         }
     }
@@ -825,16 +965,38 @@ impl Iommu {
         self.common.avail_features = state.avail_features;
         self.common.acked_features = state.acked_features;
         *(self.mapping.endpoints.write().unwrap()) = state.endpoints.clone().into_iter().collect();
-        *(self.mapping.mappings.write().unwrap()) = state
-            .mappings
+        *(self.mapping.domains.write().unwrap()) = state
+            .domains
             .clone()
             .into_iter()
-            .map(|(k, v)| (k, v.into_iter().collect()))
+            .map(|(k, v)| {
+                (
+                    k,
+                    Domain {
+                        mappings: v.0.into_iter().collect(),
+                        bypass: v.1,
+                    },
+                )
+            })
             .collect();
     }
 
+    fn update_bypass(&mut self) {
+        // Use bypass from config if VIRTIO_IOMMU_F_BYPASS_CONFIG has been negotiated
+        if !self
+            .common
+            .feature_acked(VIRTIO_IOMMU_F_BYPASS_CONFIG.into())
+        {
+            return;
+        }
+
+        let bypass = self.config.bypass == 1;
+        info!("Updating bypass mode to {}", bypass);
+        self.mapping.bypass.store(bypass, Ordering::Release);
+    }
+
     pub fn add_external_mapping(&mut self, device_id: u32, mapping: Arc<dyn ExternalDmaMapping>) {
-        self.ext_mapping.insert(device_id, mapping);
+        self.ext_mapping.lock().unwrap().insert(device_id, mapping);
     }
 }
 
@@ -868,6 +1030,24 @@ impl VirtioDevice for Iommu {
         self.read_config_from_slice(self.config.as_slice(), offset, data);
     }
 
+    fn write_config(&mut self, offset: u64, data: &[u8]) {
+        // The "bypass" field is the only mutable field
+        let bypass_offset =
+            (&self.config.bypass as *const _ as u64) - (&self.config as *const _ as u64);
+        if offset != bypass_offset || data.len() != std::mem::size_of_val(&self.config.bypass) {
+            error!(
+                "Attempt to write to read-only field: offset {:x} length {}",
+                offset,
+                data.len()
+            );
+            return;
+        }
+
+        self.config.bypass = data[0];
+
+        self.update_bypass();
+    }
+
     fn activate(
         &mut self,
         _mem: GuestMemoryAtomic<GuestMemoryMmap>,
@@ -885,7 +1065,6 @@ impl VirtioDevice for Iommu {
             pause_evt,
             mapping: self.mapping.clone(),
             ext_mapping: self.ext_mapping.clone(),
-            ext_domain_mapping: BTreeMap::new(),
             msi_iova_space: self.msi_iova_space,
         };
 

@@ -28,6 +28,7 @@ use virtio_queue::Queue;
 use vm_memory::{ByteValued, Bytes, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
@@ -69,7 +70,7 @@ impl Default for VirtioConsoleConfig {
     }
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioConsoleConfig {}
 
 struct ConsoleEpollHandler {
@@ -85,6 +86,7 @@ struct ConsoleEpollHandler {
     resize_pipe: Option<File>,
     kill_evt: EventFd,
     pause_evt: EventFd,
+    access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 pub enum Endpoint {
@@ -145,10 +147,12 @@ impl ConsoleEpollHandler {
             let desc = desc_chain.next().unwrap();
             let len = cmp::min(desc.len() as u32, in_buffer.len() as u32);
             let source_slice = in_buffer.drain(..len as usize).collect::<Vec<u8>>();
-            if let Err(e) = desc_chain
-                .memory()
-                .write_slice(&source_slice[..], desc.addr())
-            {
+
+            if let Err(e) = desc_chain.memory().write_slice(
+                &source_slice[..],
+                desc.addr()
+                    .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+            ) {
                 error!("Failed to write slice: {:?}", e);
                 avail_iter.go_to_previous_position();
                 break;
@@ -184,9 +188,12 @@ impl ConsoleEpollHandler {
         for mut desc_chain in trans_queue.iter().unwrap() {
             let desc = desc_chain.next().unwrap();
             if let Some(ref mut out) = self.endpoint.out_file() {
-                let _ = desc_chain
-                    .memory()
-                    .write_to(desc.addr(), out, desc.len() as usize);
+                let _ = desc_chain.memory().write_to(
+                    desc.addr()
+                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                    out,
+                    desc.len() as usize,
+                );
                 let _ = out.flush();
             }
             used_desc_heads[used_count] = (desc_chain.head_index(), desc.len());
@@ -199,9 +206,9 @@ impl ConsoleEpollHandler {
         used_count > 0
     }
 
-    fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
+    fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(&self.queues[0]))
+            .trigger(VirtioInterruptType::Queue(queue_index))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -239,7 +246,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
                 } else if self.process_input_queue() {
-                    if let Err(e) = self.signal_used_queue() {
+                    if let Err(e) = self.signal_used_queue(0) {
                         error!("Failed to signal used queue: {:?}", e);
                         return true;
                     }
@@ -249,8 +256,11 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                 if let Err(e) = self.output_queue_evt.read() {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
-                } else {
-                    self.process_output_queue();
+                } else if self.process_output_queue() {
+                    if let Err(e) = self.signal_used_queue(1) {
+                        error!("Failed to signal used queue: {:?}", e);
+                        return true;
+                    }
                 }
             }
             INPUT_EVENT => {
@@ -258,7 +268,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                     error!("Failed to get input event: {:?}", e);
                     return true;
                 } else if self.process_input_queue() {
-                    if let Err(e) = self.signal_used_queue() {
+                    if let Err(e) = self.signal_used_queue(0) {
                         error!("Failed to signal used queue: {:?}", e);
                         return true;
                     }
@@ -268,10 +278,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                 if let Err(e) = self.config_evt.read() {
                     error!("Failed to get config event: {:?}", e);
                     return true;
-                } else if let Err(e) = self
-                    .interrupt_cb
-                    .trigger(&VirtioInterruptType::Config, None)
-                {
+                } else if let Err(e) = self.interrupt_cb.trigger(VirtioInterruptType::Config) {
                     error!("Failed to signal console driver: {:?}", e);
                     return true;
                 }
@@ -293,7 +300,7 @@ impl EpollHelperHandler for ConsoleEpollHandler {
                     }
 
                     if self.process_input_queue() {
-                        if let Err(e) = self.signal_used_queue() {
+                        if let Err(e) = self.signal_used_queue(0) {
                             error!("Failed to signal used queue: {:?}", e);
                             return true;
                         }
@@ -492,7 +499,7 @@ impl VirtioDevice for Console {
             .store(self.common.acked_features, Ordering::Relaxed);
 
         if self.common.feature_acked(VIRTIO_CONSOLE_F_SIZE) {
-            if let Err(e) = interrupt_cb.trigger(&VirtioInterruptType::Config, None) {
+            if let Err(e) = interrupt_cb.trigger(VirtioInterruptType::Config) {
                 error!("Failed to signal console driver: {:?}", e);
             }
         }
@@ -513,6 +520,7 @@ impl VirtioDevice for Console {
             resizer: Arc::clone(&self.resizer),
             kill_evt,
             pause_evt,
+            access_platform: self.common.access_platform.clone(),
         };
 
         let paused = self.common.paused.clone();
@@ -542,6 +550,10 @@ impl VirtioDevice for Console {
         let result = self.common.reset();
         event!("virtio-device", "reset", "id", &self.id);
         result
+    }
+
+    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
+        self.common.set_access_platform(access_platform)
     }
 }
 

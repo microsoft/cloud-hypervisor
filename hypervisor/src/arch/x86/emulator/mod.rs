@@ -6,9 +6,8 @@
 
 use crate::arch::emulator::{EmulationError, EmulationResult, PlatformEmulator, PlatformError};
 use crate::arch::x86::emulator::instructions::*;
-use crate::arch::x86::regs::*;
-use crate::arch::x86::*;
-use crate::arch::x86::{Exception, SegmentRegisterOps};
+use crate::arch::x86::regs::{CR0_PE, EFER_LMA};
+use crate::arch::x86::{segment_type_expand_down, segment_type_ro, Exception, SegmentRegisterOps};
 use crate::x86_64::{SegmentRegister, SpecialRegisters, StandardRegisters};
 use anyhow::Context;
 use iced_x86::*;
@@ -652,8 +651,6 @@ mod mock_vmm {
         memory: Vec<u8>,
         state: Arc<Mutex<CpuState>>,
     }
-
-    unsafe impl Sync for MockVmm {}
 
     pub type MockResult = Result<(), EmulationError<Exception>>;
 

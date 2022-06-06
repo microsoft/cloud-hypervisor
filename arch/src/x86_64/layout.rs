@@ -24,6 +24,9 @@ pub const LOW_RAM_START: GuestAddress = GuestAddress(0x0);
 
 // == Fixed addresses within the "Low RAM" range: ==
 
+// Location of EBDA address
+pub const EBDA_POINTER: GuestAddress = GuestAddress(0x40e);
+
 // Initial GDT/IDT needed to boot kernel
 pub const BOOT_GDT_START: GuestAddress = GuestAddress(0x500);
 pub const BOOT_IDT_START: GuestAddress = GuestAddress(0x520);
@@ -79,9 +82,9 @@ pub const HIGH_RAM_START: GuestAddress = GuestAddress(0x100000);
 
 // == No fixed addresses in the "High RAM" range ==
 
-// ** 32-bit reserved area (start: 3GiB, length: 1GiB) **
+// ** 32-bit reserved area (start: 3GiB, length: 896MiB) **
 pub const MEM_32BIT_RESERVED_START: GuestAddress = GuestAddress(0xc000_0000);
-pub const MEM_32BIT_RESERVED_SIZE: u64 = 1024 << 20;
+pub const MEM_32BIT_RESERVED_SIZE: u64 = PCI_MMCONFIG_SIZE + MEM_32BIT_DEVICES_SIZE;
 
 // == Fixed constants within the "32-bit reserved" range ==
 
@@ -93,6 +96,16 @@ pub const MEM_32BIT_DEVICES_SIZE: u64 = 640 << 20;
 pub const PCI_MMCONFIG_START: GuestAddress =
     GuestAddress(MEM_32BIT_DEVICES_START.0 + MEM_32BIT_DEVICES_SIZE);
 pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;
+// One bus with potentially 256 devices (32 slots x 8 functions).
+pub const PCI_MMIO_CONFIG_SIZE_PER_SEGMENT: u64 = 4096 * 256;
+
+// TSS is 3 pages after the PCI MMCONFIG space
+pub const KVM_TSS_START: GuestAddress = GuestAddress(PCI_MMCONFIG_START.0 + PCI_MMCONFIG_SIZE);
+pub const KVM_TSS_SIZE: u64 = (3 * 4) << 10;
+
+// Identity map is a one page region after the TSS
+pub const KVM_IDENTITY_MAP_START: GuestAddress = GuestAddress(KVM_TSS_START.0 + KVM_TSS_SIZE);
+pub const KVM_IDENTITY_MAP_SIZE: u64 = 4 << 10;
 
 // IOAPIC
 pub const IOAPIC_START: GuestAddress = GuestAddress(0xfec0_0000);
@@ -100,9 +113,6 @@ pub const IOAPIC_SIZE: u64 = 0x20;
 
 // APIC
 pub const APIC_START: GuestAddress = GuestAddress(0xfee0_0000);
-
-/// Address for the TSS setup.
-pub const KVM_TSS_ADDRESS: GuestAddress = GuestAddress(0xfffb_d000);
 
 // == End of "32-bit reserved" range. ==
 

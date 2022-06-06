@@ -5,7 +5,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use super::{create_sockaddr, create_socket, vnet_hdr_len, Error as NetUtilError, MacAddr};
+use super::{
+    create_inet_socket, create_sockaddr, create_unix_socket, vnet_hdr_len, Error as NetUtilError,
+    MacAddr,
+};
 use crate::mac::MAC_ADDR_LEN;
 use std::fs::File;
 use std::io::{Error as IoError, Read, Result as IoResult, Write};
@@ -196,7 +199,7 @@ impl Tap {
 
     /// Set the host-side IP address for the tap interface.
     pub fn set_ip_addr(&self, ip_addr: net::Ipv4Addr) -> Result<()> {
-        let sock = create_socket().map_err(Error::NetUtil)?;
+        let sock = create_inet_socket().map_err(Error::NetUtil)?;
         let addr = create_sockaddr(ip_addr);
 
         let mut ifreq = self.get_ifreq();
@@ -204,7 +207,6 @@ impl Tap {
         ifreq.ifr_ifru.ifru_addr = addr;
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFADDR as c_ulong, &ifreq) };
         if ret < 0 {
@@ -225,12 +227,11 @@ impl Tap {
             return Ok(());
         }
 
-        let sock = create_socket().map_err(Error::NetUtil)?;
+        let sock = create_unix_socket().map_err(Error::NetUtil)?;
 
         let mut ifreq = self.get_ifreq();
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCGIFHWADDR as c_ulong, &ifreq) };
         if ret < 0 {
@@ -245,7 +246,6 @@ impl Tap {
         }
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFHWADDR as c_ulong, &ifreq) };
         if ret < 0 {
@@ -257,12 +257,11 @@ impl Tap {
 
     /// Get mac addr for tap interface.
     pub fn get_mac_addr(&self) -> Result<MacAddr> {
-        let sock = create_socket().map_err(Error::NetUtil)?;
+        let sock = create_unix_socket().map_err(Error::NetUtil)?;
 
         let ifreq = self.get_ifreq();
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCGIFHWADDR as c_ulong, &ifreq) };
         if ret < 0 {
@@ -279,7 +278,7 @@ impl Tap {
 
     /// Set the netmask for the subnet that the tap interface will exist on.
     pub fn set_netmask(&self, netmask: net::Ipv4Addr) -> Result<()> {
-        let sock = create_socket().map_err(Error::NetUtil)?;
+        let sock = create_inet_socket().map_err(Error::NetUtil)?;
         let addr = create_sockaddr(netmask);
 
         let mut ifreq = self.get_ifreq();
@@ -287,7 +286,6 @@ impl Tap {
         ifreq.ifr_ifru.ifru_addr = addr;
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFNETMASK as c_ulong, &ifreq) };
         if ret < 0 {
@@ -300,7 +298,6 @@ impl Tap {
     /// Set the offload flags for the tap interface.
     pub fn set_offload(&self, flags: c_uint) -> Result<()> {
         // ioctl is safe. Called with a valid tap fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_val(&self.tap_file, net_gen::TUNSETOFFLOAD(), flags as c_ulong) };
         if ret < 0 {
@@ -312,11 +309,10 @@ impl Tap {
 
     /// Enable the tap interface.
     pub fn enable(&self) -> Result<()> {
-        let sock = create_socket().map_err(Error::NetUtil)?;
+        let sock = create_unix_socket().map_err(Error::NetUtil)?;
 
         let mut ifreq = self.get_ifreq();
 
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCGIFFLAGS as c_ulong, &ifreq) };
         if ret < 0 {
@@ -336,7 +332,6 @@ impl Tap {
             (net_gen::net_device_flags_IFF_UP | net_gen::net_device_flags_IFF_RUNNING) as i16;
 
         // ioctl is safe. Called with a valid sock fd, and we check the return.
-        #[allow(clippy::cast_lossless)]
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFFLAGS as c_ulong, &ifreq) };
         if ret < 0 {
@@ -400,22 +395,20 @@ impl AsRawFd for Tap {
 
 #[cfg(test)]
 mod tests {
-    extern crate pnet;
-
     use std::net::Ipv4Addr;
     use std::str;
     use std::sync::{mpsc, Mutex};
     use std::thread;
     use std::time::Duration;
 
-    use self::pnet::datalink::Channel::Ethernet;
-    use self::pnet::datalink::{self, DataLinkReceiver, DataLinkSender, NetworkInterface};
-    use self::pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
-    use self::pnet::packet::ip::IpNextHeaderProtocols;
-    use self::pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
-    use self::pnet::packet::udp::{MutableUdpPacket, UdpPacket};
-    use self::pnet::packet::{MutablePacket, Packet};
-    use self::pnet::util::MacAddr;
+    use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+    use pnet::packet::ip::IpNextHeaderProtocols;
+    use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
+    use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
+    use pnet::packet::{MutablePacket, Packet};
+    use pnet::util::MacAddr;
+    use pnet_datalink::Channel::Ethernet;
+    use pnet_datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface};
 
     use super::*;
 
@@ -548,10 +541,10 @@ mod tests {
         let interface_name_matches = |iface: &NetworkInterface| iface.name == ifname;
 
         // Find the network interface with the provided name.
-        let interfaces = datalink::interfaces();
+        let interfaces = pnet_datalink::interfaces();
         let interface = interfaces.into_iter().find(interface_name_matches).unwrap();
 
-        if let Ok(Ethernet(tx, rx)) = datalink::channel(&interface, Default::default()) {
+        if let Ok(Ethernet(tx, rx)) = pnet_datalink::channel(&interface, Default::default()) {
             (interface.mac.unwrap(), tx, rx)
         } else {
             panic!("datalink channel error or unhandled channel type");

@@ -11,7 +11,7 @@
 pub mod testing {
     use std::marker::PhantomData;
     use std::mem;
-    use virtio_queue::{Queue, QueueState};
+    use virtio_queue::{Queue, QueueState, VirtqUsedElem};
     use vm_memory::{bitmap::AtomicBitmap, Address, GuestAddress, GuestUsize};
     use vm_memory::{Bytes, GuestMemoryAtomic};
 
@@ -163,15 +163,6 @@ pub mod testing {
         }
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    pub struct VirtqUsedElem {
-        pub id: u32,
-        pub len: u32,
-    }
-
-    unsafe impl vm_memory::ByteValued for VirtqUsedElem {}
-
     pub type VirtqAvail<'a> = VirtqRing<'a, u16>;
     pub type VirtqUsed<'a> = VirtqRing<'a, VirtqUsedElem>;
 
@@ -236,10 +227,8 @@ pub mod testing {
         // Creates a new Queue, using the underlying memory regions represented by the VirtQueue.
         pub fn create_queue(&self) -> Queue<GuestMemoryAtomic<GuestMemoryMmap>> {
             let mem = GuestMemoryAtomic::new(self.mem.clone());
-            let mut q = Queue::<
-                GuestMemoryAtomic<GuestMemoryMmap>,
-                QueueState<GuestMemoryAtomic<GuestMemoryMmap>>,
-            >::new(mem, self.size());
+            let mut q =
+                Queue::<GuestMemoryAtomic<GuestMemoryMmap>, QueueState>::new(mem, self.size());
 
             q.state.size = self.size();
             q.state.ready = true;

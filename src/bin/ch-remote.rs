@@ -9,7 +9,7 @@ extern crate clap;
 use api_client::simple_api_command;
 use api_client::simple_api_command_with_fds;
 use api_client::Error as ApiClientError;
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+use clap::{Arg, ArgMatches, Command};
 use option_parser::{ByteSized, ByteSizedParseError};
 use std::fmt;
 use std::os::unix::net::UnixStream;
@@ -28,6 +28,7 @@ enum Error {
     AddPmemConfig(vmm::config::Error),
     AddNetConfig(vmm::config::Error),
     AddUserDeviceConfig(vmm::config::Error),
+    AddVdpaConfig(vmm::config::Error),
     AddVsockConfig(vmm::config::Error),
     Restore(vmm::config::Error),
 }
@@ -47,6 +48,7 @@ impl fmt::Display for Error {
             AddPmemConfig(e) => write!(f, "Error parsing persistent memory syntax: {}", e),
             AddNetConfig(e) => write!(f, "Error parsing network syntax: {}", e),
             AddUserDeviceConfig(e) => write!(f, "Error parsing user device syntax: {}", e),
+            AddVdpaConfig(e) => write!(f, "Error parsing vDPA device syntax: {}", e),
             AddVsockConfig(e) => write!(f, "Error parsing vsock syntax: {}", e),
             Restore(e) => write!(f, "Error parsing restore syntax: {}", e),
         }
@@ -212,6 +214,18 @@ fn add_net_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Erro
     .map_err(Error::ApiClient)
 }
 
+fn add_vdpa_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Error> {
+    let vdpa_config = vmm::config::VdpaConfig::parse(config).map_err(Error::AddVdpaConfig)?;
+
+    simple_api_command(
+        socket,
+        "PUT",
+        "add-vdpa",
+        Some(&serde_json::to_string(&vdpa_config).unwrap()),
+    )
+    .map_err(Error::ApiClient)
+}
+
 fn add_vsock_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Error> {
     let vsock_config = vmm::config::VsockConfig::parse(config).map_err(Error::AddVsockConfig)?;
 
@@ -250,6 +264,20 @@ fn restore_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Erro
     .map_err(Error::ApiClient)
 }
 
+fn coredump_api_command(socket: &mut UnixStream, destination_url: &str) -> Result<(), Error> {
+    let coredump_config = vmm::api::VmCoredumpData {
+        destination_url: String::from(destination_url),
+    };
+
+    simple_api_command(
+        socket,
+        "PUT",
+        "coredump",
+        Some(&serde_json::to_string(&coredump_config).unwrap()),
+    )
+    .map_err(Error::ApiClient)
+}
+
 fn receive_migration_api_command(socket: &mut UnixStream, url: &str) -> Result<(), Error> {
     let receive_migration_data = vmm::api::VmReceiveMigrationData {
         receiver_url: url.to_owned(),
@@ -263,9 +291,14 @@ fn receive_migration_api_command(socket: &mut UnixStream, url: &str) -> Result<(
     .map_err(Error::ApiClient)
 }
 
-fn send_migration_api_command(socket: &mut UnixStream, url: &str) -> Result<(), Error> {
+fn send_migration_api_command(
+    socket: &mut UnixStream,
+    url: &str,
+    local: bool,
+) -> Result<(), Error> {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url.to_owned(),
+        local,
     };
     simple_api_command(
         socket,
@@ -371,6 +404,14 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .value_of("device_config")
                 .unwrap(),
         ),
+        Some("add-vdpa") => add_vdpa_api_command(
+            &mut socket,
+            matches
+                .subcommand_matches("add-vdpa")
+                .unwrap()
+                .value_of("vdpa_config")
+                .unwrap(),
+        ),
         Some("add-vsock") => add_vsock_api_command(
             &mut socket,
             matches
@@ -395,6 +436,14 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .value_of("restore_config")
                 .unwrap(),
         ),
+        Some("coredump") => coredump_api_command(
+            &mut socket,
+            matches
+                .subcommand_matches("coredump")
+                .unwrap()
+                .value_of("coredump_config")
+                .unwrap(),
+        ),
         Some("send-migration") => send_migration_api_command(
             &mut socket,
             matches
@@ -402,6 +451,10 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .unwrap()
                 .value_of("send_migration_config")
                 .unwrap(),
+            matches
+                .subcommand_matches("send-migration")
+                .unwrap()
+                .is_present("send_migration_local"),
         ),
         Some("receive-migration") => receive_migration_api_command(
             &mut socket,
@@ -417,12 +470,12 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
 }
 
 fn main() {
-    let app = App::new("ch-remote")
+    let app = Command::new("ch-remote")
         .author(crate_authors!())
-        .setting(AppSettings::SubcommandRequired)
+        .subcommand_required(true)
         .about("Remotely control a cloud-hypervisor VMM.")
         .arg(
-            Arg::with_name("api-socket")
+            Arg::new("api-socket")
                 .long("api-socket")
                 .help("HTTP API socket path (UNIX domain socket).")
                 .takes_value(true)
@@ -430,97 +483,96 @@ fn main() {
                 .required(true),
         )
         .subcommand(
-            SubCommand::with_name("add-device")
-                .about("Add VFIO device")
-                .arg(
-                    Arg::with_name("device_config")
-                        .index(1)
-                        .help(vmm::config::DeviceConfig::SYNTAX),
-                ),
+            Command::new("add-device").about("Add VFIO device").arg(
+                Arg::new("device_config")
+                    .index(1)
+                    .help(vmm::config::DeviceConfig::SYNTAX),
+            ),
         )
         .subcommand(
-            SubCommand::with_name("add-disk")
-                .about("Add block device")
-                .arg(
-                    Arg::with_name("disk_config")
-                        .index(1)
-                        .help(vmm::config::DiskConfig::SYNTAX),
-                ),
+            Command::new("add-disk").about("Add block device").arg(
+                Arg::new("disk_config")
+                    .index(1)
+                    .help(vmm::config::DiskConfig::SYNTAX),
+            ),
         )
         .subcommand(
-            SubCommand::with_name("add-fs")
+            Command::new("add-fs")
                 .about("Add virtio-fs backed fs device")
                 .arg(
-                    Arg::with_name("fs_config")
+                    Arg::new("fs_config")
                         .index(1)
                         .help(vmm::config::FsConfig::SYNTAX),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("add-pmem")
+            Command::new("add-pmem")
                 .about("Add persistent memory device")
                 .arg(
-                    Arg::with_name("pmem_config")
+                    Arg::new("pmem_config")
                         .index(1)
                         .help(vmm::config::PmemConfig::SYNTAX),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("add-net")
-                .about("Add network device")
-                .arg(
-                    Arg::with_name("net_config")
-                        .index(1)
-                        .help(vmm::config::NetConfig::SYNTAX),
-                ),
+            Command::new("add-net").about("Add network device").arg(
+                Arg::new("net_config")
+                    .index(1)
+                    .help(vmm::config::NetConfig::SYNTAX),
+            ),
         )
         .subcommand(
-            SubCommand::with_name("add-user-device")
+            Command::new("add-user-device")
                 .about("Add userspace device")
                 .arg(
-                    Arg::with_name("device_config")
+                    Arg::new("device_config")
                         .index(1)
                         .help(vmm::config::UserDeviceConfig::SYNTAX),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("add-vsock")
-                .about("Add vsock device")
-                .arg(
-                    Arg::with_name("vsock_config")
-                        .index(1)
-                        .help(vmm::config::VsockConfig::SYNTAX),
-                ),
+            Command::new("add-vdpa").about("Add vDPA device").arg(
+                Arg::new("vdpa_config")
+                    .index(1)
+                    .help(vmm::config::VdpaConfig::SYNTAX),
+            ),
         )
         .subcommand(
-            SubCommand::with_name("remove-device")
+            Command::new("add-vsock").about("Add vsock device").arg(
+                Arg::new("vsock_config")
+                    .index(1)
+                    .help(vmm::config::VsockConfig::SYNTAX),
+            ),
+        )
+        .subcommand(
+            Command::new("remove-device")
                 .about("Remove VFIO device")
-                .arg(Arg::with_name("id").index(1).help("<device_id>")),
+                .arg(Arg::new("id").index(1).help("<device_id>")),
         )
-        .subcommand(SubCommand::with_name("info").about("Info on the VM"))
-        .subcommand(SubCommand::with_name("counters").about("Counters from the VM"))
-        .subcommand(SubCommand::with_name("pause").about("Pause the VM"))
-        .subcommand(SubCommand::with_name("reboot").about("Reboot the VM"))
-        .subcommand(SubCommand::with_name("power-button").about("Trigger a power button in the VM"))
+        .subcommand(Command::new("info").about("Info on the VM"))
+        .subcommand(Command::new("counters").about("Counters from the VM"))
+        .subcommand(Command::new("pause").about("Pause the VM"))
+        .subcommand(Command::new("reboot").about("Reboot the VM"))
+        .subcommand(Command::new("power-button").about("Trigger a power button in the VM"))
         .subcommand(
-            SubCommand::with_name("resize")
+            Command::new("resize")
                 .about("Resize the VM")
                 .arg(
-                    Arg::with_name("cpus")
+                    Arg::new("cpus")
                         .long("cpus")
                         .help("New vCPUs count")
                         .takes_value(true)
                         .number_of_values(1),
                 )
                 .arg(
-                    Arg::with_name("memory")
+                    Arg::new("memory")
                         .long("memory")
                         .help("New memory size in bytes (supports K/M/G suffix)")
                         .takes_value(true)
                         .number_of_values(1),
                 )
                 .arg(
-                    Arg::with_name("balloon")
+                    Arg::new("balloon")
                         .long("balloon")
                         .help("New balloon size in bytes (supports K/M/G suffix)")
                         .takes_value(true)
@@ -528,57 +580,67 @@ fn main() {
                 ),
         )
         .subcommand(
-            SubCommand::with_name("resize-zone")
+            Command::new("resize-zone")
                 .about("Resize a memory zone")
                 .arg(
-                    Arg::with_name("id")
+                    Arg::new("id")
                         .long("id")
                         .help("Memory zone identifier")
                         .takes_value(true)
                         .number_of_values(1),
                 )
                 .arg(
-                    Arg::with_name("size")
+                    Arg::new("size")
                         .long("size")
                         .help("New memory zone size in bytes (supports K/M/G suffix)")
                         .takes_value(true)
                         .number_of_values(1),
                 ),
         )
-        .subcommand(SubCommand::with_name("resume").about("Resume the VM"))
-        .subcommand(SubCommand::with_name("shutdown").about("Shutdown the VM"))
+        .subcommand(Command::new("resume").about("Resume the VM"))
+        .subcommand(Command::new("shutdown").about("Shutdown the VM"))
         .subcommand(
-            SubCommand::with_name("snapshot")
+            Command::new("snapshot")
                 .about("Create a snapshot from VM")
                 .arg(
-                    Arg::with_name("snapshot_config")
+                    Arg::new("snapshot_config")
                         .index(1)
                         .help("<destination_url>"),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("restore")
+            Command::new("restore")
                 .about("Restore VM from a snapshot")
                 .arg(
-                    Arg::with_name("restore_config")
+                    Arg::new("restore_config")
                         .index(1)
                         .help(vmm::config::RestoreConfig::SYNTAX),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("send-migration")
+            Command::new("coredump")
+                .about("Create a coredump from VM")
+                .arg(Arg::new("coredump_config").index(1).help("<file_path>")),
+        )
+        .subcommand(
+            Command::new("send-migration")
                 .about("Initiate a VM migration")
                 .arg(
-                    Arg::with_name("send_migration_config")
+                    Arg::new("send_migration_config")
                         .index(1)
                         .help("<destination_url>"),
+                )
+                .arg(
+                    Arg::new("send_migration_local")
+                        .long("local")
+                        .takes_value(false),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("receive-migration")
+            Command::new("receive-migration")
                 .about("Receive a VM migration")
                 .arg(
-                    Arg::with_name("receive_migration_config")
+                    Arg::new("receive_migration_config")
                         .index(1)
                         .help("<receiver_url>"),
                 ),

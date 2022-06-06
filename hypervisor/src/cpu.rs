@@ -12,6 +12,12 @@
 use crate::aarch64::VcpuInit;
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::{RegList, Register, StandardRegisters};
+#[cfg(feature = "tdx")]
+use crate::kvm::{TdxExitDetails, TdxExitStatus};
+#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+use crate::x86_64::SuspendRegisters;
+#[cfg(target_arch = "x86_64")]
+use crate::x86_64::Xsave;
 #[cfg(target_arch = "x86_64")]
 use crate::x86_64::{CpuId, LapicState};
 #[cfg(target_arch = "x86_64")]
@@ -19,15 +25,13 @@ use crate::x86_64::{
     ExtendedControlRegisters, FpuState, MsrEntries, SpecialRegisters, StandardRegisters, VcpuEvents,
 };
 use crate::CpuState;
+#[cfg(target_arch = "aarch64")]
+use crate::DeviceAttr;
 #[cfg(feature = "kvm")]
 use crate::MpState;
-#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-use crate::SuspendRegisters;
-#[cfg(target_arch = "x86_64")]
-use crate::Xsave;
-#[cfg(feature = "mshv")]
-use mshv_bindings::*;
 use thiserror::Error;
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+use vm_memory::GuestAddress;
 
 #[derive(Error, Debug)]
 ///
@@ -223,11 +227,27 @@ pub enum HypervisorCpuError {
     #[error("Failed to translate GVA: {0}")]
     TranslateVirtualAddress(#[source] anyhow::Error),
     ///
+    /// Set cpu attribute error
+    ///
+    #[error("Failed to set vcpu attribute: {0}")]
+    SetVcpuAttribute(#[source] anyhow::Error),
+    ///
+    /// Check if cpu has a certain attribute error
+    ///
+    #[error("Failed to check if vcpu has attribute: {0}")]
+    HasVcpuAttribute(#[source] anyhow::Error),
+    ///
     /// Failed to initialize TDX on CPU
     ///
     #[cfg(feature = "tdx")]
     #[error("Failed to initialize TDX: {0}")]
     InitializeTdx(#[source] std::io::Error),
+    ///
+    /// Unknown TDX VM call
+    ///
+    #[cfg(feature = "tdx")]
+    #[error("Unknown TDX VM call")]
+    UnknownTdxVmCall,
 }
 
 #[derive(Debug)]
@@ -244,6 +264,10 @@ pub enum VmExit<'a> {
     Reset,
     Shutdown,
     Hyperv,
+    #[cfg(feature = "tdx")]
+    Tdx,
+    #[cfg(feature = "kvm")]
+    Debug,
 }
 
 ///
@@ -259,7 +283,16 @@ pub trait Vcpu: Send + Sync {
     /// Returns the vCPU general purpose registers.
     ///
     fn get_regs(&self) -> Result<StandardRegisters>;
-
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Sets vcpu attribute
+    ///
+    fn set_vcpu_attr(&self, attr: &DeviceAttr) -> Result<()>;
+    #[cfg(target_arch = "aarch64")]
+    ///
+    /// Check if vcpu has attribute.
+    ///
+    fn has_vcpu_attr(&self, attr: &DeviceAttr) -> Result<()>;
     #[cfg(target_arch = "x86_64")]
     ///
     /// Sets the vCPU general purpose registers.
@@ -368,6 +401,11 @@ pub trait Vcpu: Send + Sync {
     /// potential soft lockups when being resumed.
     ///
     fn notify_guest_clock_paused(&self) -> Result<()>;
+    #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+    ///
+    /// Sets debug registers to set hardware breakpoints and/or enable single step.
+    ///
+    fn set_guest_debug(&self, addrs: &[GuestAddress], singlestep: bool) -> Result<()>;
     ///
     /// Sets the type of CPU to be exposed to the guest and optional features.
     ///
@@ -415,6 +453,11 @@ pub trait Vcpu: Send + Sync {
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     fn read_mpidr(&self) -> Result<u64>;
     ///
+    /// Configure core registers for a given CPU.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    fn setup_regs(&self, cpu_id: u8, boot_ip: u64, fdt_start: u64) -> Result<()>;
+    ///
     /// Retrieve the vCPU state.
     /// This function is necessary to snapshot the VM
     ///
@@ -428,11 +471,11 @@ pub trait Vcpu: Send + Sync {
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
     fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError>;
-    #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     ///
     /// Translate guest virtual address to guest physical address
     ///
-    fn translate_gva(&self, gva: u64, flags: u64) -> Result<(u64, hv_translate_gva_result)>;
+    fn translate_gva(&self, gva: u64, flags: u64) -> Result<(u64, u32)>;
     ///
     /// Initialize TDX support on the vCPU
     ///
@@ -443,4 +486,19 @@ pub trait Vcpu: Send + Sync {
     /// Return suspend registers(explicit and intercept suspend registers)
     ///
     fn get_suspend_regs(&self) -> Result<SuspendRegisters>;
+    #[cfg(feature = "kvm")]
+    ///
+    /// Set the "immediate_exit" state
+    ///
+    fn set_immediate_exit(&self, exit: bool);
+    #[cfg(feature = "tdx")]
+    ///
+    /// Returns the details about TDX exit reason
+    ///
+    fn get_tdx_exit_details(&mut self) -> Result<TdxExitDetails>;
+    #[cfg(feature = "tdx")]
+    ///
+    /// Set the status code for TDX exit
+    ///
+    fn set_tdx_status(&mut self, status: TdxExitStatus);
 }

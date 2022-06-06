@@ -25,6 +25,7 @@ use virtio_queue::Queue;
 use vm_memory::{Bytes, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
+use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
@@ -40,6 +41,7 @@ struct RngEpollHandler {
     queue_evt: EventFd,
     kill_evt: EventFd,
     pause_evt: EventFd,
+    access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 impl RngEpollHandler {
@@ -57,7 +59,12 @@ impl RngEpollHandler {
                 // Fill the read with data from the random device on the host.
                 if desc_chain
                     .memory()
-                    .read_from(desc.addr(), &mut self.random_file, desc.len() as usize)
+                    .read_from(
+                        desc.addr()
+                            .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                        &mut self.random_file,
+                        desc.len() as usize,
+                    )
                     .is_ok()
                 {
                     len = desc.len();
@@ -76,7 +83,7 @@ impl RngEpollHandler {
 
     fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(&self.queues[0]))
+            .trigger(VirtioInterruptType::Queue(0))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -230,6 +237,7 @@ impl VirtioDevice for Rng {
                 queue_evt: queue_evts.remove(0),
                 kill_evt,
                 pause_evt,
+                access_platform: self.common.access_platform.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -260,6 +268,10 @@ impl VirtioDevice for Rng {
         let result = self.common.reset();
         event!("virtio-device", "reset", "id", &self.id);
         result
+    }
+
+    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
+        self.common.set_access_platform(access_platform)
     }
 }
 

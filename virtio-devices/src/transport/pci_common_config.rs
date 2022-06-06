@@ -15,6 +15,7 @@ use versionize_derive::Versionize;
 use virtio_queue::Queue;
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, VersionMapped};
+use vm_virtio::AccessPlatform;
 
 #[derive(Clone, Versionize)]
 pub struct VirtioPciCommonConfigState {
@@ -24,6 +25,7 @@ pub struct VirtioPciCommonConfigState {
     pub driver_feature_select: u32,
     pub queue_select: u16,
     pub msix_config: u16,
+    pub msix_queues: Vec<u16>,
 }
 
 impl VersionMapped for VirtioPciCommonConfigState {}
@@ -51,12 +53,14 @@ impl VersionMapped for VirtioPciCommonConfigState {}
 /// le64 queue_avail;               // 0x28 // read-write
 /// le64 queue_used;                // 0x30 // read-write
 pub struct VirtioPciCommonConfig {
+    pub access_platform: Option<Arc<dyn AccessPlatform>>,
     pub driver_status: u8,
     pub config_generation: u8,
     pub device_feature_select: u32,
     pub driver_feature_select: u32,
     pub queue_select: u16,
     pub msix_config: Arc<AtomicU16>,
+    pub msix_queues: Arc<Mutex<Vec<u16>>>,
 }
 
 impl VirtioPciCommonConfig {
@@ -68,6 +72,7 @@ impl VirtioPciCommonConfig {
             driver_feature_select: self.driver_feature_select,
             queue_select: self.queue_select,
             msix_config: self.msix_config.load(Ordering::Acquire),
+            msix_queues: self.msix_queues.lock().unwrap().clone(),
         }
     }
 
@@ -78,13 +83,14 @@ impl VirtioPciCommonConfig {
         self.driver_feature_select = state.driver_feature_select;
         self.queue_select = state.queue_select;
         self.msix_config.store(state.msix_config, Ordering::Release);
+        *(self.msix_queues.lock().unwrap()) = state.msix_queues.clone();
     }
 
     pub fn read(
         &mut self,
         offset: u64,
         data: &mut [u8],
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
@@ -114,7 +120,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         data: &[u8],
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
@@ -164,7 +170,7 @@ impl VirtioPciCommonConfig {
             0x12 => queues.len() as u16, // num_queues
             0x16 => self.queue_select,
             0x18 => self.with_queue(queues, |q| q.state.size).unwrap_or(0),
-            0x1a => self.with_queue(queues, |q| q.state.vector).unwrap_or(0),
+            0x1a => self.msix_queues.lock().unwrap()[self.queue_select as usize],
             0x1c => {
                 if self.with_queue(queues, |q| q.state.ready).unwrap_or(false) {
                     1
@@ -184,15 +190,44 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u16,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
     ) {
         debug!("write_common_config_word: offset 0x{:x}", offset);
         match offset {
             0x10 => self.msix_config.store(value, Ordering::Release),
             0x16 => self.queue_select = value,
             0x18 => self.with_queue_mut(queues, |q| q.state.size = value),
-            0x1a => self.with_queue_mut(queues, |q| q.state.vector = value),
-            0x1c => self.with_queue_mut(queues, |q| q.enable(value == 1)),
+            0x1a => self.msix_queues.lock().unwrap()[self.queue_select as usize] = value,
+            0x1c => self.with_queue_mut(queues, |q| {
+                let ready = value == 1;
+                q.set_ready(ready);
+                // Translate address of descriptor table and vrings.
+                if let Some(access_platform) = &self.access_platform {
+                    if ready {
+                        let desc_table = access_platform
+                            .translate_gva(q.state.desc_table.0, 0)
+                            .unwrap();
+                        let avail_ring = access_platform
+                            .translate_gva(q.state.avail_ring.0, 0)
+                            .unwrap();
+                        let used_ring = access_platform
+                            .translate_gva(q.state.used_ring.0, 0)
+                            .unwrap();
+                        q.set_desc_table_address(
+                            Some((desc_table & 0xffff_ffff) as u32),
+                            Some((desc_table >> 32) as u32),
+                        );
+                        q.set_avail_ring_address(
+                            Some((avail_ring & 0xffff_ffff) as u32),
+                            Some((avail_ring >> 32) as u32),
+                        );
+                        q.set_used_ring_address(
+                            Some((used_ring & 0xffff_ffff) as u32),
+                            Some((used_ring >> 32) as u32),
+                        );
+                    }
+                }
+            }),
             _ => {
                 warn!("invalid virtio register word write: 0x{:x}", offset);
             }
@@ -225,7 +260,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u32,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         debug!("write_common_config_dword: offset 0x{:x}", offset);
@@ -273,7 +308,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u64,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
     ) {
         debug!("write_common_config_qword: offset 0x{:x}", offset);
         match offset {
@@ -299,7 +334,7 @@ impl VirtioPciCommonConfig {
 
     fn with_queue_mut<F: FnOnce(&mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>)>(
         &self,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         f: F,
     ) {
         if let Some(queue) = queues.get_mut(self.queue_select as usize) {
@@ -370,12 +405,14 @@ mod tests {
     #[test]
     fn write_base_regs() {
         let mut regs = VirtioPciCommonConfig {
+            access_platform: None,
             driver_status: 0xaa,
             config_generation: 0x55,
             device_feature_select: 0x0,
             driver_feature_select: 0x0,
             queue_select: 0xff,
             msix_config: Arc::new(AtomicU16::new(0)),
+            msix_queues: Arc::new(Mutex::new(vec![0; 3])),
         };
 
         let dev = Arc::new(Mutex::new(DummyDevice(0)));

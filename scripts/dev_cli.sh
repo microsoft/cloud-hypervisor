@@ -7,7 +7,7 @@
 CLI_NAME="Cloud Hypervisor"
 
 CTR_IMAGE_TAG="cloudhypervisor/dev"
-CTR_IMAGE_VERSION="latest"
+CTR_IMAGE_VERSION="20220524-0"
 CTR_IMAGE="${CTR_IMAGE_TAG}:${CTR_IMAGE_VERSION}"
 
 DOCKER_RUNTIME="docker"
@@ -48,32 +48,32 @@ CARGO_TARGET_DIR="${CLH_BUILD_DIR}/cargo_target"
 # Send a decorated message to stdout, followed by a new line
 #
 say() {
-    [ -t 1 ] && [ -n "$TERM" ] \
-        && echo "$(tput setaf 2)[$CLI_NAME]$(tput sgr0) $*" \
-        || echo "[$CLI_NAME] $*"
+    [ -t 1 ] && [ -n "$TERM" ] &&
+        echo "$(tput setaf 2)[$CLI_NAME]$(tput sgr0) $*" ||
+        echo "[$CLI_NAME] $*"
 }
 
 # Send a decorated message to stdout, without a trailing new line
 #
 say_noln() {
-    [ -t 1 ] && [ -n "$TERM" ] \
-        && echo -n "$(tput setaf 2)[$CLI_NAME]$(tput sgr0) $*" \
-        || echo "[$CLI_NAME] $*"
+    [ -t 1 ] && [ -n "$TERM" ] &&
+        echo -n "$(tput setaf 2)[$CLI_NAME]$(tput sgr0) $*" ||
+        echo "[$CLI_NAME] $*"
 }
 
 # Send a text message to stderr
 #
 say_err() {
-    [ -t 2 ] && [ -n "$TERM" ] \
-        && echo "$(tput setaf 1)[$CLI_NAME] $*$(tput sgr0)" 1>&2 \
-        || echo "[$CLI_NAME] $*" 1>&2
+    [ -t 2 ] && [ -n "$TERM" ] &&
+        echo "$(tput setaf 1)[$CLI_NAME] $*$(tput sgr0)" 1>&2 ||
+        echo "[$CLI_NAME] $*" 1>&2
 }
 
 # Send a warning-highlighted text to stdout
 say_warn() {
-    [ -t 1 ] && [ -n "$TERM" ] \
-        && echo "$(tput setaf 3)[$CLI_NAME] $*$(tput sgr0)" \
-        || echo "[$CLI_NAME] $*"
+    [ -t 1 ] && [ -n "$TERM" ] &&
+        echo "$(tput setaf 3)[$CLI_NAME] $*$(tput sgr0)" ||
+        echo "[$CLI_NAME] $*"
 }
 
 # Exit with an error message and (optional) code
@@ -86,7 +86,7 @@ die() {
         shift 2
     }
     say_err "$@"
-    exit $code
+    exit "$code"
 }
 
 # Exit with an error message if the last exit code is not 0
@@ -101,26 +101,34 @@ ok_or_die() {
 #
 ensure_build_dir() {
     for dir in "$CLH_BUILD_DIR" \
-		   "$CLH_INTEGRATION_WORKLOADS" \
-		   "$CLH_CTR_BUILD_DIR" \
-		   "$CARGO_TARGET_DIR" \
-		   "$CARGO_REGISTRY_DIR" \
-		   "$CARGO_GIT_REGISTRY_DIR"; do
+        "$CLH_INTEGRATION_WORKLOADS" \
+        "$CLH_CTR_BUILD_DIR" \
+        "$CARGO_TARGET_DIR" \
+        "$CARGO_REGISTRY_DIR" \
+        "$CARGO_GIT_REGISTRY_DIR"; do
         mkdir -p "$dir" || die "Error: cannot create dir $dir"
-        [ -x "$dir" ] && [ -w "$dir" ] || \
+        [ -x "$dir" ] && [ -w "$dir" ] ||
             {
                 say "Wrong permissions for $dir. Attempting to fix them ..."
                 chmod +x+w "$dir"
-            } || \
+            } ||
             die "Error: wrong permissions for $dir. Should be +x+w"
     done
 }
 
 # Make sure we're using the latest dev container, by just pulling it.
 ensure_latest_ctr() {
-    $DOCKER_RUNTIME pull "$CTR_IMAGE"
+    if [ "$CTR_IMAGE_VERSION" = "local" ]; then
+        build_container
+    else
+        $DOCKER_RUNTIME pull "$CTR_IMAGE"
 
-    ok_or_die "Error pulling container image. Aborting."
+        if [ $? -ne 0 ]; then
+            build_container
+        fi
+
+        ok_or_die "Error pulling/building container image. Aborting."
+    fi
 }
 
 # Fix main directory permissions after a container ran as root.
@@ -132,14 +140,14 @@ fix_dir_perms() {
     # Yes, running Docker to get elevated privileges, just to chown some files
     # is a dirty hack.
     $DOCKER_RUNTIME run \
-	--workdir "$CTR_CLH_ROOT_DIR" \
-	   --rm \
-	   --volume /dev:/dev \
-	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	   "$CTR_IMAGE" \
-           chown -R "$(id -u):$(id -g)" "$CTR_CLH_ROOT_DIR"
+        --workdir "$CTR_CLH_ROOT_DIR" \
+        --rm \
+        --volume /dev:/dev \
+        --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        "$CTR_IMAGE" \
+        chown -R "$(id -u):$(id -g)" "$CTR_CLH_ROOT_DIR"
 
-    return $1
+    return "$1"
 }
 # Process exported volumes argument, separate the volumes and make docker compatible
 # Sample input: --volumes /a:/a#/b:/b
@@ -151,8 +159,7 @@ process_volumes_args() {
     fi
     exported_volumes=""
     arr_vols=(${arg_vols//#/ })
-    for var in "${arr_vols[@]}"
-    do
+    for var in "${arr_vols[@]}"; do
         parts=(${var//:/ })
         if [[ ! -e "${parts[0]}" ]]; then
             echo "The volume ${parts[0]} does not exist."
@@ -163,8 +170,8 @@ process_volumes_args() {
 }
 cmd_help() {
     echo ""
-    echo "Cloud Hypervisor $(basename $0)"
-    echo "Usage: $(basename $0) <command> [<command args>]"
+    echo "Cloud Hypervisor $(basename "$0")"
+    echo "Usage: $(basename "$0") <command> [<command args>]"
     echo ""
     echo "Available commands:"
     echo ""
@@ -176,23 +183,22 @@ cmd_help() {
     echo "        --volumes             Hash separated volumes to be exported. Example --volumes /mnt:/mnt#/myvol:/myvol"
     echo "        --hypervisor          Underlying hypervisor. Options kvm, mshv"
     echo ""
-    echo "    tests [--unit|--cargo|--all] [--libc musl|gnu] [-- [<cargo test args>]]"
+    echo "    tests [<test type (see below)>] [--libc musl|gnu] [-- [<test scripts args>] [-- [<test binary args>]]] "
     echo "        Run the Cloud Hypervisor tests."
     echo "        --unit                       Run the unit tests."
-    echo "        --cargo                      Run the cargo tests."
     echo "        --integration                Run the integration tests."
     echo "        --integration-sgx            Run the SGX integration tests."
     echo "        --integration-vfio           Run the VFIO integration tests."
     echo "        --integration-windows        Run the Windows guest integration tests."
     echo "        --integration-live-migration Run the live-migration integration tests."
     echo "        --libc                       Select the C library Cloud Hypervisor will be built against. Default is gnu"
+    echo "        --metrics                    Generate performance metrics"
     echo "        --volumes                    Hash separated volumes to be exported. Example --volumes /mnt:/mnt#/myvol:/myvol"
     echo "        --hypervisor                 Underlying hypervisor. Options kvm, mshv"
     echo "        --all                        Run all tests."
     echo ""
     echo "    build-container [--type]"
     echo "        Build the Cloud Hypervisor container."
-    echo "        --dev                Build dev container. This is the default."
     echo ""
     echo "    clean [<cargo args>]]"
     echo "        Remove the Cloud Hypervisor artifacts."
@@ -213,37 +219,52 @@ cmd_build() {
     features_build=""
     exported_device="/dev/kvm"
     while [ $# -gt 0 ]; do
-	case "$1" in
-            "-h"|"--help")  { cmd_help; exit 1; } ;;
-            "--debug")      { build="debug"; } ;;
-            "--release")    { build="release"; } ;;
-            "--libc")
-                shift
-                [[ "$1" =~ ^(musl|gnu)$ ]] || \
-                    die "Invalid libc: $1. Valid options are \"musl\" and \"gnu\"."
-                libc="$1"
-                ;;
-            "--volumes")
-                shift
-                arg_vols="$1"
-                ;;
-            "--hypervisor")
-                shift
-                hypervisor="$1"
-                ;;
-            "--")           { shift; break; } ;;
-            *)
-		die "Unknown build argument: $1. Please use --help for help."
-		;;
-	esac
-	shift
+        case "$1" in
+        "-h" | "--help") {
+            cmd_help
+            exit 1
+        } ;;
+        "--debug") { build="debug"; } ;;
+        "--release") { build="release"; } ;;
+        "--runtime") 
+	    shift
+	    DOCKER_RUNTIME="$1"
+	    export DOCKER_RUNTIME
+	    ;;
+        "--libc")
+            shift
+            [[ "$1" =~ ^(musl|gnu)$ ]] ||
+                die "Invalid libc: $1. Valid options are \"musl\" and \"gnu\"."
+            libc="$1"
+            ;;
+        "--volumes")
+            shift
+            arg_vols="$1"
+            ;;
+        "--hypervisor")
+            shift
+            hypervisor="$1"
+            ;;
+        "--features")
+            shift
+            features_build="--features $1"
+            ;;
+        "--") {
+            shift
+            break
+        } ;;
+        *)
+            die "Unknown build argument: $1. Please use --help for help."
+            ;;
+        esac
+        shift
     done
 
     ensure_build_dir
     ensure_latest_ctr
 
     process_volumes_args
-    if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
+    if [[ ! ("$hypervisor" = "kvm" || "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
     fi
     if [[ "$hypervisor" = "mshv" ]]; then
@@ -254,25 +275,26 @@ cmd_build() {
     cargo_args=("$@")
     [ $build = "release" ] && cargo_args+=("--release")
     cargo_args+=(--target "$target")
-    [ $(uname -m) = "aarch64" ] && cargo_args+=("--no-default-features")
-    [ $(uname -m) = "aarch64" ] && cargo_args+=(--features $hypervisor)
 
     rustflags=""
-    if [ $(uname -m) = "aarch64" ] && [ $libc = "musl" ] ; then
+    target_cc=""
+    if [ "$(uname -m)" = "aarch64" ] && [ "$libc" = "musl" ]; then
         rustflags="-C link-arg=-lgcc -C link_arg=-specs -C link_arg=/usr/lib/aarch64-linux-musl/musl-gcc.specs"
+        target_cc="musl-gcc"
     fi
 
     $DOCKER_RUNTIME run \
-	   --user "$(id -u):$(id -g)" \
-	   --workdir "$CTR_CLH_ROOT_DIR" \
-	   --rm \
-	   --volume $exported_device \
-	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	   --env RUSTFLAGS="$rustflags" \
-	   "$CTR_IMAGE" \
-	   cargo build --all $features_build \
-	         --target-dir "$CTR_CLH_CARGO_TARGET" \
-	         "${cargo_args[@]}" && say "Binaries placed under $CLH_CARGO_TARGET/$target/$build"
+        --user "$(id -u):$(id -g)" \
+        --workdir "$CTR_CLH_ROOT_DIR" \
+        --rm \
+        --volume $exported_device \
+        --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        --env RUSTFLAGS="$rustflags" \
+        --env TARGET_CC="$target_cc" \
+        "$CTR_IMAGE" \
+        cargo build --all $features_build \
+        --target-dir "$CTR_CLH_CARGO_TARGET" \
+        "${cargo_args[@]}" && say "Binaries placed under $CLH_CARGO_TARGET/$target/$build"
 }
 
 cmd_clean() {
@@ -282,61 +304,71 @@ cmd_clean() {
     ensure_latest_ctr
 
     $DOCKER_RUNTIME run \
-	   --user "$(id -u):$(id -g)" \
-	   --workdir "$CTR_CLH_ROOT_DIR" \
-	   --rm \
-	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	   "$CTR_IMAGE" \
-	   cargo clean \
-	         --target-dir "$CTR_CLH_CARGO_TARGET" \
-	         "${cargo_args[@]}"
-    }
+        --user "$(id -u):$(id -g)" \
+        --workdir "$CTR_CLH_ROOT_DIR" \
+        --rm \
+        --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        "$CTR_IMAGE" \
+        cargo clean \
+        --target-dir "$CTR_CLH_CARGO_TARGET" \
+        "${cargo_args[@]}"
+}
 
 cmd_tests() {
     unit=false
-    cargo=false
     integration=false
     integration_sgx=false
     integration_vfio=false
     integration_windows=false
     integration_live_migration=false
+    metrics=false
     libc="gnu"
     arg_vols=""
     hypervisor="kvm"
     exported_device="/dev/kvm"
     while [ $# -gt 0 ]; do
-	case "$1" in
-            "-h"|"--help")                  { cmd_help; exit 1; } ;;
-            "--unit")                       { unit=true; } ;;
-            "--cargo")                      { cargo=true; } ;;
-            "--integration")                { integration=true; } ;;
-            "--integration-sgx")            { integration_sgx=true; } ;;
-            "--integration-vfio")           { integration_vfio=true; } ;;
-            "--integration-windows")        { integration_windows=true; } ;;
-            "--integration-live-migration") { integration_live_migration=true; } ;;
-            "--libc")
-                shift
-                [[ "$1" =~ ^(musl|gnu)$ ]] || \
-                    die "Invalid libc: $1. Valid options are \"musl\" and \"gnu\"."
-                libc="$1"
-                ;;
-            "--volumes")
-                shift
-                arg_vols="$1"
-                ;;
-            "--hypervisor")
-                shift
-                hypervisor="$1"
-                ;;
-	    "--all")                 { cargo=true; unit=true; integration=true; } ;;
-            "--")                    { shift; break; } ;;
-            *)
-		die "Unknown tests argument: $1. Please use --help for help."
-		;;
-	esac
-	shift
+        case "$1" in
+        "-h" | "--help") {
+            cmd_help
+            exit 1
+        } ;;
+        "--unit") { unit=true; } ;;
+        "--integration") { integration=true; } ;;
+        "--integration-sgx") { integration_sgx=true; } ;;
+        "--integration-vfio") { integration_vfio=true; } ;;
+        "--integration-windows") { integration_windows=true; } ;;
+        "--integration-live-migration") { integration_live_migration=true; } ;;
+        "--metrics") { metrics=true; } ;;
+        "--libc")
+            shift
+            [[ "$1" =~ ^(musl|gnu)$ ]] ||
+                die "Invalid libc: $1. Valid options are \"musl\" and \"gnu\"."
+            libc="$1"
+            ;;
+        "--volumes")
+            shift
+            arg_vols="$1"
+            ;;
+        "--hypervisor")
+            shift
+            hypervisor="$1"
+            ;;
+        "--all") {
+            cargo=true
+            unit=true
+            integration=true
+        } ;;
+        "--") {
+            shift
+            break
+        } ;;
+        *)
+            die "Unknown tests argument: $1. Please use --help for help."
+            ;;
+        esac
+        shift
     done
-    if [[ ! ("$hypervisor" = "kvm" ||  "$hypervisor" = "mshv") ]]; then
+    if [[ ! ("$hypervisor" = "kvm" || "$hypervisor" = "mshv") ]]; then
         die "Hypervisor value must be kvm or mshv"
     fi
 
@@ -344,190 +376,204 @@ cmd_tests() {
         exported_device="/dev/mshv"
     fi
 
-    set -- "$@" '--hypervisor' $hypervisor
+    set -- '--hypervisor' "$hypervisor" "$@"
 
     ensure_build_dir
     ensure_latest_ctr
 
     process_volumes_args
     target="$(uname -m)-unknown-linux-${libc}"
-    cflags=""
-    target_cc=""
-    if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
-	target_cc="musl-gcc"
-	cflags="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
+
+    if [[ "$unit" = true ]]; then
+        say "Running unit tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --device $exported_device \
+            --device /dev/net/tun \
+            --cap-add net_admin \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --env BUILD_TARGET="$target" \
+            "$CTR_IMAGE" \
+            ./scripts/run_unit_tests.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [[ "$unit" = true  ]] ;  then
-	say "Running unit tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --device $exported_device \
-	       --device /dev/net/tun \
-	       --cap-add net_admin \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	       --env BUILD_TARGET="$target" \
-	       --env CFLAGS="$cflags" \
-	       --env TARGET_CC="$target_cc" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_unit_tests.sh "$@" || fix_dir_perms $? || exit $?
+    if [ "$integration" = true ]; then
+        say "Running integration tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_integration_tests_"$(uname -m)".sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$cargo" = true ] ;  then
-	say "Running cargo tests..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_cargo_tests.sh "$@"  || fix_dir_perms $? || exit $?
+    if [ "$integration_sgx" = true ]; then
+        say "Running SGX integration tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_integration_tests_sgx.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$integration" = true ] ;  then
-	say "Running integration tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --privileged \
-	       --security-opt seccomp=unconfined \
-	       --ipc=host \
-	       --net="$CTR_CLH_NET" \
-	       --mount type=tmpfs,destination=/tmp \
-	       --volume /dev:/dev \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	       --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	       --env USER="root" \
-	       --env CH_LIBC="${libc}" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_integration_tests_$(uname -m).sh "$@" || fix_dir_perms $? || exit $?
+    if [ "$integration_vfio" = true ]; then
+        say "Running VFIO integration tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_integration_tests_vfio.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$integration_sgx" = true ] ;  then
-	say "Running SGX integration tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --privileged \
-	       --security-opt seccomp=unconfined \
-	       --ipc=host \
-	       --net="$CTR_CLH_NET" \
-	       --mount type=tmpfs,destination=/tmp \
-	       --volume /dev:/dev \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	       --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	       --env USER="root" \
-	       --env CH_LIBC="${libc}" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_integration_tests_sgx.sh "$@" || fix_dir_perms $? || exit $?
+    if [ "$integration_windows" = true ]; then
+        say "Running Windows integration tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_integration_tests_windows.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$integration_vfio" = true ] ;  then
-	say "Running VFIO integration tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --privileged \
-	       --security-opt seccomp=unconfined \
-	       --ipc=host \
-	       --net="$CTR_CLH_NET" \
-	       --mount type=tmpfs,destination=/tmp \
-	       --volume /dev:/dev \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	       --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	       --env USER="root" \
-	       --env CH_LIBC="${libc}" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_integration_tests_vfio.sh "$@" || fix_dir_perms $? || exit $?
+    if [ "$integration_live_migration" = true ]; then
+        say "Running 'live migration' integration tests for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_integration_tests_live_migration.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$integration_windows" = true ] ;  then
-	say "Running Windows integration tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --privileged \
-	       --security-opt seccomp=unconfined \
-	       --ipc=host \
-	       --net="$CTR_CLH_NET" \
-	       --mount type=tmpfs,destination=/tmp \
-	       --volume /dev:/dev \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR"  $exported_volumes \
-	       --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	       --env USER="root" \
-	       --env CH_LIBC="${libc}" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_integration_tests_windows.sh "$@" || fix_dir_perms $? || exit $?
+    if [ "$metrics" = true ]; then
+        say "Generating performance metrics for $target..."
+        $DOCKER_RUNTIME run \
+            --workdir "$CTR_CLH_ROOT_DIR" \
+            --rm \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --ipc=host \
+            --net="$CTR_CLH_NET" \
+            --mount type=tmpfs,destination=/tmp \
+            --volume /dev:/dev \
+            --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+            --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --env USER="root" \
+            --env CH_LIBC="${libc}" \
+            "$CTR_IMAGE" \
+            ./scripts/run_metrics.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
-    if [ "$integration_live_migration" = true ] ;  then
-	say "Running 'live migration' integration tests for $target..."
-	$DOCKER_RUNTIME run \
-	       --workdir "$CTR_CLH_ROOT_DIR" \
-	       --rm \
-	       --privileged \
-	       --security-opt seccomp=unconfined \
-	       --ipc=host \
-	       --net="$CTR_CLH_NET" \
-	       --mount type=tmpfs,destination=/tmp \
-	       --volume /dev:/dev \
-	       --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR"  $exported_volumes \
-	       --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	       --env USER="root" \
-	       --env CH_LIBC="${libc}" \
-	       "$CTR_IMAGE" \
-	       ./scripts/run_integration_tests_live_migration.sh "$@" || fix_dir_perms $? || exit $?
-    fi
     fix_dir_perms $?
 }
 
-cmd_build-container() {
-    container_type="dev"
-
-    while [ $# -gt 0 ]; do
-	case "$1" in
-            "-h"|"--help")  { cmd_help; exit 1; } ;;
-            "--dev")        { container_type="dev"; } ;;
-            "--")           { shift; break; } ;;
-            *)
-		die "Unknown build-container argument: $1. Please use --help for help."
-		;;
-	esac
-	shift
-    done
-
+build_container() {
     ensure_build_dir
-    ensure_latest_ctr
 
     BUILD_DIR=/tmp/cloud-hypervisor/container/
 
     mkdir -p $BUILD_DIR
-    cp $CLH_DOCKERFILE $BUILD_DIR
+    cp "$CLH_DOCKERFILE" $BUILD_DIR
 
-    [ $(uname -m) = "aarch64" ] && TARGETARCH="arm64"
-    [ $(uname -m) = "x86_64" ] && TARGETARCH="amd64"
+    [ "$(uname -m)" = "aarch64" ] && TARGETARCH="arm64"
+    [ "$(uname -m)" = "x86_64" ] && TARGETARCH="amd64"
 
     $DOCKER_RUNTIME build \
-	   --target $container_type \
-	   -t $CTR_IMAGE \
-	   -f $BUILD_DIR/Dockerfile \
-	   --build-arg TARGETARCH=$TARGETARCH \
-	   $BUILD_DIR
+        --target dev \
+        -t $CTR_IMAGE \
+        -f $BUILD_DIR/Dockerfile \
+        --build-arg TARGETARCH=$TARGETARCH \
+        $BUILD_DIR
+}
+
+cmd_build-container() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        "-h" | "--help") {
+            cmd_help
+            exit 1
+        } ;;
+        "--") {
+            shift
+            break
+        } ;;
+        *)
+            die "Unknown build-container argument: $1. Please use --help for help."
+            ;;
+        esac
+        shift
+    done
+
+    build_container
 }
 
 cmd_shell() {
     while [ $# -gt 0 ]; do
-	case "$1" in
-            "-h"|"--help")  { cmd_help; exit 1; } ;;
-            "--volumes")
-                shift
-                arg_vols="$1"
-                ;;
-            "--")           { shift; break; } ;;
-            *)
-		;;
-	esac
-	shift
+        case "$1" in
+        "-h" | "--help") {
+            cmd_help
+            exit 1
+        } ;;
+        "--volumes")
+            shift
+            arg_vols="$1"
+            ;;
+        "--") {
+            shift
+            break
+        } ;;
+        *) ;;
+
+        esac
+        shift
     done
     ensure_build_dir
     ensure_latest_ctr
@@ -535,20 +581,20 @@ cmd_shell() {
     say_warn "Starting a privileged shell prompt as root ..."
     say_warn "WARNING: Your $CLH_ROOT_DIR folder will be bind-mounted in the container under $CTR_CLH_ROOT_DIR"
     $DOCKER_RUNTIME run \
-	   -ti \
-	   --workdir "$CTR_CLH_ROOT_DIR" \
-	   --rm \
-	   --privileged \
-	   --security-opt seccomp=unconfined \
-	   --ipc=host \
-	   --net="$CTR_CLH_NET" \
-	   --tmpfs /tmp:exec \
-	   --volume /dev:/dev \
-	   --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
-	   --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
-	   --env USER="root" \
-	   --entrypoint bash \
-	   "$CTR_IMAGE"
+        -ti \
+        --workdir "$CTR_CLH_ROOT_DIR" \
+        --rm \
+        --privileged \
+        --security-opt seccomp=unconfined \
+        --ipc=host \
+        --net="$CTR_CLH_NET" \
+        --tmpfs /tmp:exec \
+        --volume /dev:/dev \
+        --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+        --env USER="root" \
+        --entrypoint bash \
+        "$CTR_IMAGE"
 
     fix_dir_perms $?
 }
@@ -557,14 +603,20 @@ cmd_shell() {
 #
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help)              { cmd_help; exit 1; } ;;
-        -y|--unattended)        { OPT_UNATTENDED=true; } ;;
-        -*)
-            die "Unknown arg: $1. Please use \`$0 help\` for help."
-            ;;
-        *)
-            break
-            ;;
+    -h | --help) {
+        cmd_help
+        exit 1
+    } ;;
+    --local) {
+        CTR_IMAGE_VERSION="local"
+        CTR_IMAGE="${CTR_IMAGE_TAG}:${CTR_IMAGE_VERSION}"
+    } ;;
+    -*)
+        die "Unknown arg: $1. Please use \`$0 help\` for help."
+        ;;
+    *)
+        break
+        ;;
     esac
     shift
 done
@@ -572,11 +624,10 @@ done
 # $1 is now a command name. Check if it is a valid command and, if so,
 # run it.
 #
-declare -f "cmd_$1" > /dev/null
+declare -f "cmd_$1" >/dev/null
 ok_or_die "Unknown command: $1. Please use \`$0 help\` for help."
 
 cmd=cmd_$1
 shift
-
 
 $cmd "$@"

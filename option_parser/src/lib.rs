@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::ParseIntError;
 use std::str::FromStr;
 
 #[derive(Default)]
@@ -37,6 +38,32 @@ impl fmt::Display for OptionParserError {
 }
 type OptionParserResult<T> = std::result::Result<T, OptionParserError>;
 
+fn split_commas_outside_brackets(s: &str) -> OptionParserResult<Vec<String>> {
+    let mut list: Vec<String> = Vec::new();
+    let mut opened_brackets: usize = 0;
+    for element in s.trim().split(',') {
+        if opened_brackets > 0 {
+            if let Some(last) = list.last_mut() {
+                *last = format!("{},{}", last, element);
+            } else {
+                return Err(OptionParserError::InvalidSyntax(s.to_owned()));
+            }
+        } else {
+            list.push(element.to_string());
+        }
+
+        opened_brackets += element.matches('[').count();
+        let closing_brackets = element.matches(']').count();
+        if closing_brackets > opened_brackets {
+            return Err(OptionParserError::InvalidSyntax(s.to_owned()));
+        } else {
+            opened_brackets -= closing_brackets;
+        }
+    }
+
+    Ok(list)
+}
+
 impl OptionParser {
     pub fn new() -> Self {
         Self {
@@ -49,10 +76,8 @@ impl OptionParser {
             return Ok(());
         }
 
-        let options_list: Vec<&str> = input.trim().split(',').collect();
-
-        for option in options_list.iter() {
-            let parts: Vec<&str> = option.split('=').collect();
+        for option in split_commas_outside_brackets(input)?.iter() {
+            let parts: Vec<&str> = option.splitn(2, '=').collect();
 
             match self.options.get_mut(parts[0]) {
                 None => return Err(OptionParserError::UnknownOption(parts[0].to_owned())),
@@ -183,7 +208,11 @@ impl FromStr for IntegerList {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let mut integer_list = Vec::new();
-        let ranges_list: Vec<&str> = s.trim().split(':').collect();
+        let ranges_list: Vec<&str> = s
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']')
+            .split(',')
+            .collect();
 
         for range in ranges_list.iter() {
             let items: Vec<&str> = range.split('-').collect();
@@ -216,42 +245,75 @@ impl FromStr for IntegerList {
     }
 }
 
-pub struct TupleTwoIntegers(pub Vec<(u64, u64)>);
-
-pub enum TupleTwoIntegersParseError {
-    InvalidValue(String),
+pub trait TupleValue {
+    fn parse_value(input: &str) -> Result<Self, TupleError>
+    where
+        Self: Sized;
 }
 
-impl FromStr for TupleTwoIntegers {
-    type Err = TupleTwoIntegersParseError;
+impl TupleValue for u64 {
+    fn parse_value(input: &str) -> Result<Self, TupleError> {
+        input.parse::<u64>().map_err(TupleError::InvalidInteger)
+    }
+}
+
+impl TupleValue for Vec<u8> {
+    fn parse_value(input: &str) -> Result<Self, TupleError> {
+        Ok(IntegerList::from_str(input)
+            .map_err(TupleError::InvalidIntegerList)?
+            .0
+            .iter()
+            .map(|v| *v as u8)
+            .collect())
+    }
+}
+
+impl TupleValue for Vec<u64> {
+    fn parse_value(input: &str) -> Result<Self, TupleError> {
+        Ok(IntegerList::from_str(input)
+            .map_err(TupleError::InvalidIntegerList)?
+            .0)
+    }
+}
+
+pub struct Tuple<S, T>(pub Vec<(S, T)>);
+
+pub enum TupleError {
+    InvalidValue(String),
+    SplitOutsideBrackets(OptionParserError),
+    InvalidIntegerList(IntegerListParseError),
+    InvalidInteger(ParseIntError),
+}
+
+impl<S: FromStr, T: TupleValue> FromStr for Tuple<S, T> {
+    type Err = TupleError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let mut list = Vec::new();
-        let tuples_list: Vec<&str> = s.trim().split(':').collect();
+        let mut list: Vec<(S, T)> = Vec::new();
 
+        let tuples_list =
+            split_commas_outside_brackets(s.trim().trim_matches(|c| c == '[' || c == ']'))
+                .map_err(TupleError::SplitOutsideBrackets)?;
         for tuple in tuples_list.iter() {
             let items: Vec<&str> = tuple.split('@').collect();
 
             if items.len() != 2 {
-                return Err(TupleTwoIntegersParseError::InvalidValue(
-                    (*tuple).to_string(),
-                ));
+                return Err(TupleError::InvalidValue((*tuple).to_string()));
             }
 
             let item1 = items[0]
-                .parse::<u64>()
-                .map_err(|_| TupleTwoIntegersParseError::InvalidValue(items[0].to_owned()))?;
-            let item2 = items[1]
-                .parse::<u64>()
-                .map_err(|_| TupleTwoIntegersParseError::InvalidValue(items[1].to_owned()))?;
+                .parse::<S>()
+                .map_err(|_| TupleError::InvalidValue(items[0].to_owned()))?;
+            let item2 = TupleValue::parse_value(items[1])?;
 
             list.push((item1, item2));
         }
 
-        Ok(TupleTwoIntegers(list))
+        Ok(Tuple(list))
     }
 }
 
+#[derive(Default)]
 pub struct StringList(pub Vec<String>);
 
 pub enum StringListParseError {
@@ -262,7 +324,12 @@ impl FromStr for StringList {
     type Err = StringListParseError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let string_list: Vec<String> = s.trim().split(':').map(|e| e.to_owned()).collect();
+        let string_list: Vec<String> = s
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']')
+            .split(',')
+            .map(|e| e.to_owned())
+            .collect();
 
         Ok(StringList(string_list))
     }

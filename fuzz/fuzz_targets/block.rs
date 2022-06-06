@@ -79,7 +79,7 @@ fuzz_target!(|bytes| {
 
     let mut q = Queue::<
         GuestMemoryAtomic<GuestMemoryMmap>,
-        QueueState<GuestMemoryAtomic<GuestMemoryMmap>>,
+        QueueState,
     >::new(guest_memory.clone(), QUEUE_SIZE);
     q.state.ready = true;
     q.state.size = QUEUE_SIZE / 2;
@@ -139,8 +139,7 @@ pub struct NoopVirtioInterrupt {}
 impl VirtioInterrupt for NoopVirtioInterrupt {
     fn trigger(
         &self,
-        _int_type: &VirtioInterruptType,
-        _queue: Option<&Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        _int_type: VirtioInterruptType,
     ) -> std::result::Result<(), std::io::Error> {
         Ok(())
     }

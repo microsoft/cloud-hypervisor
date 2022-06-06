@@ -10,7 +10,12 @@
 
 //! Implements virtio queues
 
-use std::fmt;
+use std::fmt::{self, Debug};
+use std::sync::Arc;
+use virtio_queue::Queue;
+use vm_memory::{bitmap::AtomicBitmap, GuestAddress, GuestMemoryAtomic};
+
+type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 
 pub mod queue;
 pub use queue::*;
@@ -85,5 +90,57 @@ impl fmt::Display for VirtioDeviceType {
             VirtioDeviceType::Unknown => "UNKNOWN",
         };
         write!(f, "{}", output)
+    }
+}
+
+/// Trait for devices with access to data in memory being limited and/or
+/// translated.
+pub trait AccessPlatform: Send + Sync + Debug {
+    /// Provide a way to translate GVA address ranges into GPAs.
+    fn translate_gva(&self, base: u64, size: u64) -> std::result::Result<u64, std::io::Error>;
+    /// Provide a way to translate GPA address ranges into GVAs.
+    fn translate_gpa(&self, base: u64, size: u64) -> std::result::Result<u64, std::io::Error>;
+}
+
+pub trait Translatable {
+    fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
+    fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
+}
+
+impl Translatable for GuestAddress {
+    fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
+        if let Some(access_platform) = access_platform {
+            GuestAddress(access_platform.translate_gva(self.0, len as u64).unwrap())
+        } else {
+            *self
+        }
+    }
+    fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
+        if let Some(access_platform) = access_platform {
+            GuestAddress(access_platform.translate_gpa(self.0, len as u64).unwrap())
+        } else {
+            *self
+        }
+    }
+}
+
+/// Helper for cloning a Queue since QueueState doesn't derive Clone
+pub fn clone_queue(
+    queue: &Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
+) -> Queue<GuestMemoryAtomic<GuestMemoryMmap>> {
+    Queue::<GuestMemoryAtomic<GuestMemoryMmap>, virtio_queue::QueueState> {
+        mem: queue.mem.clone(),
+        state: virtio_queue::QueueState {
+            max_size: queue.state.max_size,
+            next_avail: queue.state.next_avail,
+            next_used: queue.state.next_used,
+            event_idx_enabled: queue.state.event_idx_enabled,
+            num_added: queue.state.num_added,
+            size: queue.state.size,
+            ready: queue.state.ready,
+            desc_table: queue.state.desc_table,
+            avail_ring: queue.state.avail_ring,
+            used_ring: queue.state.used_ring,
+        },
     }
 }

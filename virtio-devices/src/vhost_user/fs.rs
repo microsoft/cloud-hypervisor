@@ -8,7 +8,7 @@ use crate::thread_helper::spawn_virtio_thread;
 use crate::vhost_user::VhostUserCommon;
 use crate::{
     ActivateError, ActivateResult, UserspaceMapping, VirtioCommon, VirtioDevice, VirtioDeviceType,
-    VirtioInterrupt, VirtioSharedMemoryList,
+    VirtioInterrupt, VirtioSharedMemoryList, VIRTIO_F_IOMMU_PLATFORM,
 };
 use crate::{GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 use libc::{self, c_void, off64_t, pread64, pwrite64};
@@ -106,11 +106,6 @@ impl VhostUserMasterReqHandler for SlaveReqHandler {
                 )
             };
             if ret == libc::MAP_FAILED {
-                return Err(io::Error::last_os_error());
-            }
-
-            let ret = unsafe { libc::close(fd.as_raw_fd()) };
-            if ret == -1 {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -271,11 +266,6 @@ impl VhostUserMasterReqHandler for SlaveReqHandler {
             }
         }
 
-        let ret = unsafe { libc::close(fd.as_raw_fd()) };
-        if ret == -1 {
-            return Err(io::Error::last_os_error());
-        }
-
         Ok(done)
     }
 }
@@ -311,6 +301,7 @@ pub struct Fs {
     guest_memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     epoll_thread: Option<thread::JoinHandle<()>>,
     exit_evt: EventFd,
+    iommu: bool,
 }
 
 impl Fs {
@@ -326,6 +317,7 @@ impl Fs {
         seccomp_action: SeccompAction,
         restoring: bool,
         exit_evt: EventFd,
+        iommu: bool,
     ) -> Result<Fs> {
         let mut slave_req_support = false;
 
@@ -357,6 +349,7 @@ impl Fs {
                 guest_memory: None,
                 epoll_thread: None,
                 exit_evt,
+                iommu,
             });
         }
 
@@ -413,7 +406,11 @@ impl Fs {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Fs as u32,
                 avail_features: acked_features,
-                acked_features: 0,
+                // If part of the available features that have been acked, the
+                // PROTOCOL_FEATURES bit must be already set through the VIRTIO
+                // acked features as we know the guest would never ack it, thus
+                // the feature would be lost.
+                acked_features: acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
                 queue_sizes: vec![queue_size; num_queues],
                 paused_sync: Some(Arc::new(Barrier::new(2))),
                 min_queues: DEFAULT_QUEUE_NUMBER as u16,
@@ -434,6 +431,7 @@ impl Fs {
             guest_memory: None,
             epoll_thread: None,
             exit_evt,
+            iommu,
         })
     }
 
@@ -487,7 +485,11 @@ impl VirtioDevice for Fs {
     }
 
     fn features(&self) -> u64 {
-        self.common.avail_features
+        let mut features = self.common.avail_features;
+        if self.iommu {
+            features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
+        }
+        features
     }
 
     fn ack_features(&mut self, value: u64) {
@@ -538,12 +540,6 @@ impl VirtioDevice for Fs {
             None
         };
 
-        // The backend acknowledged features must contain the protocol feature
-        // bit in case it was initially set but lost through the features
-        // negotiation with the guest.
-        let backend_acked_features = self.common.acked_features
-            | (self.common.avail_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits());
-
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
@@ -553,7 +549,7 @@ impl VirtioDevice for Fs {
             queues,
             queue_evts,
             interrupt_cb,
-            backend_acked_features,
+            self.common.acked_features,
             slave_req_handler,
             kill_evt,
             pause_evt,
@@ -696,6 +692,10 @@ impl Migratable for Fs {
 
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
         self.vu_common.dirty_log(&self.guest_memory)
+    }
+
+    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+        self.vu_common.start_migration()
     }
 
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {

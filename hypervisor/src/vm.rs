@@ -10,23 +10,27 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::aarch64::VcpuInit;
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::gic::Vgic;
 use crate::cpu::Vcpu;
 use crate::device::Device;
+#[cfg(feature = "kvm")]
+use crate::kvm::KvmVmState as VmState;
+#[cfg(feature = "mshv")]
+use crate::mshv::HvState as VmState;
 #[cfg(feature = "tdx")]
 use crate::x86_64::CpuId;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 use crate::ClockData;
 use crate::CreateDevice;
-#[cfg(feature = "mshv")]
-use crate::HvState as VmState;
-#[cfg(feature = "kvm")]
-use crate::KvmVmState as VmState;
 use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
 #[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
 #[cfg(target_arch = "x86_64")]
 use std::fs::File;
 use std::sync::Arc;
+#[cfg(target_arch = "aarch64")]
+use std::sync::Mutex;
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -57,6 +61,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to create Vcpu: {0}")]
     CreateVcpu(#[source] anyhow::Error),
+    ///
+    /// Identity map address error
+    ///
+    #[error("Failed to set identity map address: {0}")]
+    SetIdentityMapAddress(#[source] anyhow::Error),
     ///
     /// TSS address error
     ///
@@ -205,11 +214,49 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to initialize memory region TDX: {0}")]
     InitMemRegionTdx(#[source] std::io::Error),
+    ///
+    /// Create Vgic error
+    ///
+    #[error("Failed to create Vgic: {0}")]
+    CreateVgic(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
 ///
 pub type Result<T> = std::result::Result<T, HypervisorVmError>;
+
+/// Configuration data for legacy interrupts.
+///
+/// On x86 platforms, legacy interrupts means those interrupts routed through PICs or IOAPICs.
+#[derive(Copy, Clone, Debug)]
+pub struct LegacyIrqSourceConfig {
+    pub irqchip: u32,
+    pub pin: u32,
+}
+
+/// Configuration data for MSI/MSI-X interrupts.
+///
+/// On x86 platforms, these interrupts are vectors delivered directly to the LAPIC.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct MsiIrqSourceConfig {
+    /// High address to delivery message signaled interrupt.
+    pub high_addr: u32,
+    /// Low address to delivery message signaled interrupt.
+    pub low_addr: u32,
+    /// Data to write to delivery message signaled interrupt.
+    pub data: u32,
+    /// Unique ID of the device to delivery message signaled interrupt.
+    pub devid: u32,
+}
+
+/// Configuration data for an interrupt source.
+#[derive(Copy, Clone, Debug)]
+pub enum InterruptSourceConfig {
+    /// Configuration data for Legacy interrupts.
+    LegacyIrq(LegacyIrqSourceConfig),
+    /// Configuration data for PciMsi, PciMsix and generic MSI interrupts.
+    MsiIrq(MsiIrqSourceConfig),
+}
 
 ///
 /// Trait to represent a Vm
@@ -217,6 +264,9 @@ pub type Result<T> = std::result::Result<T, HypervisorVmError>;
 /// This crate provides a hypervisor-agnostic interfaces for Vm
 ///
 pub trait Vm: Send + Sync {
+    #[cfg(target_arch = "x86_64")]
+    /// Sets the address of the one-page region in the VM's address space.
+    fn set_identity_map_address(&self, address: u64) -> Result<()>;
     #[cfg(target_arch = "x86_64")]
     /// Sets the address of the three-page region in the VM's address space.
     fn set_tss_address(&self, offset: usize) -> Result<()>;
@@ -227,7 +277,18 @@ pub trait Vm: Send + Sync {
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding
-    fn create_vcpu(&self, id: u8, vmmops: Option<Arc<dyn VmmOps>>) -> Result<Arc<dyn Vcpu>>;
+    fn create_vcpu(&self, id: u8, vm_ops: Option<Arc<dyn VmOps>>) -> Result<Arc<dyn Vcpu>>;
+    #[cfg(target_arch = "aarch64")]
+    fn create_vgic(
+        &self,
+        vcpu_count: u64,
+        dist_addr: u64,
+        dist_size: u64,
+        redist_size: u64,
+        msi_size: u64,
+        nr_irqs: u32,
+    ) -> Result<Arc<Mutex<dyn Vgic>>>;
+
     /// Registers an event to be signaled whenever a certain address is written to.
     fn register_ioevent(
         &self,
@@ -237,6 +298,8 @@ pub trait Vm: Send + Sync {
     ) -> Result<()>;
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> Result<()>;
+    // Construct a routing entry
+    fn make_routing_entry(&self, gsi: u32, config: &InterruptSourceConfig) -> IrqRoutingEntry;
     /// Sets the GSI routing table entries, overwriting any previously set
     fn set_gsi_routing(&self, entries: &[IrqRoutingEntry]) -> Result<()>;
     /// Creates a memory region structure that can be used with {create/remove}_user_memory_region
@@ -313,7 +376,7 @@ pub trait Vm: Send + Sync {
     ) -> Result<()>;
 }
 
-pub trait VmmOps: Send + Sync {
+pub trait VmOps: Send + Sync {
     fn guest_mem_write(&self, gpa: u64, buf: &[u8]) -> Result<usize>;
     fn guest_mem_read(&self, gpa: u64, buf: &mut [u8]) -> Result<usize>;
     fn mmio_read(&self, gpa: u64, data: &mut [u8]) -> Result<()>;

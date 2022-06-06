@@ -37,10 +37,10 @@ pub mod kvm;
 pub mod mshv;
 
 /// Hypevisor related module
-pub mod hypervisor;
+mod hypervisor;
 
 /// Vm related module
-pub mod vm;
+mod vm;
 
 /// CPU related module
 pub mod cpu;
@@ -48,16 +48,32 @@ pub mod cpu;
 /// Device related module
 mod device;
 
-pub use crate::hypervisor::{Hypervisor, HypervisorError};
 pub use cpu::{HypervisorCpuError, Vcpu, VmExit};
 pub use device::{Device, HypervisorDeviceError};
+pub use hypervisor::{Hypervisor, HypervisorError};
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+pub use kvm::x86_64;
+#[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+pub use kvm::{aarch64, GicState};
+// Aliased types exposed from both hypervisors
 #[cfg(feature = "kvm")]
-pub use kvm::*;
+pub use kvm::{
+    ClockData, CpuState, CreateDevice, DeviceAttr, DeviceFd, IoEventAddress, IrqRoutingEntry,
+    MemoryRegion, MpState, VcpuEvents, VcpuExit, VmState,
+};
 #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
-pub use mshv::*;
-pub use vm::{DataMatch, HypervisorVmError, Vm};
-
+pub use mshv::x86_64;
+// Aliased types exposed from both hypervisors
+#[cfg(all(feature = "mshv", target_arch = "x86_64"))]
+pub use mshv::{
+    CpuState, CreateDevice, DeviceAttr, DeviceFd, IoEventAddress, IrqRoutingEntry, MemoryRegion,
+    MpState, VcpuEvents, VcpuExit, VmState,
+};
 use std::sync::Arc;
+pub use vm::{
+    DataMatch, HypervisorVmError, InterruptSourceConfig, LegacyIrqSourceConfig, MsiIrqSourceConfig,
+    Vm, VmOps,
+};
 
 pub fn new() -> std::result::Result<Arc<dyn Hypervisor>, HypervisorError> {
     #[cfg(feature = "kvm")]

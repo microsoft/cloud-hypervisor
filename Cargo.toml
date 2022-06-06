@@ -1,67 +1,67 @@
 [package]
 name = "cloud-hypervisor"
-version = "19.0.0"
+version = "24.0.0"
 authors = ["The Cloud Hypervisor Authors"]
-edition = "2018"
+edition = "2021"
 default-run = "cloud-hypervisor"
 build = "build.rs"
 license = "LICENSE-APACHE & LICENSE-BSD-3-Clause"
 description = "Open source Virtual Machine Monitor (VMM) that runs on top of KVM"
 homepage = "https://github.com/cloud-hypervisor/cloud-hypervisor"
+# Minimum buildable version:
+# Keep in sync with version in .github/workflows/build.yaml
+rust-version = "1.60"
 
 [profile.release]
 lto = true
 
 [dependencies]
-anyhow = "1.0.46"
+anyhow = "1.0.57"
 api_client = { path = "api_client" }
-clap = { version = "2.33.3", features = ["wrap_help"] }
+clap = { version = "3.1.18", features = ["wrap_help","cargo"] }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
-libc = "0.2.107"
-log = { version = "0.4.14", features = ["std"] }
+libc = "0.2.126"
+log = { version = "0.4.17", features = ["std"] }
 option_parser = { path = "option_parser" }
 seccompiler = "0.2.0"
-serde_json = "1.0.69"
-signal-hook = "0.3.10"
-thiserror = "1.0.30"
+serde_json = "1.0.81"
+signal-hook = "0.3.14"
+thiserror = "1.0.31"
 vmm = { path = "vmm" }
 vmm-sys-util = "0.9.0"
-vm-memory = "0.6.0"
-arch = { path = "arch" }
+vm-memory = "0.8.0"
 
 [build-dependencies]
-clap = { version = "2.33.3", features = ["wrap_help"] }
+clap = { version = "3.1.18", features = ["cargo"] }
 
 # List of patched crates
 [patch.crates-io]
-kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.5.0", features = ["with-serde", "fam-wrappers"] }
+kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.5.0-tdx" }
+kvm-ioctls = { git = "https://github.com/rust-vmm/kvm-ioctls", branch = "main" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
 [dev-dependencies]
-credibility = "0.1.3"
 dirs = "4.0.0"
 lazy_static= "1.4.0"
 net_util = { path = "net_util" }
-serde_json = "1.0.69"
+serde_json = "1.0.81"
 test_infra = { path = "test_infra" }
 wait-timeout = "0.2.0"
 
 [features]
 default = ["common", "kvm"]
 # Common features for all hypervisors
-common = ["acpi", "cmos", "fwdebug", "io_uring"]
-acpi = ["vmm/acpi"]
+common = ["fwdebug"]
+amx = ["vmm/amx"]
 cmos = ["vmm/cmos"]
 fwdebug = ["vmm/fwdebug"]
-kvm = ["vmm/kvm", "arch/kvm"]
-mshv = ["vmm/mshv", "arch/mshv"]
-io_uring = ["vmm/io_uring"]
+gdb = ["vmm/gdb"]
+guest_debug = ["vmm/guest_debug"]
+kvm = ["vmm/kvm"]
+mshv = ["vmm/mshv"]
 tdx = ["vmm/tdx"]
-
-# Integration tests require a special environment to run in
-integration_tests = []
 
 [workspace]
 members = [
@@ -76,22 +76,21 @@ members = [
     "net_util",
     "option_parser",
     "pci",
+    "performance-metrics",
     "qcow",
     "rate_limiter",
+    "test_infra",
     "vfio_user",
     "vhdx",
-    "vhost_user_backend",
     "vhost_user_block",
     "vhost_user_net",
     "virtio-devices",
-    "virtio-queue",
     "vmm",
     "vm-allocator",
     "vm-device",
     "vm-migration",
     "vm-virtio"
 ]
-exclude = ["test_infra"]
 
 [patch."https://github.com/rust-vmm/mshv"]
 mshv-bindings = { path = "../mshv/mshv-bindings" }

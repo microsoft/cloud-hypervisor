@@ -8,9 +8,8 @@
 //
 //
 
-///
-/// Export generically-named wrappers of kvm-bindings for Unix-based platforms
-///
+pub mod gic;
+
 use crate::kvm::{KvmError, KvmResult};
 use kvm_bindings::{
     kvm_mp_state, kvm_one_reg, kvm_regs, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG,
@@ -23,12 +22,8 @@ use kvm_bindings::{
 pub use kvm_bindings::{
     kvm_one_reg as Register, kvm_regs as StandardRegisters, kvm_vcpu_init as VcpuInit, RegList,
 };
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 pub use {kvm_ioctls::Cap, kvm_ioctls::Kvm};
-
-// Following are macros that help with getting the ID of a aarch64 core register.
-// The core register are represented by the user_pt_regs structure. Look for it in
-// arch/arm64/include/uapi/asm/ptrace.h.
 
 // This macro gets the offset of a structure (i.e `str`) member (i.e `field`) without having
 // an instance of that structure.
@@ -36,13 +31,27 @@ pub use {kvm_ioctls::Cap, kvm_ioctls::Kvm};
 macro_rules! offset__of {
     ($str:ty, $($field:ident)+) => ({
         let tmp: std::mem::MaybeUninit<$str> = std::mem::MaybeUninit::uninit();
-        let tmp = unsafe { tmp.assume_init() };
-        let base = &tmp as *const _ as usize;
-        let member =  &tmp.$($field)* as *const _ as usize;
+        let base = tmp.as_ptr();
 
-        member - base
+        // Avoid warnings when nesting `unsafe` blocks.
+        #[allow(unused_unsafe)]
+        // SAFETY: The pointer is valid and aligned, just not initialised. Using `addr_of` ensures
+        // that we don't actually read from `base` (which would be UB) nor create an intermediate
+        // reference.
+        let member = unsafe { core::ptr::addr_of!((*base).$($field)*) } as *const u8;
+
+        // Avoid warnings when nesting `unsafe` blocks.
+        #[allow(unused_unsafe)]
+        // SAFETY: The two pointers are within the same allocated object `tmp`. All requirements
+        // from offset_from are upheld.
+        unsafe { member.offset_from(base as *const u8) as usize }
     });
 }
+
+// Following are macros that help with getting the ID of a aarch64 core register.
+// The core register are represented by the user_pt_regs structure. Look for it in
+// arch/arm64/include/uapi/asm/ptrace.h.
+
 // Get the ID of a core register
 #[macro_export]
 macro_rules! arm64_core_reg_id {

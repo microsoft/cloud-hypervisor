@@ -6,16 +6,13 @@ use crate::thread_helper::spawn_virtio_thread;
 use crate::vhost_user::vu_common_ctrl::{VhostUserConfig, VhostUserHandle};
 use crate::vhost_user::{Error, Result, VhostUserCommon};
 use crate::{
-    ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, VirtioCommon, VirtioDevice,
-    VirtioDeviceType, VirtioInterrupt, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_RING_EVENT_IDX,
-    VIRTIO_F_VERSION_1,
+    ActivateResult, NetCtrlEpollHandler, VirtioCommon, VirtioDevice, VirtioDeviceType,
+    VirtioInterrupt, VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1,
 };
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 use net_util::{build_net_config_space, CtrlQueue, MacAddr, VirtioNetConfig};
 use seccompiler::SeccompAction;
-use std::os::unix::io::AsRawFd;
 use std::result;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::vec::Vec;
@@ -29,6 +26,7 @@ use virtio_bindings::bindings::virtio_net::{
     VIRTIO_NET_F_HOST_ECN, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_TSO6, VIRTIO_NET_F_HOST_UFO,
     VIRTIO_NET_F_MAC, VIRTIO_NET_F_MRG_RXBUF,
 };
+use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use virtio_queue::Queue;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::{
@@ -53,57 +51,6 @@ impl VersionMapped for State {}
 struct SlaveReqHandler {}
 impl VhostUserMasterReqHandler for SlaveReqHandler {}
 
-/// Control queue
-// Event available on the control queue.
-const CTRL_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
-
-pub struct NetCtrlEpollHandler {
-    pub mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    pub kill_evt: EventFd,
-    pub pause_evt: EventFd,
-    pub ctrl_q: CtrlQueue,
-    pub queue_evt: EventFd,
-    pub queue: Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
-}
-
-impl NetCtrlEpollHandler {
-    pub fn run_ctrl(
-        &mut self,
-        paused: Arc<AtomicBool>,
-        paused_sync: Arc<Barrier>,
-    ) -> std::result::Result<(), EpollHelperError> {
-        let mut helper = EpollHelper::new(&self.kill_evt, &self.pause_evt)?;
-        helper.add_event(self.queue_evt.as_raw_fd(), CTRL_QUEUE_EVENT)?;
-        helper.run(paused, paused_sync, self)?;
-
-        Ok(())
-    }
-}
-
-impl EpollHelperHandler for NetCtrlEpollHandler {
-    fn handle_event(&mut self, _helper: &mut EpollHelper, event: &epoll::Event) -> bool {
-        let ev_type = event.data as u16;
-        match ev_type {
-            CTRL_QUEUE_EVENT => {
-                if let Err(e) = self.queue_evt.read() {
-                    error!("failed to get ctl queue event: {:?}", e);
-                    return true;
-                }
-                if let Err(e) = self.ctrl_q.process(&mut self.queue) {
-                    error!("failed to process ctrl queue: {:?}", e);
-                    return true;
-                }
-            }
-            _ => {
-                error!("Unknown event for virtio-net");
-                return true;
-            }
-        }
-
-        false
-    }
-}
-
 pub struct Net {
     common: VirtioCommon,
     vu_common: VhostUserCommon,
@@ -114,10 +61,12 @@ pub struct Net {
     epoll_thread: Option<thread::JoinHandle<()>>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
+    iommu: bool,
 }
 
 impl Net {
     /// Create a new vhost-user-net device
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         mac_addr: MacAddr,
@@ -126,6 +75,7 @@ impl Net {
         seccomp_action: SeccompAction,
         restoring: bool,
         exit_evt: EventFd,
+        iommu: bool,
     ) -> Result<Net> {
         let mut num_queues = vu_cfg.num_queues;
 
@@ -155,6 +105,7 @@ impl Net {
                 epoll_thread: None,
                 seccomp_action,
                 exit_evt,
+                iommu,
             });
         }
 
@@ -222,7 +173,11 @@ impl Net {
                 device_type: VirtioDeviceType::Net as u32,
                 queue_sizes: vec![vu_cfg.queue_size; num_queues],
                 avail_features: acked_features,
-                acked_features: 0,
+                // If part of the available features that have been acked, the
+                // PROTOCOL_FEATURES bit must be already set through the VIRTIO
+                // acked features as we know the guest would never ack it, thus
+                // the feature would be lost.
+                acked_features: acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
                 paused_sync: Some(Arc::new(Barrier::new(2))),
                 min_queues: DEFAULT_QUEUE_NUMBER as u16,
                 ..Default::default()
@@ -241,6 +196,7 @@ impl Net {
             epoll_thread: None,
             seccomp_action,
             exit_evt,
+            iommu,
         })
     }
 
@@ -261,9 +217,13 @@ impl Net {
         self.vu_common.acked_protocol_features = state.acked_protocol_features;
         self.vu_common.vu_num_queues = state.vu_num_queues;
 
+        // The backend acknowledged features must not contain VIRTIO_NET_F_MAC
+        // since we don't expect the backend to handle it.
+        let backend_acked_features = self.common.acked_features & !(1 << VIRTIO_NET_F_MAC);
+
         if let Err(e) = self
             .vu_common
-            .restore_backend_connection(self.common.acked_features)
+            .restore_backend_connection(backend_acked_features)
         {
             error!(
                 "Failed restoring connection with vhost-user backend: {:?}",
@@ -293,7 +253,11 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        self.common.avail_features
+        let mut features = self.common.avail_features;
+        if self.iommu {
+            features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
+        }
+        features
     }
 
     fn ack_features(&mut self, value: u64) {
@@ -315,19 +279,25 @@ impl VirtioDevice for Net {
         self.guest_memory = Some(mem.clone());
 
         let num_queues = queues.len();
+        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
         if self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into()) && num_queues % 2 != 0 {
-            let cvq_queue = queues.remove(num_queues - 1);
-            let cvq_queue_evt = queue_evts.remove(num_queues - 1);
+            let ctrl_queue_index = num_queues - 1;
+            let mut ctrl_queue = queues.remove(ctrl_queue_index);
+            let ctrl_queue_evt = queue_evts.remove(ctrl_queue_index);
+
+            ctrl_queue.set_event_idx(event_idx);
 
             let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
             let mut ctrl_handler = NetCtrlEpollHandler {
-                mem: mem.clone(),
                 kill_evt,
                 pause_evt,
                 ctrl_q: CtrlQueue::new(Vec::new()),
-                queue: cvq_queue,
-                queue_evt: cvq_queue_evt,
+                queue: ctrl_queue,
+                queue_evt: ctrl_queue_evt,
+                access_platform: None,
+                interrupt_cb: interrupt_cb.clone(),
+                queue_index: ctrl_queue_index as u16,
             };
 
             let paused = self.common.paused.clone();
@@ -355,12 +325,9 @@ impl VirtioDevice for Net {
 
         let slave_req_handler: Option<MasterReqHandler<SlaveReqHandler>> = None;
 
-        // The backend acknowledged features must contain the protocol feature
-        // bit in case it was initially set but lost through the features
-        // negotiation with the guest. Additionally, it must not contain
-        // VIRTIO_NET_F_MAC since we don't expect the backend to handle it.
-        let backend_acked_features = self.common.acked_features & !(1 << VIRTIO_NET_F_MAC)
-            | (self.common.avail_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits());
+        // The backend acknowledged features must not contain VIRTIO_NET_F_MAC
+        // since we don't expect the backend to handle it.
+        let backend_acked_features = self.common.acked_features & !(1 << VIRTIO_NET_F_MAC);
 
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
@@ -486,6 +453,10 @@ impl Migratable for Net {
 
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
         self.vu_common.dirty_log(&self.guest_memory)
+    }
+
+    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
+        self.vu_common.start_migration()
     }
 
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {

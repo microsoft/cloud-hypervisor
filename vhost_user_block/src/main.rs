@@ -12,18 +12,18 @@
 extern crate clap;
 extern crate vhost_user_block;
 
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use vhost_user_block::start_block_backend;
 
 fn main() {
     env_logger::init();
 
-    let cmd_arguments = App::new("vhost-user-blk backend")
+    let cmd_arguments = Command::new("vhost-user-blk backend")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Launch a vhost-user-blk backend.")
         .arg(
-            Arg::with_name("block-backend")
+            Arg::new("block-backend")
                 .long("block-backend")
                 .help(vhost_user_block::SYNTAX)
                 .takes_value(true)

@@ -6,26 +6,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use crate::NumaNodes;
+use crate::{NumaNodes, PciSpaceInfo};
 use byteorder::{BigEndian, ByteOrder};
+use hypervisor::arch::aarch64::gic::Vgic;
 use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
 use std::result;
 use std::str;
+use std::sync::{Arc, Mutex};
 
 use super::super::DeviceType;
 use super::super::GuestMemoryMmap;
 use super::super::InitramfsConfig;
-use super::get_fdt_addr;
-use super::gic::GicDevice;
 use super::layout::{
     IRQ_BASE, MEM_32BIT_DEVICES_SIZE, MEM_32BIT_DEVICES_START, MEM_PCI_IO_SIZE, MEM_PCI_IO_START,
-    PCI_HIGH_BASE, PCI_MMCONFIG_SIZE, PCI_MMCONFIG_START,
+    PCI_HIGH_BASE, PCI_MMIO_CONFIG_SIZE_PER_SEGMENT,
 };
 use vm_fdt::{FdtWriter, FdtWriterResult};
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryRegion};
+use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError, GuestMemoryRegion};
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -51,10 +51,15 @@ const SIZE_CELLS: u32 = 0x2;
 // Look for "The 1st cell..."
 const GIC_FDT_IRQ_TYPE_SPI: u32 = 0;
 const GIC_FDT_IRQ_TYPE_PPI: u32 = 1;
+const GIC_FDT_IRQ_PPI_CPU_SHIFT: u32 = 8;
+const GIC_FDT_IRQ_PPI_CPU_MASK: u32 = 0xff << GIC_FDT_IRQ_PPI_CPU_SHIFT;
 
 // From https://elixir.bootlin.com/linux/v4.9.62/source/include/dt-bindings/interrupt-controller/irq.h#L17
 const IRQ_TYPE_EDGE_RISING: u32 = 1;
 const IRQ_TYPE_LEVEL_HI: u32 = 4;
+
+// PMU PPI interrupt number
+pub const AARCH64_PMU_IRQ: u32 = 7;
 
 // Keys and Buttons
 // System Power Down
@@ -86,11 +91,12 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     vcpu_mpidr: Vec<u64>,
     vcpu_topology: Option<(u8, u8, u8)>,
     device_info: &HashMap<(DeviceType, String), T, S>,
-    gic_device: &dyn GicDevice,
+    gic_device: &Arc<Mutex<dyn Vgic>>,
     initrd: &Option<InitramfsConfig>,
-    pci_space_address: &(u64, u64),
+    pci_space_info: &[PciSpaceInfo],
     numa_nodes: &NumaNodes,
     virtio_iommu_bdf: Option<u32>,
+    pmu_supported: bool,
 ) -> FdtWriterResult<Vec<u8>> {
     // Allocate stuff necessary for the holding the blob.
     let mut fdt = FdtWriter::new().unwrap();
@@ -114,15 +120,13 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     create_chosen_node(&mut fdt, cmdline, initrd)?;
     create_gic_node(&mut fdt, gic_device)?;
     create_timer_node(&mut fdt)?;
+    if pmu_supported {
+        create_pmu_node(&mut fdt, vcpu_mpidr.len())?;
+    }
     create_clock_node(&mut fdt)?;
     create_psci_node(&mut fdt)?;
     create_devices_node(&mut fdt, device_info)?;
-    create_pci_nodes(
-        &mut fdt,
-        pci_space_address.0,
-        pci_space_address.1,
-        virtio_iommu_bdf,
-    )?;
+    create_pci_nodes(&mut fdt, pci_space_info, virtio_iommu_bdf)?;
     if numa_nodes.len() > 1 {
         create_distance_map_node(&mut fdt, numa_nodes)?;
     }
@@ -137,9 +141,8 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
 
 pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Write FDT to memory.
-    let fdt_address = GuestAddress(get_fdt_addr());
     guest_mem
-        .write_slice(fdt_final.as_slice(), fdt_address)
+        .write_slice(fdt_final.as_slice(), super::layout::FDT_START)
         .map_err(Error::WriteFdtToMemory)?;
     Ok(())
 }
@@ -157,9 +160,6 @@ fn create_cpu_nodes(
     fdt.property_u32("#size-cells", 0x0)?;
 
     let num_cpus = vcpu_mpidr.len();
-    let threads_per_core = vcpu_topology.unwrap_or_default().0 as u8;
-    let cores_per_package = vcpu_topology.unwrap_or_default().1 as u8;
-    let packages = vcpu_topology.unwrap_or_default().2 as u8;
 
     for (cpu_id, mpidr) in vcpu_mpidr.iter().enumerate().take(num_cpus) {
         let cpu_name = format!("cpu@{:x}", cpu_id);
@@ -188,32 +188,9 @@ fn create_cpu_nodes(
         fdt.end_node(cpu_node)?;
     }
 
-    // If there is a valid cpu topology config, create the cpu-map node.
-    if (threads_per_core > 0)
-        && (cores_per_package > 0)
-        && (packages > 0)
-        && (num_cpus as u8 == threads_per_core * cores_per_package * packages)
-    {
+    if let Some(topology) = vcpu_topology {
+        let (threads_per_core, cores_per_package, packages) = topology;
         let cpu_map_node = fdt.begin_node("cpu-map")?;
-        // Create mappings between CPU index and cluster,core, and thread.
-        let mut cluster_core_thread_to_cpuidx = HashMap::new();
-        for cpu_idx in 0..num_cpus as u8 {
-            if threads_per_core > 1 {
-                cluster_core_thread_to_cpuidx.insert(
-                    (
-                        cpu_idx / (cores_per_package * threads_per_core),
-                        (cpu_idx / threads_per_core) % cores_per_package,
-                        cpu_idx % threads_per_core,
-                    ),
-                    cpu_idx,
-                );
-            } else {
-                cluster_core_thread_to_cpuidx.insert(
-                    (cpu_idx / cores_per_package, cpu_idx % cores_per_package, 0),
-                    cpu_idx,
-                );
-            }
-        }
 
         // Create device tree nodes with regard of above mapping.
         for cluster_idx in 0..packages {
@@ -224,24 +201,16 @@ fn create_cpu_nodes(
                 let core_name = format!("core{:x}", core_idx);
                 let core_node = fdt.begin_node(&core_name)?;
 
-                if threads_per_core > 1 {
-                    for thread_idx in 0..threads_per_core {
-                        let thread_name = format!("thread{:x}", thread_idx);
-                        let thread_node = fdt.begin_node(&thread_name)?;
-                        let cpu_idx = cluster_core_thread_to_cpuidx
-                            .get(&(cluster_idx, core_idx, thread_idx))
-                            .unwrap();
-
-                        fdt.property_u32("cpu", *cpu_idx as u32 + FIRST_VCPU_PHANDLE)?;
-                        fdt.end_node(thread_node)?;
-                    }
-                } else {
-                    let cpu_idx = cluster_core_thread_to_cpuidx
-                        .get(&(cluster_idx, core_idx, 0))
-                        .unwrap();
-
-                    fdt.property_u32("cpu", *cpu_idx as u32 + FIRST_VCPU_PHANDLE)?;
+                for thread_idx in 0..threads_per_core {
+                    let thread_name = format!("thread{:x}", thread_idx);
+                    let thread_node = fdt.begin_node(&thread_name)?;
+                    let cpu_idx = threads_per_core * cores_per_package * cluster_idx
+                        + threads_per_core * core_idx
+                        + thread_idx;
+                    fdt.property_u32("cpu", cpu_idx as u32 + FIRST_VCPU_PHANDLE)?;
+                    fdt.end_node(thread_node)?;
                 }
+
                 fdt.end_node(core_node)?;
             }
             fdt.end_node(cluster_node)?;
@@ -261,40 +230,67 @@ fn create_memory_node(
     guest_mem: &GuestMemoryMmap,
     numa_nodes: &NumaNodes,
 ) -> FdtWriterResult<()> {
+    // See https://github.com/torvalds/linux/blob/58ae0b51506802713aa0e9956d1853ba4c722c98/Documentation/devicetree/bindings/numa.txt
+    // for NUMA setting in memory node.
     if numa_nodes.len() > 1 {
         for numa_node_idx in 0..numa_nodes.len() {
             let numa_node = numa_nodes.get(&(numa_node_idx as u32));
+            let mut mem_reg_prop: Vec<u64> = Vec::new();
+            let mut node_memory_addr: u64 = 0;
             // Each memory zone of numa will have its own memory node, but
             // different numa nodes should not share same memory zones.
             for memory_region in numa_node.unwrap().memory_regions.iter() {
                 let memory_region_start_addr: u64 = memory_region.start_addr().raw_value();
                 let memory_region_size: u64 = memory_region.size() as u64;
-                let mem_reg_prop = [memory_region_start_addr, memory_region_size];
-                // With feature `acpi` enabled, RAM at 0-4M is for edk2 only
-                // and should be hidden to the guest.
-                #[cfg(feature = "acpi")]
-                if memory_region_start_addr == 0 {
-                    continue;
+                mem_reg_prop.push(memory_region_start_addr);
+                mem_reg_prop.push(memory_region_size);
+                // Set the node address the first non-zero regison address
+                if node_memory_addr == 0 {
+                    node_memory_addr = memory_region_start_addr;
                 }
-
-                let memory_node_name = format!("memory@{:x}", memory_region_start_addr);
-                let memory_node = fdt.begin_node(&memory_node_name)?;
-                fdt.property_string("device_type", "memory")?;
-                fdt.property_array_u64("reg", &mem_reg_prop)?;
-                fdt.property_u32("numa-node-id", numa_node_idx as u32)?;
-                fdt.end_node(memory_node)?;
             }
+            let memory_node_name = format!("memory@{:x}", node_memory_addr);
+            let memory_node = fdt.begin_node(&memory_node_name)?;
+            fdt.property_string("device_type", "memory")?;
+            fdt.property_array_u64("reg", &mem_reg_prop)?;
+            fdt.property_u32("numa-node-id", numa_node_idx as u32)?;
+            fdt.end_node(memory_node)?;
         }
     } else {
-        let mem_size = guest_mem.last_addr().raw_value() - super::layout::RAM_64BIT_START + 1;
-        // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/booting-without-of.txt#L960
-        // for an explanation of this.
-        let mem_reg_prop = [super::layout::RAM_64BIT_START as u64, mem_size as u64];
-        let memory_node = fdt.begin_node("memory")?;
+        let last_addr = guest_mem.last_addr().raw_value();
+        if last_addr < super::layout::MEM_32BIT_RESERVED_START.raw_value() {
+            // Case 1: all RAM is under the hole
+            let mem_size = last_addr - super::layout::RAM_START.raw_value() + 1;
+            let mem_reg_prop = [super::layout::RAM_START.raw_value() as u64, mem_size as u64];
+            let memory_node = fdt.begin_node("memory")?;
+            fdt.property_string("device_type", "memory")?;
+            fdt.property_array_u64("reg", &mem_reg_prop)?;
+            fdt.end_node(memory_node)?;
+        } else {
+            // Case 2: RAM is split by the hole
+            // Region 1: RAM before the hole
+            let mem_size = super::layout::MEM_32BIT_RESERVED_START.raw_value()
+                - super::layout::RAM_START.raw_value();
+            let mem_reg_prop = [super::layout::RAM_START.raw_value() as u64, mem_size as u64];
+            let memory_node_name = format!("memory@{:x}", super::layout::RAM_START.raw_value());
+            let memory_node = fdt.begin_node(&memory_node_name)?;
+            fdt.property_string("device_type", "memory")?;
+            fdt.property_array_u64("reg", &mem_reg_prop)?;
+            fdt.end_node(memory_node)?;
 
-        fdt.property_string("device_type", "memory")?;
-        fdt.property_array_u64("reg", &mem_reg_prop)?;
-        fdt.end_node(memory_node)?;
+            // Region 2: RAM after the hole
+            let mem_size = last_addr - super::layout::RAM_64BIT_START.raw_value() + 1;
+            let mem_reg_prop = [
+                super::layout::RAM_64BIT_START.raw_value() as u64,
+                mem_size as u64,
+            ];
+            let memory_node_name =
+                format!("memory@{:x}", super::layout::RAM_64BIT_START.raw_value());
+            let memory_node = fdt.begin_node(&memory_node_name)?;
+            fdt.property_string("device_type", "memory")?;
+            fdt.property_array_u64("reg", &mem_reg_prop)?;
+            fdt.end_node(memory_node)?;
+        }
     }
 
     Ok(())
@@ -320,18 +316,18 @@ fn create_chosen_node(
     Ok(())
 }
 
-fn create_gic_node(fdt: &mut FdtWriter, gic_device: &dyn GicDevice) -> FdtWriterResult<()> {
-    let gic_reg_prop = gic_device.device_properties();
+fn create_gic_node(fdt: &mut FdtWriter, gic_device: &Arc<Mutex<dyn Vgic>>) -> FdtWriterResult<()> {
+    let gic_reg_prop = gic_device.lock().unwrap().device_properties();
 
     let intc_node = fdt.begin_node("intc")?;
 
-    fdt.property_string("compatible", gic_device.fdt_compatibility())?;
+    fdt.property_string("compatible", gic_device.lock().unwrap().fdt_compatibility())?;
     fdt.property_null("interrupt-controller")?;
     // "interrupt-cells" field specifies the number of cells needed to encode an
     // interrupt source. The type shall be a <u32> and the value shall be 3 if no PPI affinity description
     // is required.
     fdt.property_u32("#interrupt-cells", 3)?;
-    fdt.property_array_u64("reg", gic_reg_prop)?;
+    fdt.property_array_u64("reg", &gic_reg_prop)?;
     fdt.property_u32("phandle", GIC_PHANDLE)?;
     fdt.property_u32("#address-cells", 2)?;
     fdt.property_u32("#size-cells", 2)?;
@@ -339,18 +335,18 @@ fn create_gic_node(fdt: &mut FdtWriter, gic_device: &dyn GicDevice) -> FdtWriter
 
     let gic_intr_prop = [
         GIC_FDT_IRQ_TYPE_PPI,
-        gic_device.fdt_maint_irq(),
+        gic_device.lock().unwrap().fdt_maint_irq(),
         IRQ_TYPE_LEVEL_HI,
     ];
     fdt.property_array_u32("interrupts", &gic_intr_prop)?;
 
-    if gic_device.msi_compatible() {
+    if gic_device.lock().unwrap().msi_compatible() {
         let msic_node = fdt.begin_node("msic")?;
-        fdt.property_string("compatible", gic_device.msi_compatibility())?;
+        fdt.property_string("compatible", gic_device.lock().unwrap().msi_compatibility())?;
         fdt.property_null("msi-controller")?;
         fdt.property_u32("phandle", MSI_PHANDLE)?;
-        let msi_reg_prop = gic_device.msi_properties();
-        fdt.property_array_u64("reg", msi_reg_prop)?;
+        let msi_reg_prop = gic_device.lock().unwrap().msi_properties();
+        fdt.property_array_u64("reg", &msi_reg_prop)?;
         fdt.end_node(msic_node)?;
     }
 
@@ -545,109 +541,163 @@ fn create_devices_node<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Buil
     Ok(())
 }
 
+fn create_pmu_node(fdt: &mut FdtWriter, cpu_nums: usize) -> FdtWriterResult<()> {
+    let num_cpus = cpu_nums as u64 as u32;
+    let compatible = "arm,armv8-pmuv3";
+    let cpu_mask: u32 =
+        (((1 << num_cpus) - 1) << GIC_FDT_IRQ_PPI_CPU_SHIFT) & GIC_FDT_IRQ_PPI_CPU_MASK;
+    let irq = [
+        GIC_FDT_IRQ_TYPE_PPI,
+        AARCH64_PMU_IRQ,
+        cpu_mask | IRQ_TYPE_LEVEL_HI,
+    ];
+
+    let pmu_node = fdt.begin_node("pmu")?;
+    fdt.property_string("compatible", compatible)?;
+    fdt.property_array_u32("interrupts", &irq)?;
+    fdt.end_node(pmu_node)?;
+    Ok(())
+}
+
 fn create_pci_nodes(
     fdt: &mut FdtWriter,
-    pci_device_base: u64,
-    pci_device_size: u64,
+    pci_device_info: &[PciSpaceInfo],
     virtio_iommu_bdf: Option<u32>,
 ) -> FdtWriterResult<()> {
     // Add node for PCIe controller.
     // See Documentation/devicetree/bindings/pci/host-generic-pci.txt in the kernel
     // and https://elinux.org/Device_Tree_Usage.
+    // In multiple PCI segments setup, each PCI segment needs a PCI node.
+    for pci_device_info_elem in pci_device_info.iter() {
+        // EDK2 requires the PCIe high space above 4G address.
+        // The actual space in CLH follows the RAM. If the RAM space is small, the PCIe high space
+        // could fall bellow 4G.
+        // Here we cut off PCI device space below 8G in FDT to workaround the EDK2 check.
+        // But the address written in ACPI is not impacted.
+        let (pci_device_base_64bit, pci_device_size_64bit) =
+            if pci_device_info_elem.pci_device_space_start < PCI_HIGH_BASE.raw_value() {
+                (
+                    PCI_HIGH_BASE.raw_value(),
+                    pci_device_info_elem.pci_device_space_size
+                        - (PCI_HIGH_BASE.raw_value() - pci_device_info_elem.pci_device_space_start),
+                )
+            } else {
+                (
+                    pci_device_info_elem.pci_device_space_start,
+                    pci_device_info_elem.pci_device_space_size,
+                )
+            };
+        // There is no specific requirement of the 32bit MMIO range, and
+        // therefore at least we can make these ranges 4K aligned.
+        let pci_device_size_32bit: u64 =
+            MEM_32BIT_DEVICES_SIZE / ((1 << 12) * pci_device_info.len() as u64) * (1 << 12);
+        let pci_device_base_32bit: u64 = MEM_32BIT_DEVICES_START.0
+            + pci_device_size_32bit * pci_device_info_elem.pci_segment_id as u64;
 
-    // EDK2 requires the PCIe high space above 4G address.
-    // The actual space in CLH follows the RAM. If the RAM space is small, the PCIe high space
-    // could fall bellow 4G.
-    // Here we put it above 512G in FDT to workaround the EDK2 check.
-    // But the address written in ACPI is not impacted.
-    let pci_device_base_64bit: u64 = if cfg!(feature = "acpi") {
-        pci_device_base + PCI_HIGH_BASE
-    } else {
-        pci_device_base
-    };
-    let pci_device_size_64bit: u64 = if cfg!(feature = "acpi") {
-        pci_device_size - PCI_HIGH_BASE
-    } else {
-        pci_device_size
-    };
-
-    let ranges = [
-        // io addresses
-        0x1000000,
-        0_u32,
-        0_u32,
-        (MEM_PCI_IO_START.0 >> 32) as u32,
-        MEM_PCI_IO_START.0 as u32,
-        (MEM_PCI_IO_SIZE >> 32) as u32,
-        MEM_PCI_IO_SIZE as u32,
-        // mmio addresses
-        0x2000000,                                // (ss = 10: 32-bit memory space)
-        (MEM_32BIT_DEVICES_START.0 >> 32) as u32, // PCI address
-        MEM_32BIT_DEVICES_START.0 as u32,
-        (MEM_32BIT_DEVICES_START.0 >> 32) as u32, // CPU address
-        MEM_32BIT_DEVICES_START.0 as u32,
-        (MEM_32BIT_DEVICES_SIZE >> 32) as u32, // size
-        MEM_32BIT_DEVICES_SIZE as u32,
-        // device addresses
-        0x3000000,                            // (ss = 11: 64-bit memory space)
-        (pci_device_base_64bit >> 32) as u32, // PCI address
-        pci_device_base_64bit as u32,
-        (pci_device_base_64bit >> 32) as u32, // CPU address
-        pci_device_base_64bit as u32,
-        (pci_device_size_64bit >> 32) as u32, // size
-        pci_device_size_64bit as u32,
-    ];
-    let bus_range = [0, 0]; // Only bus 0
-    let reg = [PCI_MMCONFIG_START.0, PCI_MMCONFIG_SIZE];
-
-    let pci_node = fdt.begin_node("pci")?;
-    fdt.property_string("compatible", "pci-host-ecam-generic")?;
-    fdt.property_string("device_type", "pci")?;
-    fdt.property_array_u32("ranges", &ranges)?;
-    fdt.property_array_u32("bus-range", &bus_range)?;
-    fdt.property_u32("#address-cells", 3)?;
-    fdt.property_u32("#size-cells", 2)?;
-    fdt.property_array_u64("reg", &reg)?;
-    fdt.property_u32("#interrupt-cells", 1)?;
-    fdt.property_null("interrupt-map")?;
-    fdt.property_null("interrupt-map-mask")?;
-    fdt.property_null("dma-coherent")?;
-    fdt.property_u32("msi-parent", MSI_PHANDLE)?;
-
-    if let Some(virtio_iommu_bdf) = virtio_iommu_bdf {
-        // See kernel document Documentation/devicetree/bindings/pci/pci-iommu.txt
-        // for 'iommu-map' attribute setting.
-        let iommu_map = [
+        let ranges = [
+            // io addresses. Since AArch64 will not use IO address,
+            // we can set the same IO address range for every segment.
+            0x1000000,
             0_u32,
-            VIRTIO_IOMMU_PHANDLE,
             0_u32,
-            virtio_iommu_bdf,
-            virtio_iommu_bdf + 1,
-            VIRTIO_IOMMU_PHANDLE,
-            virtio_iommu_bdf + 1,
-            0xffff - virtio_iommu_bdf,
+            (MEM_PCI_IO_START.0 >> 32) as u32,
+            MEM_PCI_IO_START.0 as u32,
+            (MEM_PCI_IO_SIZE >> 32) as u32,
+            MEM_PCI_IO_SIZE as u32,
+            // mmio addresses
+            0x2000000,                            // (ss = 10: 32-bit memory space)
+            (pci_device_base_32bit >> 32) as u32, // PCI address
+            pci_device_base_32bit as u32,
+            (pci_device_base_32bit >> 32) as u32, // CPU address
+            pci_device_base_32bit as u32,
+            (pci_device_size_32bit >> 32) as u32, // size
+            pci_device_size_32bit as u32,
+            // device addresses
+            0x3000000,                            // (ss = 11: 64-bit memory space)
+            (pci_device_base_64bit >> 32) as u32, // PCI address
+            pci_device_base_64bit as u32,
+            (pci_device_base_64bit >> 32) as u32, // CPU address
+            pci_device_base_64bit as u32,
+            (pci_device_size_64bit >> 32) as u32, // size
+            pci_device_size_64bit as u32,
         ];
-        fdt.property_array_u32("iommu-map", &iommu_map)?;
+        let bus_range = [0, 0]; // Only bus 0
+        let reg = [
+            pci_device_info_elem.mmio_config_address,
+            PCI_MMIO_CONFIG_SIZE_PER_SEGMENT,
+        ];
+        // See kernel document Documentation/devicetree/bindings/pci/pci-msi.txt
+        let msi_map = [
+            // rid-base: A single cell describing the first RID matched by the entry.
+            0x0,
+            // msi-controller: A single phandle to an MSI controller.
+            MSI_PHANDLE,
+            // msi-base: An msi-specifier describing the msi-specifier produced for the
+            // first RID matched by the entry.
+            (pci_device_info_elem.pci_segment_id as u32) << 8,
+            // length: A single cell describing how many consecutive RIDs are matched
+            // following the rid-base.
+            0x100,
+        ];
 
-        // See kernel document Documentation/devicetree/bindings/virtio/iommu.txt
-        // for virtio-iommu node settings.
-        let virtio_iommu_node_name = format!("virtio_iommu@{:x}", virtio_iommu_bdf);
-        let virtio_iommu_node = fdt.begin_node(&virtio_iommu_node_name)?;
-        fdt.property_u32("#iommu-cells", 1)?;
-        fdt.property_string("compatible", "virtio,pci-iommu")?;
+        let pci_node_name = format!("pci@{:x}", pci_device_info_elem.mmio_config_address);
+        let pci_node = fdt.begin_node(&pci_node_name)?;
 
-        // 'reg' is a five-cell address encoded as
-        // (phys.hi phys.mid phys.lo size.hi size.lo). phys.hi should contain the
-        // device's BDF as 0b00000000 bbbbbbbb dddddfff 00000000. The other cells
-        // should be zero.
-        let reg = [virtio_iommu_bdf << 8, 0_u32, 0_u32, 0_u32, 0_u32];
-        fdt.property_array_u32("reg", &reg)?;
-        fdt.property_u32("phandle", VIRTIO_IOMMU_PHANDLE)?;
+        fdt.property_string("compatible", "pci-host-ecam-generic")?;
+        fdt.property_string("device_type", "pci")?;
+        fdt.property_array_u32("ranges", &ranges)?;
+        fdt.property_array_u32("bus-range", &bus_range)?;
+        fdt.property_u32(
+            "linux,pci-domain",
+            pci_device_info_elem.pci_segment_id as u32,
+        )?;
+        fdt.property_u32("#address-cells", 3)?;
+        fdt.property_u32("#size-cells", 2)?;
+        fdt.property_array_u64("reg", &reg)?;
+        fdt.property_u32("#interrupt-cells", 1)?;
+        fdt.property_null("interrupt-map")?;
+        fdt.property_null("interrupt-map-mask")?;
+        fdt.property_null("dma-coherent")?;
+        fdt.property_array_u32("msi-map", &msi_map)?;
+        fdt.property_u32("msi-parent", MSI_PHANDLE)?;
 
-        fdt.end_node(virtio_iommu_node)?;
+        if pci_device_info_elem.pci_segment_id == 0 {
+            if let Some(virtio_iommu_bdf) = virtio_iommu_bdf {
+                // See kernel document Documentation/devicetree/bindings/pci/pci-iommu.txt
+                // for 'iommu-map' attribute setting.
+                let iommu_map = [
+                    0_u32,
+                    VIRTIO_IOMMU_PHANDLE,
+                    0_u32,
+                    virtio_iommu_bdf,
+                    virtio_iommu_bdf + 1,
+                    VIRTIO_IOMMU_PHANDLE,
+                    virtio_iommu_bdf + 1,
+                    0xffff - virtio_iommu_bdf,
+                ];
+                fdt.property_array_u32("iommu-map", &iommu_map)?;
+
+                // See kernel document Documentation/devicetree/bindings/virtio/iommu.txt
+                // for virtio-iommu node settings.
+                let virtio_iommu_node_name = format!("virtio_iommu@{:x}", virtio_iommu_bdf);
+                let virtio_iommu_node = fdt.begin_node(&virtio_iommu_node_name)?;
+                fdt.property_u32("#iommu-cells", 1)?;
+                fdt.property_string("compatible", "virtio,pci-iommu")?;
+
+                // 'reg' is a five-cell address encoded as
+                // (phys.hi phys.mid phys.lo size.hi size.lo). phys.hi should contain the
+                // device's BDF as 0b00000000 bbbbbbbb dddddfff 00000000. The other cells
+                // should be zero.
+                let reg = [virtio_iommu_bdf << 8, 0_u32, 0_u32, 0_u32, 0_u32];
+                fdt.property_array_u32("reg", &reg)?;
+                fdt.property_u32("phandle", VIRTIO_IOMMU_PHANDLE)?;
+
+                fdt.end_node(virtio_iommu_node)?;
+            }
+        }
+
+        fdt.end_node(pci_node)?;
     }
-
-    fdt.end_node(pci_node)?;
 
     Ok(())
 }

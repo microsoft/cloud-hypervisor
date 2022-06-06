@@ -11,13 +11,11 @@ mkdir -p "$WORKLOADS_DIR"
 
 process_common_args "$@"
 
-# For now these values are deafult for kvm
-features_build=""
-features_test="--features integration_tests"
+# For now these values are default for kvm
+features=""
 
 if [ "$hypervisor" = "mshv" ] ;  then
-    features_build="--no-default-features --features mshv,common"
-    features_test="--no-default-features --features mshv,common,integration_tests"
+    features="--no-default-features --features mshv,common"
 fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
@@ -27,6 +25,14 @@ FW="$WORKLOADS_DIR/hypervisor-fw"
 if [ ! -f "$FW" ]; then
     pushd $WORKLOADS_DIR
     time wget --quiet $FW_URL || exit 1
+    popd
+fi
+
+OVMF_FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/edk2/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
+OVMF_FW="$WORKLOADS_DIR/CLOUDHV.fd"
+if [ ! -f "$OVMF_FW" ]; then
+    pushd $WORKLOADS_DIR
+    time wget --quiet $OVMF_FW_URL || exit 1
     popd
 fi
 
@@ -62,6 +68,23 @@ FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
     pushd $WORKLOADS_DIR
     time qemu-img convert -p -f qcow2 -O raw $FOCAL_OS_IMAGE_NAME $FOCAL_OS_RAW_IMAGE_NAME || exit 1
+    popd
+fi
+
+JAMMY_OS_IMAGE_NAME="jammy-server-cloudimg-amd64-custom-20220329-0.qcow2"
+JAMMY_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$JAMMY_OS_IMAGE_NAME"
+JAMMY_OS_IMAGE="$WORKLOADS_DIR/$JAMMY_OS_IMAGE_NAME"
+if [ ! -f "$JAMMY_OS_IMAGE" ]; then
+    pushd $WORKLOADS_DIR
+    time wget --quiet $JAMMY_OS_IMAGE_URL || exit 1
+    popd
+fi
+
+JAMMY_OS_RAW_IMAGE_NAME="jammy-server-cloudimg-amd64-custom-20220329-0.raw"
+JAMMY_OS_RAW_IMAGE="$WORKLOADS_DIR/$JAMMY_OS_RAW_IMAGE_NAME"
+if [ ! -f "$JAMMY_OS_RAW_IMAGE" ]; then
+    pushd $WORKLOADS_DIR
+    time qemu-img convert -p -f qcow2 -O raw $JAMMY_OS_IMAGE_NAME $JAMMY_OS_RAW_IMAGE_NAME || exit 1
     popd
 fi
 
@@ -101,39 +124,19 @@ popd
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
+build_custom_linux
 
-LINUX_CUSTOM_DIR="$WORKLOADS_DIR/linux-custom"
-
-if [ ! -f "$VMLINUX_IMAGE" ]; then
-    SRCDIR=$PWD
+VIRTIOFSD="$WORKLOADS_DIR/virtiofsd"
+VIRTIOFSD_DIR="virtiofsd_build"
+if [ ! -f "$VIRTIOFSD" ]; then
     pushd $WORKLOADS_DIR
-    time git clone --depth 1 "https://github.com/cloud-hypervisor/linux.git" -b "ch-5.14" $LINUX_CUSTOM_DIR
-    cp $SRCDIR/resources/linux-config-x86_64 $LINUX_CUSTOM_DIR/.config
-    popd
-fi
-
-if [ ! -f "$VMLINUX_IMAGE" ]; then
-    pushd $LINUX_CUSTOM_DIR
-    time make bzImage -j `nproc`
-    cp vmlinux $VMLINUX_IMAGE || exit 1
-    popd
-fi
-
-if [ -d "$LINUX_CUSTOM_DIR" ]; then
-    rm -rf $LINUX_CUSTOM_DIR
-fi
-
-VIRTIOFSD_RS="$WORKLOADS_DIR/virtiofsd-rs"
-VIRTIOFSD_RS_DIR="virtiofsd_rs_build"
-if [ ! -f "$VIRTIOFSD_RS" ]; then
-    pushd $WORKLOADS_DIR
-    git clone "https://gitlab.com/virtio-fs/virtiofsd-rs.git" $VIRTIOFSD_RS_DIR
-    git checkout c847ab63acabed2ed6e6913b9c76bb5099a1d4cb
-    pushd $VIRTIOFSD_RS_DIR
+    git clone "https://gitlab.com/virtio-fs/virtiofsd.git" $VIRTIOFSD_DIR
+    pushd $VIRTIOFSD_DIR
+    git checkout v1.1.0
     time cargo build --release
-    cp target/release/virtiofsd-rs $VIRTIOFSD_RS || exit 1
+    cp target/release/virtiofsd $VIRTIOFSD || exit 1
     popd
-    rm -rf $VIRTIOFSD_RS_DIR
+    rm -rf $VIRTIOFSD_DIR
     popd
 fi
 
@@ -168,14 +171,8 @@ cp $FW $VFIO_DIR
 cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
 
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
-CFLAGS=""
-TARGET_CC=""
-if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-TARGET_CC="musl-gcc"
-CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
-fi
 
-cargo build --all  --release $features_build --target $BUILD_TARGET
+cargo build --all  --release $features --target $BUILD_TARGET
 strip target/$BUILD_TARGET/release/cloud-hypervisor
 strip target/$BUILD_TARGET/release/vhost_user_net
 strip target/$BUILD_TARGET/release/ch-remote
@@ -190,19 +187,22 @@ sudo bash -c "echo 1000000 > /sys/kernel/mm/ksm/pages_to_scan"
 sudo bash -c "echo 10 > /sys/kernel/mm/ksm/sleep_millisecs"
 sudo bash -c "echo 1 > /sys/kernel/mm/ksm/run"
 
-# Both test_vfio and ovs-dpdk rely on hugepages
+# Both test_vfio, ovs-dpdk and vDPA tests rely on hugepages
 echo 6144 | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
+# Update max locked memory to 'unlimited' to avoid issues with vDPA
+ulimit -l unlimited
+
 export RUST_BACKTRACE=1
-time cargo test $features_test "tests::parallel::$test_filter" -- --test-threads=1
+time cargo test $features "parallel::$test_filter" -- ${test_binary_args[*]} -- --test-threads=1
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
     export RUST_BACKTRACE=1
-    time cargo test $features_test "tests::sequential::$test_filter" -- --test-threads=1
+    time cargo test $features "sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
     RES=$?
 fi
 

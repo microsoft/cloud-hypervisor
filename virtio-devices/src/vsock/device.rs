@@ -52,6 +52,7 @@ use vm_memory::GuestMemoryAtomic;
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
 };
+use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
 const QUEUE_SIZE: u16 = 256;
@@ -93,6 +94,7 @@ pub struct VsockEpollHandler<B: VsockBackend> {
     pub pause_evt: EventFd,
     pub interrupt_cb: Arc<dyn VirtioInterrupt>,
     pub backend: Arc<RwLock<B>>,
+    pub access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 impl<B> VsockEpollHandler<B>
@@ -102,14 +104,11 @@ where
     /// Signal the guest driver that we've used some virtio buffers that it had previously made
     /// available.
     ///
-    fn signal_used_queue(
-        &self,
-        queue: &Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
-    ) -> result::Result<(), DeviceError> {
+    fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
         debug!("vsock: raising IRQ");
 
         self.interrupt_cb
-            .trigger(&VirtioInterruptType::Queue, Some(queue))
+            .trigger(VirtioInterruptType::Queue(queue_index))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -127,7 +126,10 @@ where
 
         let mut avail_iter = self.queues[0].iter().map_err(DeviceError::QueueIterator)?;
         for mut desc_chain in &mut avail_iter {
-            let used_len = match VsockPacket::from_rx_virtq_head(&mut desc_chain) {
+            let used_len = match VsockPacket::from_rx_virtq_head(
+                &mut desc_chain,
+                self.access_platform.as_ref(),
+            ) {
                 Ok(mut pkt) => {
                     if self.backend.write().unwrap().recv_pkt(&mut pkt).is_ok() {
                         pkt.hdr().len() as u32 + pkt.len()
@@ -155,7 +157,7 @@ where
         }
 
         if used_count > 0 {
-            self.signal_used_queue(&self.queues[0])
+            self.signal_used_queue(0)
         } else {
             Ok(())
         }
@@ -172,7 +174,10 @@ where
 
         let mut avail_iter = self.queues[1].iter().map_err(DeviceError::QueueIterator)?;
         for mut desc_chain in &mut avail_iter {
-            let pkt = match VsockPacket::from_tx_virtq_head(&mut desc_chain) {
+            let pkt = match VsockPacket::from_tx_virtq_head(
+                &mut desc_chain,
+                self.access_platform.as_ref(),
+            ) {
                 Ok(pkt) => pkt,
                 Err(e) => {
                     error!("vsock: error reading TX packet: {:?}", e);
@@ -198,7 +203,7 @@ where
         }
 
         if used_count > 0 {
-            self.signal_used_queue(&self.queues[1])
+            self.signal_used_queue(1)
         } else {
             Ok(())
         }
@@ -441,6 +446,7 @@ where
             pause_evt,
             interrupt_cb,
             backend: self.backend.clone(),
+            access_platform: self.common.access_platform.clone(),
         };
 
         let paused = self.common.paused.clone();
@@ -474,6 +480,10 @@ where
 
     fn shutdown(&mut self) {
         std::fs::remove_file(&self.path).ok();
+    }
+
+    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
+        self.common.set_access_platform(access_platform)
     }
 }
 
@@ -617,8 +627,8 @@ mod tests {
             let ctx = test_ctx.create_epoll_handler_context();
             let memory = GuestMemoryAtomic::new(test_ctx.mem.clone());
 
-            let queue = Queue::new(memory, 256);
-            assert!(ctx.handler.signal_used_queue(&queue).is_ok());
+            let _queue: Queue<GuestMemoryAtomic<GuestMemoryMmap>> = Queue::new(memory, 256);
+            assert!(ctx.handler.signal_used_queue(0).is_ok());
         }
     }
 

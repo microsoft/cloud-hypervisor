@@ -1,13 +1,15 @@
+// Copyright 2022 Arm Limited (or its affiliates). All rights reserved.
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Error, Result};
-use hypervisor::kvm::kvm_bindings::{
+use crate::arch::aarch64::gic::{Error, Result};
+use crate::kvm::kvm_bindings::{
     kvm_device_attr, KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS, KVM_REG_ARM64_SYSREG_CRM_MASK,
     KVM_REG_ARM64_SYSREG_CRM_SHIFT, KVM_REG_ARM64_SYSREG_CRN_MASK, KVM_REG_ARM64_SYSREG_CRN_SHIFT,
     KVM_REG_ARM64_SYSREG_OP0_MASK, KVM_REG_ARM64_SYSREG_OP0_SHIFT, KVM_REG_ARM64_SYSREG_OP1_MASK,
     KVM_REG_ARM64_SYSREG_OP1_SHIFT, KVM_REG_ARM64_SYSREG_OP2_MASK, KVM_REG_ARM64_SYSREG_OP2_SHIFT,
 };
+use crate::Device;
 use std::sync::Arc;
 
 const KVM_DEV_ARM_VGIC_V3_MPIDR_SHIFT: u32 = 32;
@@ -59,7 +61,7 @@ SYS_ICC_AP1Rn_EL1!(SYS_ICC_AP1R1_EL1, 1);
 SYS_ICC_AP1Rn_EL1!(SYS_ICC_AP1R2_EL1, 2);
 SYS_ICC_AP1Rn_EL1!(SYS_ICC_AP1R3_EL1, 3);
 
-static VGIC_ICC_REGS: &'static [u64] = &[
+static VGIC_ICC_REGS: &[u64] = &[
     SYS_ICC_SRE_EL1,
     SYS_ICC_CTLR_EL1,
     SYS_ICC_IGRPEN0_EL1,
@@ -78,7 +80,7 @@ static VGIC_ICC_REGS: &'static [u64] = &[
 ];
 
 fn icc_attr_access(
-    gic: &Arc<dyn hypervisor::Device>,
+    gic: &Arc<dyn Device>,
     offset: u64,
     typer: u64,
     val: &u32,
@@ -91,8 +93,7 @@ fn icc_attr_access(
         flags: 0,
     };
     if set {
-        #[allow(clippy::unnecessary_mut_passed)]
-        gic.set_device_attr(&mut gic_icc_attr)
+        gic.set_device_attr(&gic_icc_attr)
             .map_err(Error::SetDeviceAttribute)?;
     } else {
         gic.get_device_attr(&mut gic_icc_attr)
@@ -102,7 +103,7 @@ fn icc_attr_access(
 }
 
 /// Get ICC registers.
-pub fn get_icc_regs(gic: &Arc<dyn hypervisor::Device>, gicr_typer: &[u64]) -> Result<Vec<u32>> {
+pub fn get_icc_regs(gic: &Arc<dyn Device>, gicr_typer: &[u64]) -> Result<Vec<u32>> {
     let mut state: Vec<u32> = Vec::new();
     // We need this for the ICC_AP<m>R<n>_EL1 registers.
     let mut num_priority_bits = 0;
@@ -155,11 +156,7 @@ pub fn get_icc_regs(gic: &Arc<dyn hypervisor::Device>, gicr_typer: &[u64]) -> Re
 }
 
 /// Set ICC registers.
-pub fn set_icc_regs(
-    gic: &Arc<dyn hypervisor::Device>,
-    gicr_typer: &[u64],
-    state: &[u32],
-) -> Result<()> {
+pub fn set_icc_regs(gic: &Arc<dyn Device>, gicr_typer: &[u64], state: &[u32]) -> Result<()> {
     let mut num_priority_bits = 0;
     let mut idx = 0;
     for ix in gicr_typer {

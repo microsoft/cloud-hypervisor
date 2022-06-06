@@ -2,24 +2,23 @@
 name = "block_util"
 version = "0.1.0"
 authors = ["The Cloud Hypervisor Authors"]
-edition = "2018"
+edition = "2021"
 
 [features]
 default = []
-io_uring = []
 
 [dependencies]
 io-uring = "0.5.2"
-libc = "0.2.107"
-log = "0.4.14"
+libc = "0.2.126"
+log = "0.4.17"
 qcow = { path = "../qcow" }
-thiserror = "1.0.30"
+thiserror = "1.0.31"
 versionize = "0.1.6"
 versionize_derive = "0.1.4"
 vhdx = { path = "../vhdx" }
 virtio-bindings = { version = "0.1.0", features = ["virtio-v5_0_0"] }
-virtio-queue = { path = "../virtio-queue" }
-vm-memory = { version = "0.6.0", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
+virtio-queue = "0.3.0"
+vm-memory = { version = "0.8.0", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = "0.9.0"
 

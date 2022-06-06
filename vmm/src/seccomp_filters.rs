@@ -24,7 +24,6 @@ pub enum Thread {
 /// [`SeccompCondition`]: struct.SeccompCondition.html
 /// [`SeccompRule`]: struct.SeccompRule.html
 macro_rules! and {
-    ($($x:expr,)*) => (SeccompRule::new(vec![$($x),*]).unwrap());
     ($($x:expr),*) => (SeccompRule::new(vec![$($x),*]).unwrap())
 }
 
@@ -47,6 +46,12 @@ const TIOCSPTLCK: u64 = 0x4004_5431;
 const TIOCGTPEER: u64 = 0x5441;
 const FIOCLEX: u64 = 0x5451;
 const FIONBIO: u64 = 0x5421;
+
+// See include/uapi/linux/fs.h in the kernel code.
+const BLKSSZGET: u64 = 0x1268;
+const BLKPBSZGET: u64 = 0x127b;
+const BLKIOMIN: u64 = 0x1278;
+const BLKIOOPT: u64 = 0x1279;
 
 // See include/uapi/linux/if_tun.h in the kernel code.
 const TUNGETIFF: u64 = 0x8004_54d2;
@@ -80,6 +85,27 @@ const VFIO_IOMMU_MAP_DMA: u64 = 0x3b71;
 const VFIO_IOMMU_UNMAP_DMA: u64 = 0x3b72;
 const VFIO_DEVICE_IOEVENTFD: u64 = 0x3b74;
 
+// See include/uapi/linux/vhost.h in the kernel code
+const VHOST_GET_FEATURES: u64 = 0x8008af00;
+const VHOST_SET_FEATURES: u64 = 0x4008af00;
+const VHOST_SET_OWNER: u64 = 0xaf01;
+const VHOST_SET_VRING_NUM: u64 = 0x4008af10;
+const VHOST_SET_VRING_ADDR: u64 = 0x4028af11;
+const VHOST_SET_VRING_BASE: u64 = 0x4008af12;
+const VHOST_SET_VRING_KICK: u64 = 0x4008af20;
+const VHOST_SET_VRING_CALL: u64 = 0x4008af21;
+const VHOST_SET_BACKEND_FEATURES: u64 = 0x4008af25;
+const VHOST_GET_BACKEND_FEATURES: u64 = 0x8008af26;
+const VHOST_VDPA_GET_DEVICE_ID: u64 = 0x8004af70;
+const VHOST_VDPA_GET_STATUS: u64 = 0x8001af71;
+const VHOST_VDPA_SET_STATUS: u64 = 0x4001af72;
+const VHOST_VDPA_GET_CONFIG: u64 = 0x8008af73;
+const VHOST_VDPA_SET_CONFIG: u64 = 0x4008af74;
+const VHOST_VDPA_SET_VRING_ENABLE: u64 = 0x4008af75;
+const VHOST_VDPA_GET_VRING_NUM: u64 = 0x8002af76;
+const VHOST_VDPA_SET_CONFIG_CALL: u64 = 0x4004af77;
+const VHOST_VDPA_GET_IOVA_RANGE: u64 = 0x8010af78;
+
 // See include/uapi/linux/kvm.h in the kernel code.
 #[cfg(feature = "kvm")]
 mod kvm {
@@ -93,6 +119,7 @@ mod kvm {
     pub const KVM_SET_MP_STATE: u64 = 0x4004_ae99;
     pub const KVM_SET_GSI_ROUTING: u64 = 0x4008_ae6a;
     pub const KVM_SET_DEVICE_ATTR: u64 = 0x4018_aee1;
+    pub const KVM_HAS_DEVICE_ATTR: u64 = 0x4018_aee3;
     pub const KVM_SET_ONE_REG: u64 = 0x4010_aeac;
     pub const KVM_SET_USER_MEMORY_REGION: u64 = 0x4020_ae46;
     pub const KVM_IRQFD: u64 = 0x4020_ae76;
@@ -196,6 +223,7 @@ fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, Backen
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_RUN)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_MEMORY_ENCRYPT_OP)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_DEVICE_ATTR,)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_HAS_DEVICE_ATTR,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_GSI_ROUTING)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_MP_STATE)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_ONE_REG)?],
@@ -217,6 +245,10 @@ fn create_vmm_ioctl_seccomp_rule_hypervisor() -> Result<Vec<SeccompRule>, Backen
 
 fn create_vmm_ioctl_seccomp_rule_common() -> Result<Vec<SeccompRule>, BackendError> {
     let mut common_rules = or![
+        and![Cond::new(1, ArgLen::Dword, Eq, BLKSSZGET)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, BLKPBSZGET)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, BLKIOMIN)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, BLKIOOPT)?],
         and![Cond::new(1, ArgLen::Dword, Eq, FIOCLEX)?],
         and![Cond::new(1, ArgLen::Dword, Eq, FIONBIO)?],
         and![Cond::new(1, ArgLen::Dword, Eq, SIOCGIFFLAGS)?],
@@ -257,6 +289,30 @@ fn create_vmm_ioctl_seccomp_rule_common() -> Result<Vec<SeccompRule>, BackendErr
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_IOMMU_MAP_DMA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_IOMMU_UNMAP_DMA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_DEVICE_IOEVENTFD)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_GET_FEATURES)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_FEATURES)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_OWNER)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_NUM)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_ADDR)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_BASE)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_KICK)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_CALL)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_BACKEND_FEATURES)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_GET_BACKEND_FEATURES)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_DEVICE_ID)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_STATUS)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SET_STATUS)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_CONFIG)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SET_CONFIG)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            VHOST_VDPA_SET_VRING_ENABLE
+        )?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_VRING_NUM)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SET_CONFIG_CALL)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_IOVA_RANGE)?],
     ];
 
     let hypervisor_rules = create_vmm_ioctl_seccomp_rule_hypervisor()?;
@@ -282,12 +338,15 @@ fn create_vmm_ioctl_seccomp_rule_kvm() -> Result<Vec<SeccompRule>, BackendError>
     const KVM_SET_CLOCK: u64 = 0x4030_ae7b;
     const KVM_SET_CPUID2: u64 = 0x4008_ae90;
     const KVM_SET_FPU: u64 = 0x41a0_ae8d;
+    const KVM_SET_IDENTITY_MAP_ADDR: u64 = 0x4008_ae48;
     const KVM_SET_LAPIC: u64 = 0x4400_ae8f;
     const KVM_SET_MSRS: u64 = 0x4008_ae89;
     const KVM_SET_SREGS: u64 = 0x4138_ae84;
     const KVM_SET_TSS_ADDR: u64 = 0xae47;
     const KVM_SET_XCRS: u64 = 0x4188_aea7;
     const KVM_SET_XSAVE: u64 = 0x5000_aea5;
+    const KVM_SET_GUEST_DEBUG: u64 = 0x4048_ae9b;
+    const KVM_TRANSLATE: u64 = 0xc018_ae85;
 
     let common_rules = create_vmm_ioctl_seccomp_rule_common()?;
     let mut arch_rules = or![
@@ -305,12 +364,15 @@ fn create_vmm_ioctl_seccomp_rule_kvm() -> Result<Vec<SeccompRule>, BackendError>
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_CLOCK)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_CPUID2)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_FPU)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_IDENTITY_MAP_ADDR)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_LAPIC)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_SREGS)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_TSS_ADDR,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_MSRS)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_XCRS,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_XSAVE,)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_SET_GUEST_DEBUG,)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, KVM_TRANSLATE,)?],
     ];
     arch_rules.extend(common_rules);
 
@@ -415,8 +477,6 @@ fn vmm_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
         (libc::SYS_accept4, vec![]),
         #[cfg(target_arch = "x86_64")]
         (libc::SYS_access, vec![]),
-        #[cfg(target_arch = "x86_64")]
-        (libc::SYS_arch_prctl, vec![]),
         (libc::SYS_bind, vec![]),
         (libc::SYS_brk, vec![]),
         (libc::SYS_clock_gettime, vec![]),
@@ -432,14 +492,11 @@ fn vmm_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
         #[cfg(target_arch = "x86_64")]
         (libc::SYS_epoll_wait, vec![]),
         (libc::SYS_eventfd2, vec![]),
-        (libc::SYS_execve, vec![]),
         (libc::SYS_exit, vec![]),
         (libc::SYS_exit_group, vec![]),
         (libc::SYS_fallocate, vec![]),
         (libc::SYS_fcntl, vec![]),
         (libc::SYS_fdatasync, vec![]),
-        #[cfg(target_arch = "x86_64")]
-        (libc::SYS_fork, vec![]),
         (libc::SYS_fstat, vec![]),
         (libc::SYS_fsync, vec![]),
         (libc::SYS_ftruncate, vec![]),
@@ -495,15 +552,22 @@ fn vmm_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
         (libc::SYS_recvfrom, vec![]),
         (libc::SYS_recvmsg, vec![]),
         (libc::SYS_restart_syscall, vec![]),
+        // musl is missing this constant
+        // (libc::SYS_rseq, vec![]),
+        #[cfg(target_arch = "x86_64")]
+        (334, vec![]),
+        #[cfg(target_arch = "aarch64")]
+        (293, vec![]),
         (libc::SYS_rt_sigaction, vec![]),
         (libc::SYS_rt_sigprocmask, vec![]),
         (libc::SYS_rt_sigreturn, vec![]),
         (libc::SYS_sched_getaffinity, vec![]),
+        (libc::SYS_sched_setaffinity, vec![]),
         (libc::SYS_sendmsg, vec![]),
         (libc::SYS_sendto, vec![]),
         (libc::SYS_set_robust_list, vec![]),
-        (libc::SYS_set_tid_address, vec![]),
         (libc::SYS_setsid, vec![]),
+        (libc::SYS_shutdown, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (
             libc::SYS_socket,
@@ -583,6 +647,15 @@ fn create_vcpu_ioctl_seccomp_rule() -> Result<Vec<SeccompRule>, BackendError> {
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_DEVICE_SET_IRQS)?],
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_GROUP_UNSET_CONTAINER)?],
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_IOMMU_UNMAP_DMA)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SET_STATUS)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_GET_CONFIG)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VDPA_SET_CONFIG)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            VHOST_VDPA_SET_VRING_ENABLE
+        )?],
     ];
 
     let hypervisor_rules = create_vcpu_ioctl_seccomp_rule_hypervisor()?;
@@ -600,6 +673,7 @@ fn vcpu_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
         (libc::SYS_close, vec![]),
         (libc::SYS_dup, vec![]),
         (libc::SYS_exit, vec![]),
+        (libc::SYS_epoll_ctl, vec![]),
         (libc::SYS_fstat, vec![]),
         (libc::SYS_futex, vec![]),
         (libc::SYS_getrandom, vec![]),
@@ -624,6 +698,7 @@ fn vcpu_thread_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, BackendError> {
         (libc::SYS_rt_sigprocmask, vec![]),
         (libc::SYS_rt_sigreturn, vec![]),
         (libc::SYS_sendmsg, vec![]),
+        (libc::SYS_shutdown, vec![]),
         (libc::SYS_sigaltstack, vec![]),
         (libc::SYS_tgkill, vec![]),
         (libc::SYS_tkill, vec![]),
