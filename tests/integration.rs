@@ -6109,8 +6109,9 @@ mod parallel {
     fn cleanup_spdk_nvme() {
         exec_host_command_status("pkill -f nvmf_tgt");
     }
-
+    // TODO ignoring. Will enable once figure out the setup issue
     #[test]
+    #[ignore]
     fn test_vfio_user() {
         let jammy_image = JAMMY_IMAGE_NAME.to_string();
         let jammy = UbuntuDiskConfig::new(jammy_image);
