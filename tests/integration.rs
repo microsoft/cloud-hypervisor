@@ -4875,6 +4875,7 @@ mod parallel {
     }
 
     #[test]
+    #[cfg(not(feature = "mshv"))]
     fn test_virtio_balloon_deflate_on_oom() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
@@ -4934,6 +4935,7 @@ mod parallel {
     }
 
     #[test]
+    #[cfg(not(feature = "mshv"))]
     fn test_virtio_balloon_free_page_reporting() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
@@ -5339,6 +5341,7 @@ mod parallel {
     // through each ssh command. There's no need to perform a dedicated test to
     // verify the migration went well for virtio-net.
     #[test]
+    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
@@ -6400,9 +6403,11 @@ mod parallel {
 }
 
 mod sequential {
+    #[cfg(not(feature = "mshv"))]
     use crate::*;
 
     #[test]
+    #[cfg(not(feature = "mshv"))]
     fn test_memory_mergeable_on() {
         test_memory_mergeable(true)
     }
