@@ -623,7 +623,6 @@ dependencies = [
 [[package]]
 name = "mshv-bindings"
 version = "0.1.1"
-source = "git+https://github.com/rust-vmm/mshv?branch=main#dda85d32b977bf66b16afde647365e329d35e5f1"
 dependencies = [
  "libc",
  "serde",
@@ -635,7 +634,6 @@ dependencies = [
 [[package]]
 name = "mshv-ioctls"
 version = "0.1.1"
-source = "git+https://github.com/rust-vmm/mshv?branch=main#dda85d32b977bf66b16afde647365e329d35e5f1"
 dependencies = [
  "libc",
  "mshv-bindings",
@@ -772,7 +770,7 @@ dependencies = [
  "thiserror",
  "versionize",
  "versionize_derive",
- "vfio-bindings",
+ "vfio-bindings 0.4.0 (git+https://github.com/rust-vmm/vfio?branch=main)",
  "vfio-ioctls",
  "vfio_user",
  "vm-allocator",
@@ -1372,6 +1370,10 @@ dependencies = [
 [[package]]
 name = "vfio-bindings"
 version = "0.4.0"
+
+[[package]]
+name = "vfio-bindings"
+version = "0.4.0"
 source = "git+https://github.com/rust-vmm/vfio?branch=main#7ef33f6759ae6d37a54cd66f749aa47c1c81509c"
 dependencies = [
  "vmm-sys-util",
@@ -1380,7 +1382,6 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.2.0"
-source = "git+https://github.com/rust-vmm/vfio?branch=main#7ef33f6759ae6d37a54cd66f749aa47c1c81509c"
 dependencies = [
  "byteorder",
  "kvm-bindings",
@@ -1390,7 +1391,7 @@ dependencies = [
  "mshv-bindings",
  "mshv-ioctls",
  "thiserror",
- "vfio-bindings",
+ "vfio-bindings 0.4.0",
  "vm-memory",
  "vmm-sys-util",
 ]
@@ -1405,7 +1406,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "thiserror",
- "vfio-bindings",
+ "vfio-bindings 0.4.0 (git+https://github.com/rust-vmm/vfio?branch=main)",
  "vm-memory",
  "vmm-sys-util",
 ]

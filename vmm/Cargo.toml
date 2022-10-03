@@ -46,7 +46,7 @@ tracer = { path = "../tracer" }
 uuid = "1.2.2"
 versionize = "0.1.9"
 versionize_derive = "0.1.4"
-vfio-ioctls = { git = "https://github.com/rust-vmm/vfio", branch = "main", default-features = false }
+vfio-ioctls = { path = "../../vfio/crates/vfio-ioctls", default-features = false }
 vfio_user = { path = "../vfio_user" }
 vhdx = { path = "../vhdx" }
 virtio-devices = { path = "../virtio-devices" }
