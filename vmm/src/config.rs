@@ -79,6 +79,9 @@ pub enum Error {
     ParseNuma(OptionParserError),
     /// Failed validating configuration
     Validation(ValidationError),
+    #[cfg(feature = "snp")]
+    /// Failed parsing TDX config
+    ParseSnp(OptionParserError),
     #[cfg(feature = "tdx")]
     /// Failed parsing TDX config
     ParseTdx(OptionParserError),
@@ -322,6 +325,8 @@ impl fmt::Display for Error {
             }
             ParseUserDevice(o) => write!(f, "Error parsing --user-device: {o}"),
             Validation(v) => write!(f, "Error validating configuration: {v}"),
+            #[cfg(feature = "snp")]
+            ParseSnp(o) => write!(f, "Error parsing --snp: {o}"),
             #[cfg(feature = "tdx")]
             ParseTdx(o) => write!(f, "Error parsing --tdx: {o}"),
             #[cfg(feature = "tdx")]
@@ -603,6 +608,8 @@ impl PlatformConfig {
             .add("oem_strings");
         #[cfg(feature = "tdx")]
         parser.add("tdx");
+        #[cfg(feature = "snp")]
+        parser.add("snp");
         parser.parse(platform).map_err(Error::ParsePlatform)?;
 
         let num_pci_segments: u16 = parser
@@ -627,6 +634,12 @@ impl PlatformConfig {
             .map_err(Error::ParsePlatform)?
             .unwrap_or(Toggle(false))
             .0;
+        #[cfg(feature = "snp")]
+        let snp = parser
+            .convert::<Toggle>("snp")
+            .map_err(Error::ParsePlatform)?
+            .unwrap_or(Toggle(false))
+            .0;
         Ok(PlatformConfig {
             num_pci_segments,
             iommu_segments,
@@ -635,6 +648,8 @@ impl PlatformConfig {
             oem_strings,
             #[cfg(feature = "tdx")]
             tdx,
+            #[cfg(feature = "snp")]
+            snp,
         })
     }
 
@@ -2216,6 +2231,11 @@ impl VmConfig {
     #[cfg(feature = "tdx")]
     pub fn is_tdx_enabled(&self) -> bool {
         self.platform.as_ref().map(|p| p.tdx).unwrap_or(false)
+    }
+
+    #[cfg(feature = "snp")]
+    pub fn is_snp_enabled(&self) -> bool {
+        self.platform.as_ref().map(|p| p.snp).unwrap_or(false)
     }
 }
 
