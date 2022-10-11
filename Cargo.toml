@@ -70,6 +70,7 @@ guest_debug = ["vmm/guest_debug"]
 kvm = ["vmm/kvm"]
 mshv = ["vmm/mshv"]
 tdx = ["vmm/tdx"]
+snp = ["vmm/snp"]
 tracing = ["vmm/tracing", "tracer/tracing"]
 
 [workspace]
