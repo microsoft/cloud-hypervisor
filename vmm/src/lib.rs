@@ -66,6 +66,8 @@ pub mod device_manager;
 pub mod device_tree;
 #[cfg(feature = "guest_debug")]
 mod gdb;
+#[cfg(feature = "mshv")]
+pub mod igvm_loader;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
