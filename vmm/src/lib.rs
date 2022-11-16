@@ -67,6 +67,8 @@ pub mod device_manager;
 pub mod device_tree;
 #[cfg(feature = "guest_debug")]
 mod gdb;
+#[cfg(feature = "igvm")]
+pub mod igvm;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
