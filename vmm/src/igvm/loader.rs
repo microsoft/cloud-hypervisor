@@ -2,7 +2,7 @@ use crate::GuestMemoryMmap;
 use igvm_parser::hvdef::Vtl;
 use igvm_parser::igvm::IgvmParameterPageType;
 use igvm_parser::importer::{BootPageAcceptance, IsolationConfig, Register, StartupMemoryType};
-use igvm_parser::map_range::RangeMap;
+use igvm_parser::map_range::{Entry, RangeMap};
 
 use std::collections::HashMap;
 use std::mem::Discriminant;
@@ -168,5 +168,29 @@ impl Loader {
 
     pub fn get_initial_regs(self) -> Vec<Register> {
         self.regs.into_values().collect()
+    }
+    /// Accept a new page range with a given acceptance into the map of accepted ranges.
+    pub fn accept_new_range(
+        &mut self,
+        page_base: u64,
+        page_count: u64,
+        acceptance: BootPageAcceptance,
+    ) -> Result<(), Error> {
+        let page_end = page_base + page_count - 1;
+        match self.accepted_ranges.entry(page_base, page_end) {
+            Entry::Overlapping(entry) => {
+                let &(overlap_start, overlap_end, overlap_acceptance) = entry.get();
+
+                Err(Error::OverlapsExistingRegion(ImportRegion {
+                    page_base: overlap_start,
+                    page_count: overlap_end - overlap_start + 1,
+                    acceptance: overlap_acceptance,
+                }))
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(acceptance);
+                Ok(())
+            }
+        }
     }
 }
