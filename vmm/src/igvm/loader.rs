@@ -1,13 +1,16 @@
 use crate::GuestMemoryMmap;
 use igvm_parser::hvdef::Vtl;
 use igvm_parser::igvm::IgvmParameterPageType;
-use igvm_parser::importer::{BootPageAcceptance, IsolationConfig, Register, StartupMemoryType};
+use igvm_parser::importer::{
+    BootPageAcceptance, IsolationConfig, IsolationType, Register, StartupMemoryType, HV_PAGE_SIZE,
+};
 use igvm_parser::map_range::{Entry, RangeMap};
 
 use std::collections::HashMap;
 use std::mem::Discriminant;
 use thiserror::Error;
-use vm_memory::GuestMemoryAtomic;
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{GuestMemory, GuestMemoryRegion};
 
 #[derive(Debug)]
 pub struct ImportRegion {
@@ -192,5 +195,177 @@ impl Loader {
                 Ok(())
             }
         }
+    }
+}
+
+impl ImageLoad for Loader {
+    fn get_isolation_config(&self) -> IsolationConfig {
+        IsolationConfig {
+            paravisor_present: false,
+            isolation_type: IsolationType::None,
+            shared_gpa_boundary_bits: None,
+        }
+    }
+
+    fn import_pages(
+        &mut self,
+        page_base: u64,
+        page_count: u64,
+        acceptance: BootPageAcceptance,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        debug!(
+            "importing pages: {:?}, {:?}, {:?}",
+            page_base, page_count, acceptance
+        );
+
+        // Track accepted ranges for duplicate imports.
+        self.accept_new_range(page_base, page_count, acceptance)?;
+
+        // Page count must be larger or equal to data.
+        if page_count * HV_PAGE_SIZE < data.len() as u64 {
+            return Err(Error::DataTooLarge);
+        }
+
+        self.memory
+            .memory()
+            .write(data, GuestAddress(page_base * HV_PAGE_SIZE))
+            .map_err(|e| {
+                debug!("Importing pages failed due to MemoryError");
+                Error::MemoryUnavailable
+            })?;
+        Ok(())
+    }
+
+    fn import_vp_register(&mut self, vtl: Vtl, register: Register) -> Result<(), Error> {
+        // Only importing to the max VTL for registers is currently allowed, as only one set of registers is stored.
+        if vtl != self.max_vtl {
+            return Err(Error::InvalidVtl);
+        }
+
+        let entry = self.regs.entry(std::mem::discriminant(&register));
+        match entry {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                panic!("duplicate register import {:?}", register)
+            }
+            std::collections::hash_map::Entry::Vacant(ve) => ve.insert(register),
+        };
+
+        Ok(())
+    }
+
+    fn verify_startup_memory_available(
+        &mut self,
+        page_base: u64,
+        page_count: u64,
+        memory_type: StartupMemoryType,
+    ) -> Result<(), Error> {
+        // Allow Vtl2ProtectableRam only if VTL2 is enabled.
+        if self.max_vtl == Vtl::Vtl2 {
+            match memory_type {
+                StartupMemoryType::Ram => {}
+                StartupMemoryType::Vtl2ProtectableRam => {
+                    // TODO: Should enable VTl2 memory protections on this region? Or do we allow VTL2 memory protections
+                    //       on the whole address space when VTL memory protections work?
+                    warn!(
+                        "vtl2 protectable ram requested: {:?} {:?}",
+                        page_base, page_count,
+                    );
+                }
+            }
+        } else if memory_type != StartupMemoryType::Ram {
+            return Err(Error::MemoryUnavailable);
+        }
+
+        let mut memory_found = false;
+
+        for range in self.memory.memory().iter() {
+            // Today, the memory layout only describes normal ram and mmio. Thus the memory
+            // request must live completely within a single range, since any gaps are mmio.
+            let base_address = page_base * HV_PAGE_SIZE;
+            let end_address = base_address + (page_count * HV_PAGE_SIZE) - 1;
+
+            if base_address >= range.start_addr().0 && base_address < range.last_addr().0 {
+                if end_address > range.last_addr().0 {
+                    debug!("startup memory end bigger than the current range");
+                    return Err(Error::MemoryUnavailable);
+                }
+
+                memory_found = true;
+            }
+        }
+
+        if memory_found {
+            Ok(())
+        } else {
+            debug!("no valid memory range available for startup memory verify");
+            Err(Error::MemoryUnavailable)
+        }
+    }
+
+    fn set_vp_context_page(
+        &mut self,
+        _vtl: Vtl,
+        _page_base: u64,
+        _acceptance: BootPageAcceptance,
+    ) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    fn vp_context_page(&self, _vtl: Vtl) -> Result<u64, Error> {
+        unimplemented!()
+    }
+
+    fn create_parameter_area(
+        &mut self,
+        _page_base: u64,
+        _page_count: u32,
+    ) -> Result<ParameterAreaIndex, Error> {
+        unimplemented!()
+    }
+
+    fn create_parameter_area_with_data(
+        &mut self,
+        _page_base: u64,
+        _page_count: u32,
+        _initial_data: &[u8],
+    ) -> Result<ParameterAreaIndex, Error> {
+        unimplemented!()
+    }
+
+    fn import_parameter(
+        &mut self,
+        _parameter_area: ParameterAreaIndex,
+        _byte_offset: u32,
+        _parameter_type: IgvmParameterPageType,
+    ) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    fn relocation_region(
+        &mut self,
+        _gpa: u64,
+        _size_bytes: u64,
+        _relocation_alignment: u64,
+        _minimum_relocation_gpa: u64,
+        _maximum_relocation_gpa: u64,
+        _is_vtl2: bool,
+        _apply_rip_offset: bool,
+        _apply_gdtr_offset: bool,
+        _vp_index: u16,
+        _vtl: Vtl,
+    ) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    fn page_table_relocation(
+        &mut self,
+        _page_table_gpa: u64,
+        _size_pages: u64,
+        _used_pages: u64,
+        _vp_index: u16,
+        _vtl: Vtl,
+    ) -> Result<(), Error> {
+        unimplemented!()
     }
 }
