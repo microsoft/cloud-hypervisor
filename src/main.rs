@@ -390,6 +390,14 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
             .num_args(1)
             .group("vmm-config"),
     );
+    #[cfg(feature = "mshv")]
+    let app = app.arg(
+        Arg::new("igvm-file")
+            .long("igvm-file")
+            .help("Igvm config: path=</path/to/a/file>")
+            .num_args(1)
+            .group("vmm-config"),
+    );
 
     app
 }
@@ -726,6 +734,8 @@ mod unit_tests {
             gdb: false,
             platform: None,
             tpm: None,
+            #[cfg(feature = "mshv")]
+            igvm: None,
         };
 
         assert_eq!(expected_vm_config, result_vm_config);

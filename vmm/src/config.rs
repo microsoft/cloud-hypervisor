@@ -373,6 +373,8 @@ pub struct VmParams<'a> {
     pub gdb: bool,
     pub platform: Option<&'a str>,
     pub tpm: Option<&'a str>,
+    #[cfg(feature = "mshv")]
+    pub igvm_file: Option<&'a str>,
 }
 
 impl<'a> VmParams<'a> {
@@ -425,6 +427,8 @@ impl<'a> VmParams<'a> {
         #[cfg(feature = "guest_debug")]
         let gdb = args.contains_id("gdb");
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
+        #[cfg(feature = "mshv")]
+        let igvm_file = args.get_one::<String>("igvm-file").map(|x| x as &str);
         VmParams {
             cpus,
             memory,
@@ -453,6 +457,8 @@ impl<'a> VmParams<'a> {
             gdb,
             platform,
             tpm,
+            #[cfg(feature = "mshv")]
+            igvm_file,
         }
     }
 }
@@ -2169,7 +2175,8 @@ impl VmConfig {
 
         #[cfg(feature = "guest_debug")]
         let gdb = vm_params.gdb;
-
+        #[cfg(feature = "mshv")]
+        let igvm = vm_params.igvm_file.map(PathBuf::from);
         let mut config = VmConfig {
             cpus: CpusConfig::parse(vm_params.cpus)?,
             memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
@@ -2195,6 +2202,8 @@ impl VmConfig {
             gdb,
             platform,
             tpm,
+            #[cfg(feature = "mshv")]
+            igvm,
         };
         config.validate().map_err(Error::Validation)?;
         Ok(config)
@@ -2816,6 +2825,8 @@ mod tests {
             gdb: false,
             platform: None,
             tpm: None,
+            #[cfg(feature = "mshv")]
+            igvm: None,
         };
 
         assert!(valid_config.validate().is_ok());
