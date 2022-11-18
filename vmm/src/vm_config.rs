@@ -593,4 +593,6 @@ pub struct VmConfig {
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
     pub tpm: Option<TpmConfig>,
+    #[cfg(feature = "mshv")]
+    pub igvm: Option<PathBuf>,
 }
