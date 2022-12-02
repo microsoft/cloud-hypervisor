@@ -1649,6 +1649,7 @@ dependencies = [
  "vm-migration",
  "vm-virtio",
  "vmm-sys-util",
+ "zerocopy",
 ]
 
 [[package]]

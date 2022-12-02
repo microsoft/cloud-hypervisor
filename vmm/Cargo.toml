@@ -8,7 +8,7 @@ edition = "2021"
 default = []
 guest_debug = ["kvm", "gdbstub", "gdbstub_arch"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
-mshv = ["hypervisor/mshv", "igvm-parser", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
+mshv = ["hypervisor/mshv", "igvm-parser", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv", "zerocopy"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 tracing = ["tracer/tracing"]
 
@@ -57,3 +57,4 @@ vm-memory = { version = "0.10.0", features = ["backend-mmap", "backend-atomic", 
 vm-migration = { path = "../vm-migration" }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
+zerocopy =  { version = "0.6", features = ["alloc"] , optional  = true}
