@@ -1,4 +1,4 @@
-use crate::GuestMemoryMmap;
+use vm_memory::GuestMemoryMmap;
 use igvm_parser::hvdef::Vtl;
 use igvm_parser::igvm::IgvmParameterPageType;
 use igvm_parser::importer::{
