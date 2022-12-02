@@ -12,7 +12,7 @@ mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 snp = ["arch/snp", "hypervisor/snp"]
 tracing = ["tracer/tracing"]
-igvm = ["igvm-parser"]
+igvm = ["igvm-parser", "zerocopy"]
 
 [dependencies]
 acpi_tables = { path = "../acpi_tables" }
@@ -59,3 +59,4 @@ vm-migration = { path = "../vm-migration" }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
 igvm-parser = { path = "../../igvm-parser", optional  = true }
+zerocopy =  { version = "0.6", features = ["alloc"] , optional  = true}
