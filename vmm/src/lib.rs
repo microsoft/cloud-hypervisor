@@ -55,6 +55,10 @@ use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transport
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
+use vmm_sys_util::terminal::Terminal;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
+use arch::RegionType;
 
 mod acpi;
 pub mod api;
@@ -2126,6 +2130,13 @@ impl Vmm {
 const CPU_MANAGER_SNAPSHOT_ID: &str = "cpu-manager";
 const MEMORY_MANAGER_SNAPSHOT_ID: &str = "memory-manager";
 const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
+
+#[derive(Clone, Serialize, Deserialize, Versionize)]
+pub struct ArchMemRegion {
+    base: u64,
+    size: usize,
+    r_type: RegionType,
+}
 
 #[cfg(test)]
 mod unit_tests {
