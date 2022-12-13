@@ -4,6 +4,7 @@
 //
 #[cfg(target_arch = "x86_64")]
 use crate::config::SgxEpcConfig;
+use crate::ArchMemRegion;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -146,13 +147,6 @@ struct GuestRamMapping {
     zone_id: String,
     virtio_mem: bool,
     file_offset: u64,
-}
-
-#[derive(Clone, Serialize, Deserialize, Versionize)]
-struct ArchMemRegion {
-    base: u64,
-    size: usize,
-    r_type: RegionType,
 }
 
 pub struct MemoryManager {
