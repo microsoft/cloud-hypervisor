@@ -22,6 +22,7 @@ use igvm_parser::igvm::IGVM_VHS_PARAMETER;
 use igvm_parser::igvm::IGVM_VHS_PARAMETER_INSERT;
 use igvm_parser::importer::BootPageAcceptance;
 use igvm_parser::memlayout::MemoryRange;
+use igvm_parser::snp::SEV_VMSA;
 use crate::igvm::loader::ImageLoad;
 use igvm_parser::importer::Register;
 use igvm_parser::importer::StartupMemoryType;
@@ -33,10 +34,13 @@ use std::ffi::CString;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::mem::size_of;
 use thiserror::Error;
 use zerocopy::AsBytes;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::GuestMemoryMmap;
+use crate::ArchMemRegion;
+use arch::RegionType;
 
 
 #[derive(Debug, Error)]
@@ -77,11 +81,11 @@ fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
     }
 }
 
-fn memory_map_entry(range: &MemoryRange) -> IGVM_VHS_MEMORY_MAP_ENTRY {
-    assert!(range.len() % HV_PAGE_SIZE == 0);
+fn memory_map_entry(range: &ArchMemRegion) -> IGVM_VHS_MEMORY_MAP_ENTRY {
+    assert!(range.size as u64 % HV_PAGE_SIZE == 0);
     IGVM_VHS_MEMORY_MAP_ENTRY {
-        starting_gpa_page_number: range.start() / HV_PAGE_SIZE,
-        number_of_pages: range.len() / HV_PAGE_SIZE,
+        starting_gpa_page_number: range.base / HV_PAGE_SIZE,
+        number_of_pages: range.size as u64 / HV_PAGE_SIZE,
         entry_type: IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_MEMORY,
         flags: 0,
         reserved: 0,
@@ -103,6 +107,7 @@ pub struct AcpiTables<'a> {
 pub fn load_igvm(
     mut file: &std::fs::File,
     memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
     acpi_tables: AcpiTables<'_>,
@@ -120,7 +125,7 @@ pub fn load_igvm(
 
     let (mask, max_vtl) = match &igvm_file.platforms()[0] {
         IgvmPlatformHeader::SupportedPlatform(info) => {
-            debug_assert!(info.platform_type == IgvmPlatformType::VSM_ISOLATION);
+            debug_assert!(info.platform_type == IgvmPlatformType::SEV_SNP);
             (info.compatibility_mask, info.highest_vtl)
         }
     };
@@ -255,9 +260,11 @@ pub fn load_igvm(
             igvm_parser::igvm::IgvmDirectiveHeader::MemoryMap(info) => {
                 let mut memory_map: Vec<IGVM_VHS_MEMORY_MAP_ENTRY> = Vec::new();
 
-                /*for mem in mem_layout.ram() {
-                    memory_map.push(memory_map_entry(mem));
-                }*/
+                for mem in mem_regions.iter() {
+                    if mem.r_type == RegionType::Ram {
+                        memory_map.push(memory_map_entry(&mem));
+                    }
+                }
                 import_parameter(&mut parameter_areas, info, memory_map.as_bytes())?;
             }
             igvm_parser::igvm::IgvmDirectiveHeader::CommandLine(info) => {
@@ -286,7 +293,22 @@ pub fn load_igvm(
                     )
                     .map_err(Error::Loader)?;
             }
-            igvm_parser::igvm::IgvmDirectiveHeader::SnpVpContext { .. } => todo!("snp not supported"),
+            igvm_parser::igvm::IgvmDirectiveHeader::SnpVpContext {
+                gpa,
+                compatibility_mask,
+                vp_index,
+                vmsa,
+            } => {
+                assert_eq!(gpa % HV_PAGE_SIZE, 0);
+                let mut data: [u8; 4096] = [0; 4096];
+                let len = size_of::<SEV_VMSA>();
+                if *vp_index == 0 {
+                    data[..len].copy_from_slice(vmsa.as_bytes());
+                    loader
+                    .import_pages(gpa / HV_PAGE_SIZE, 1, BootPageAcceptance::VpContext, &data)
+                    .map_err(Error::Loader)?;
+                }
+            }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock { .. } => todo!("snp not supported"),
             igvm_parser::igvm::IgvmDirectiveHeader::VbsVpContext {
                 vtl,
