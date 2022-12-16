@@ -5,9 +5,10 @@ use igvm_parser::igvm::IgvmVhsSnpIdBlock;
 #[derive(Debug, Copy, Clone)]
 pub struct IgvmLoadedInfo {
     pub vmsa_gpa: u64,
+    pub first_gpa: u64,
     pub snp_id_block: IgvmVhsSnpIdBlock,
     pub start_gpa: u64,
-    pub length: usize,
+    pub length: u64,
 }
 
 impl Default for IgvmLoadedInfo {

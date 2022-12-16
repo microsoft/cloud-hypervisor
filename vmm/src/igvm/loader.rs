@@ -175,8 +175,8 @@ impl Loader {
     pub fn get_initial_regs(self) -> Vec<Register> {
         self.regs.into_values().collect()
     }
-    /// Accept a new page range with a given acceptance into the map of accepted ranges.
-    pub fn accept_new_range(
+     /// Accept a new page range with a given acceptance into the map of accepted ranges.
+     pub fn accept_new_range(
         &mut self,
         page_base: u64,
         page_count: u64,
