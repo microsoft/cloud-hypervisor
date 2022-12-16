@@ -41,6 +41,7 @@ use vm_memory::GuestMemoryAtomic;
 use vm_memory::GuestMemoryMmap;
 use crate::ArchMemRegion;
 use arch::RegionType;
+use crate::igvm::IgvmLoadedInfo;
 
 
 #[derive(Debug, Error)]
@@ -111,8 +112,8 @@ pub fn load_igvm(
     proc_count: u32,
     cmdline: &str,
     acpi_tables: AcpiTables<'_>,
-) -> Result<Vec<Register>, Error> {
-
+) -> Result<Box<IgvmLoadedInfo>, Error> {
+    let mut loaded_info: Box<IgvmLoadedInfo>  = Box::new(IgvmLoadedInfo::default());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
 
     let mut file_contents = Vec::new();
@@ -308,8 +309,39 @@ pub fn load_igvm(
                     .import_pages(gpa / HV_PAGE_SIZE, 1, BootPageAcceptance::VpContext, &data)
                     .map_err(Error::Loader)?;
                 }
+                loaded_info.vmsa_gpa = *gpa;
             }
-            igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock { .. } => todo!("snp not supported"),
+            igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock {
+                compatibility_mask,
+                author_key_enabled,
+                reserved,
+                ld,
+                family_id,
+                image_id,
+                version,
+                guest_svn,
+                id_key_algorithm,
+                author_key_algorithm,
+                id_key_signature,
+                id_public_key,
+                author_key_signature,
+                author_public_key,
+            } => {
+                loaded_info.snp_id_block.compatibility_mask = *compatibility_mask;
+                loaded_info.snp_id_block.author_key_enabled = *author_key_enabled;
+                loaded_info.snp_id_block.reserved[..3].copy_from_slice(reserved);
+                loaded_info.snp_id_block.ld[..48].copy_from_slice(ld);
+                loaded_info.snp_id_block.family_id[..16].copy_from_slice(family_id);
+                loaded_info.snp_id_block.image_id[..16].copy_from_slice(image_id);
+                loaded_info.snp_id_block.version = *version;
+                loaded_info.snp_id_block.guest_svn = *guest_svn;
+                loaded_info.snp_id_block.id_key_algorithm = *id_key_algorithm;
+                loaded_info.snp_id_block.author_key_algorithm = *author_key_algorithm;
+                loaded_info.snp_id_block.id_key_signature = **id_key_signature;
+                loaded_info.snp_id_block.id_public_key = **id_public_key;
+                loaded_info.snp_id_block.author_key_signature = **author_key_signature;
+                loaded_info.snp_id_block.author_public_key = **author_public_key;
+            }
             igvm_parser::igvm::IgvmDirectiveHeader::VbsVpContext {
                 vtl,
                 registers,
@@ -348,5 +380,5 @@ pub fn load_igvm(
         }
     }
 
-    Ok(loader.get_initial_regs())
+    Ok(loaded_info)
 }
