@@ -115,8 +115,10 @@ pub fn load_igvm(
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo>  = Box::new(IgvmLoadedInfo::default());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
-
+    let mut first_gpa: u64 = 0;
+    let mut gpa_found: bool = false;
     let mut file_contents = Vec::new();
+
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
@@ -185,6 +187,10 @@ pub fn load_igvm(
                 data_type,
                 data,
             } => {
+                if !gpa_found {
+                    first_gpa = *gpa;
+                    gpa_found = true;
+                }
                 debug_assert!(data.len() as u64 % HV_PAGE_SIZE == 0);
 
                 // TODO: only 4k or empty page datas supported right now
@@ -277,6 +283,10 @@ pub fn load_igvm(
                 number_of_bytes,
                 flags,
             } => {
+                if !gpa_found {
+                    first_gpa = *gpa;
+                    gpa_found = true;
+                }
                 let memory_type = if flags & IGVM_VHF_REQUIRED_MEMORY_FLAGS_VTL2_PROTECTABLE
                     == IGVM_VHF_REQUIRED_MEMORY_FLAGS_VTL2_PROTECTABLE
                 {
@@ -300,6 +310,10 @@ pub fn load_igvm(
                 vp_index,
                 vmsa,
             } => {
+                if !gpa_found {
+                    first_gpa = *gpa;
+                    gpa_found = true;
+                }
                 assert_eq!(gpa % HV_PAGE_SIZE, 0);
                 let mut data: [u8; 4096] = [0; 4096];
                 let len = size_of::<SEV_VMSA>();
@@ -355,7 +369,10 @@ pub fn load_igvm(
                 compatibility_mask: _,
                 parameter_area_index,
             }) => {
-
+                if !gpa_found {
+                    first_gpa = *gpa;
+                    gpa_found = true;
+                }
                 debug_assert!(gpa % HV_PAGE_SIZE == 0);
 
                 let area = parameter_areas
@@ -379,6 +396,7 @@ pub fn load_igvm(
             }
         }
     }
-
+    loaded_info.first_gpa = first_gpa;
+    loaded_info.length = loader.gets_total_bytes_written();
     Ok(loaded_info)
 }
