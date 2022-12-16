@@ -156,6 +156,8 @@ pub struct Loader {
     regs: HashMap<Discriminant<Register>, Register>,
     accepted_ranges: RangeMap<u64, BootPageAcceptance>,
     max_vtl: Vtl,
+    bytes_written: u64,
+
 }
 
 impl Loader {
@@ -165,6 +167,7 @@ impl Loader {
             regs: HashMap::new(),
             accepted_ranges: RangeMap::new(),
             max_vtl,
+            bytes_written: 0,
         }
     }
 
@@ -196,6 +199,9 @@ impl Loader {
                 Ok(())
             }
         }
+    }
+    pub fn gets_total_bytes_written(self) -> u64 {
+        self.bytes_written
     }
 }
 
@@ -232,7 +238,8 @@ impl ImageLoad for Loader {
                 debug!("Importing pages failed due to MemoryError");
                 Error::MemoryUnavailable
             })?;
-            Ok(())
+        self.bytes_written += page_count * HV_PAGE_SIZE;
+        Ok(())
     }
 
     fn import_vp_register(&mut self, vtl: Vtl, register: Register) -> Result<(), Error> {
