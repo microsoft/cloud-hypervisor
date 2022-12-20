@@ -53,9 +53,9 @@ use devices::interrupt_controller;
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
-use hypervisor::{HypervisorVmError, VmOps};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs as CoreRegs;
+use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf;
@@ -472,6 +472,7 @@ impl Vm {
     pub fn new_from_memory_manager(
         config: Arc<Mutex<VmConfig>>,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        cpu_manager: Arc<Mutex<cpu::CpuManager>>,
         vm: Arc<dyn hypervisor::Vm>,
         exit_evt: EventFd,
         reset_evt: EventFd,
@@ -528,21 +529,6 @@ impl Vm {
             io_bus: io_bus.clone(),
             mmio_bus: mmio_bus.clone(),
         });
-
-        let cpus_config = { &config.lock().unwrap().cpus.clone() };
-        let cpu_manager = cpu::CpuManager::new(
-            cpus_config,
-            vm.clone(),
-            exit_evt.try_clone().map_err(Error::EventFdClone)?,
-            reset_evt.try_clone().map_err(Error::EventFdClone)?,
-            #[cfg(feature = "guest_debug")]
-            vm_debug_evt,
-            &hypervisor,
-            seccomp_action.clone(),
-            #[cfg(feature = "tdx")]
-            tdx_enabled,
-        )
-        .map_err(Error::CpuManager)?;
 
         #[cfg(target_arch = "x86_64")]
         cpu_manager
@@ -794,6 +780,21 @@ impl Vm {
 
         let phys_bits = physical_bits(vm_config.lock().unwrap().cpus.max_phys_bits);
 
+        let cpus_config = { &vm_config.lock().unwrap().cpus.clone() };
+        let cpu_manager = cpu::CpuManager::new(
+            cpus_config,
+            vm.clone(),
+            exit_evt.try_clone().map_err(Error::EventFdClone)?,
+            reset_evt.try_clone().map_err(Error::EventFdClone)?,
+            #[cfg(feature = "guest_debug")]
+            vm_debug_evt,
+            &hypervisor,
+            seccomp_action.clone(),
+            #[cfg(feature = "tdx")]
+            tdx_enabled,
+        )
+        .map_err(Error::CpuManager)?;
+
         let memory_manager = if let Some(snapshot) =
             snapshot_from_id(snapshot.as_ref(), MEMORY_MANAGER_SNAPSHOT_ID)
         {
@@ -828,6 +829,7 @@ impl Vm {
         Vm::new_from_memory_manager(
             vm_config,
             memory_manager,
+            cpu_manager,
             vm,
             exit_evt,
             reset_evt,

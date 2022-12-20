@@ -710,7 +710,11 @@ impl CpuManager {
     fn create_vcpu(&mut self, cpu_id: u8, snapshot: Option<Snapshot>) -> Result<Arc<Mutex<Vcpu>>> {
         info!("Creating vCPU: cpu_id = {}", cpu_id);
 
-        let mut vcpu = Vcpu::new(cpu_id, &self.vm, Some(self.vm_ops.as_ref().unwrap().clone()))?;
+        let mut vcpu = Vcpu::new(
+            cpu_id,
+            &self.vm,
+            Some(self.vm_ops.as_ref().unwrap().clone()),
+        )?;
 
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.

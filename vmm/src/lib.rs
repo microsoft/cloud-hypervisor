@@ -1251,9 +1251,39 @@ impl Vmm {
 
         let timestamp = Instant::now();
         let hypervisor_vm = mm.lock().unwrap().vm.clone();
+
+        let cpus_config = {
+            &self
+                .vm_config
+                .clone()
+                .expect("REASON")
+                .lock()
+                .unwrap()
+                .cpus
+                .clone()
+        };
+        let cpu_manager = cpu::CpuManager::new(
+            cpus_config,
+            hypervisor_vm.clone(),
+            exit_evt
+                .try_clone()
+                .map_err(MigratableError::MigrateSocket)?,
+            reset_evt
+                .try_clone()
+                .map_err(MigratableError::MigrateSocket)?,
+            #[cfg(feature = "guest_debug")]
+            vm_debug_evt,
+            &self.hypervisor,
+            self.seccomp_action.clone(),
+            #[cfg(feature = "tdx")]
+            tdx_enabled,
+        )
+        .unwrap();
+
         let mut vm = Vm::new_from_memory_manager(
             self.vm_config.clone().unwrap(),
             mm,
+            cpu_manager,
             hypervisor_vm,
             exit_evt,
             reset_evt,
