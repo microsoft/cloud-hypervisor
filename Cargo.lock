@@ -1612,6 +1612,7 @@ dependencies = [
  "arch",
  "bitflags",
  "block_util",
+ "cfg-if",
  "clap",
  "devices",
  "epoll",
