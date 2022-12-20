@@ -769,10 +769,19 @@ impl Vm {
             vm_config.lock().unwrap().is_tdx_enabled()
         };
 
+        #[cfg(feature = "snp")]
+        let snp_enabled = if snapshot.is_some() {
+            false
+        } else {
+            vm_config.lock().unwrap().is_snp_enabled()
+        };
+
         let vm = Self::create_hypervisor_vm(
             &hypervisor,
             #[cfg(feature = "tdx")]
             tdx_enabled,
+            #[cfg(feature = "snp")]
+            snp_enabled,
         )?;
 
         let phys_bits = physical_bits(vm_config.lock().unwrap().cpus.max_phys_bits);
@@ -830,17 +839,31 @@ impl Vm {
     pub fn create_hypervisor_vm(
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
+        #[cfg(feature = "snp")] snp_enabled: bool,
     ) -> Result<Arc<dyn hypervisor::Vm>> {
         hypervisor.check_required_extensions().unwrap();
 
-        // 0 for KVM_X86_LEGACY_VM
-        // 1 for KVM_X86_TDX_VM
-        #[cfg(feature = "tdx")]
-        let vm = hypervisor
-            .create_vm_with_type(u64::from(tdx_enabled))
-            .unwrap();
-        #[cfg(not(feature = "tdx"))]
-        let vm = hypervisor.create_vm().unwrap();
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "tdx")] {
+                let vm = hypervisor
+                    .create_vm_with_type(if tdx_enabled {
+                        2 // KVM_X86_TDX_VM
+                    } else {
+                        0 // KVM_X86_LEGACY_VM
+                    })
+                    .unwrap();
+            } else if #[cfg(feature = "snp")] {
+                let vm = hypervisor
+                    .create_vm_with_type(if snp_enabled {
+                        1 // SNP_ENABLED
+                    } else {
+                        0 // SNP_DISABLED
+                    })
+                    .unwrap();
+            } else {
+                let vm = hypervisor.create_vm().unwrap();
+            }
+        }
 
         #[cfg(target_arch = "x86_64")]
         {
