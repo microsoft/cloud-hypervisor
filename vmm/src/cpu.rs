@@ -427,7 +427,7 @@ pub struct CpuManager {
     selected_cpu: u8,
     vcpus: Vec<Arc<Mutex<Vcpu>>>,
     seccomp_action: SeccompAction,
-    vm_ops: Arc<dyn VmOps>,
+    vm_ops: Option<Arc<dyn VmOps>>,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     acpi_address: Option<GuestAddress>,
     proximity_domain_per_cpu: BTreeMap<u8, u32>,
@@ -576,7 +576,6 @@ impl CpuManager {
         #[cfg(feature = "guest_debug")] vm_debug_evt: EventFd,
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         seccomp_action: SeccompAction,
-        vm_ops: Arc<dyn VmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
@@ -646,7 +645,7 @@ impl CpuManager {
             selected_cpu: 0,
             vcpus: Vec::with_capacity(usize::from(config.max_vcpus)),
             seccomp_action,
-            vm_ops,
+            vm_ops: None,
             acpi_address: None,
             proximity_domain_per_cpu: BTreeMap::new(),
             affinity,
@@ -703,10 +702,15 @@ impl CpuManager {
         Ok(())
     }
 
+    pub fn set_vm_ops(&mut self, vm_ops: &Arc<dyn VmOps>) -> Result<()> {
+        self.vm_ops = Some(vm_ops.clone());
+        Ok(())
+    }
+
     fn create_vcpu(&mut self, cpu_id: u8, snapshot: Option<Snapshot>) -> Result<Arc<Mutex<Vcpu>>> {
         info!("Creating vCPU: cpu_id = {}", cpu_id);
 
-        let mut vcpu = Vcpu::new(cpu_id, &self.vm, Some(self.vm_ops.clone()))?;
+        let mut vcpu = Vcpu::new(cpu_id, &self.vm, Some(self.vm_ops.as_ref().unwrap().clone()))?;
 
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.

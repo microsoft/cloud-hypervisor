@@ -53,9 +53,9 @@ use devices::interrupt_controller;
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
+use hypervisor::{HypervisorVmError, VmOps};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs as CoreRegs;
-use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf;
@@ -539,7 +539,6 @@ impl Vm {
             vm_debug_evt,
             &hypervisor,
             seccomp_action.clone(),
-            vm_ops,
             #[cfg(feature = "tdx")]
             tdx_enabled,
         )
@@ -557,11 +556,16 @@ impl Vm {
             )
             .map_err(Error::CpuManager)?;
 
-        #[cfg(target_arch = "x86_64")]
         cpu_manager
             .lock()
             .unwrap()
             .set_proximity_domain_per_cpu(&numa_nodes)
+            .map_err(Error::CpuManager)?;
+
+        cpu_manager
+            .lock()
+            .unwrap()
+            .set_vm_ops(&vm_ops)
             .map_err(Error::CpuManager)?;
 
         // The initial TDX configuration must be done before the vCPUs are
