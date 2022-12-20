@@ -320,6 +320,17 @@ impl Vcpu {
         })
     }
 
+    pub fn setup_vm_ops(&mut self, vm_ops: Option<Arc<dyn VmOps>>) {
+        if let Some(vcpu) = Arc::get_mut(&mut self.vcpu) {
+            vcpu.set_vm_ops(vm_ops);
+        } else {
+            // We should never reach this code as
+            // this means the design from the code
+            // is wrong.
+            unreachable!("Couldn't get a mutable reference from Arc<dyn Vcpu> as there are multiple instances");
+        }
+    }
+
     /// Configures a vcpu and should be called once per vcpu when created.
     ///
     /// # Arguments
@@ -704,6 +715,13 @@ impl CpuManager {
 
     pub fn set_vm_ops(&mut self, vm_ops: &Arc<dyn VmOps>) -> Result<()> {
         self.vm_ops = Some(vm_ops.clone());
+
+        // Setup vm_ops for all the vcpu threads
+        for vcpu in self.vcpus.iter_mut() {
+            let mut vcpu = vcpu.lock().unwrap();
+            vcpu.setup_vm_ops(Some(vm_ops.clone()));
+        }
+
         Ok(())
     }
 

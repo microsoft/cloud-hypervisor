@@ -16,8 +16,10 @@ use crate::arch::x86::{
 };
 #[cfg(feature = "tdx")]
 use crate::kvm::{TdxExitDetails, TdxExitStatus};
+use crate::vm::VmOps;
 use crate::CpuState;
 use crate::MpState;
+use std::sync::Arc;
 use thiserror::Error;
 use vm_memory::GuestAddress;
 
@@ -432,4 +434,8 @@ pub trait Vcpu: Send + Sync {
     /// Return the list of initial MSR entries for a VCPU
     ///
     fn boot_msr_entries(&self) -> Vec<MsrEntry>;
+
+    fn set_vm_ops(&mut self, _vm_ops: Option<Arc<dyn VmOps>>) {
+        unimplemented!()
+    }
 }

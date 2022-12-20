@@ -708,6 +708,10 @@ impl cpu::Vcpu for MshvVcpu {
         ]
         .to_vec()
     }
+
+    fn set_vm_ops(&mut self, vm_ops: Option<Arc<dyn VmOps>>) {
+        self.vm_ops = vm_ops;
+    }
 }
 
 impl MshvVcpu {
