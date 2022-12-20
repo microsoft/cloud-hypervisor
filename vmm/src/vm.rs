@@ -542,7 +542,6 @@ impl Vm {
             vm_ops,
             #[cfg(feature = "tdx")]
             tdx_enabled,
-            &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
 
@@ -556,6 +555,13 @@ impl Vm {
                 #[cfg(feature = "tdx")]
                 tdx_enabled,
             )
+            .map_err(Error::CpuManager)?;
+
+        #[cfg(target_arch = "x86_64")]
+        cpu_manager
+            .lock()
+            .unwrap()
+            .set_proximity_domain_per_cpu(&numa_nodes)
             .map_err(Error::CpuManager)?;
 
         // The initial TDX configuration must be done before the vCPUs are

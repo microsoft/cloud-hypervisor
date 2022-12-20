@@ -578,7 +578,6 @@ impl CpuManager {
         seccomp_action: SeccompAction,
         vm_ops: Arc<dyn VmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
-        numa_nodes: &NumaNodes,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
         vcpu_states.resize_with(usize::from(config.max_vcpus), VcpuState::default);
@@ -616,18 +615,6 @@ impl CpuManager {
             }
         }
 
-        let proximity_domain_per_cpu: BTreeMap<u8, u32> = {
-            let mut cpu_list = Vec::new();
-            for (proximity_domain, numa_node) in numa_nodes.iter() {
-                for cpu in numa_node.cpus.iter() {
-                    cpu_list.push((*cpu, *proximity_domain))
-                }
-            }
-            cpu_list
-        }
-        .into_iter()
-        .collect();
-
         let affinity = if let Some(cpu_affinity) = config.affinity.as_ref() {
             cpu_affinity
                 .iter()
@@ -661,7 +648,7 @@ impl CpuManager {
             seccomp_action,
             vm_ops,
             acpi_address: None,
-            proximity_domain_per_cpu,
+            proximity_domain_per_cpu: BTreeMap::new(),
             affinity,
             dynamic,
         })))
@@ -697,6 +684,22 @@ impl CpuManager {
             .map_err(Error::CommonCpuId)?
         };
 
+        Ok(())
+    }
+
+    pub fn set_proximity_domain_per_cpu(&mut self, numa_nodes: &NumaNodes) -> Result<()> {
+        let proximity_domain_per_cpu: BTreeMap<u8, u32> = {
+            let mut cpu_list = Vec::new();
+            for (proximity_domain, numa_node) in numa_nodes.iter() {
+                for cpu in numa_node.cpus.iter() {
+                    cpu_list.push((*cpu, *proximity_domain))
+                }
+            }
+            cpu_list
+        }
+        .into_iter()
+        .collect();
+        self.proximity_domain_per_cpu = proximity_domain_per_cpu;
         Ok(())
     }
 
