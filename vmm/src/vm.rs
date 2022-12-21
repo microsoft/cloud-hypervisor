@@ -564,12 +564,6 @@ impl Vm {
                 .map_err(Error::InitializeTdxVm)?;
         }
 
-        cpu_manager
-            .lock()
-            .unwrap()
-            .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
-            .map_err(Error::CpuManager)?;
-
         #[cfg(feature = "tdx")]
         let dynamic = !tdx_enabled;
         #[cfg(not(feature = "tdx"))]
@@ -794,6 +788,12 @@ impl Vm {
             tdx_enabled,
         )
         .map_err(Error::CpuManager)?;
+
+        cpu_manager
+            .lock()
+            .unwrap()
+            .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
+            .map_err(Error::CpuManager)?;
 
         let memory_manager = if let Some(snapshot) =
             snapshot_from_id(snapshot.as_ref(), MEMORY_MANAGER_SNAPSHOT_ID)

@@ -2154,6 +2154,10 @@ impl cpu::Vcpu for KvmVcpu {
             .set_device_attr(&cpu_attr)
             .map_err(|_| cpu::HypervisorCpuError::InitializePmu)
     }
+
+    fn set_vm_ops(&mut self, vm_ops: Option<Arc<dyn VmOps>>) {
+        self.vm_ops = vm_ops;
+    }
 }
 
 impl KvmVcpu {

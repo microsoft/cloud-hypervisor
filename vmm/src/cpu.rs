@@ -731,7 +731,7 @@ impl CpuManager {
         let mut vcpu = Vcpu::new(
             cpu_id,
             &self.vm,
-            Some(self.vm_ops.as_ref().unwrap().clone()),
+            None,
         )?;
 
         if let Some(snapshot) = snapshot {
