@@ -213,6 +213,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to create Vgic: {0}")]
     CreateVgic(#[source] anyhow::Error),
+    ///
+    /// Create Vgic error
+    ///
+    #[error("Failed to initialize SNP: {0}")]
+    SnpInit(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -347,6 +352,12 @@ pub trait Vm: Send + Sync + Any {
     }
     /// Downcast to the underlying hypervisor VM type
     fn as_any(&self) -> &dyn Any;
+
+    #[cfg(feature = "snp")]
+    /// Initialize SNP on this VM
+    fn snp_init(&self) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 pub trait VmOps: Send + Sync {
