@@ -150,6 +150,10 @@ pub enum Error {
     #[error("Error initializing TDX: {0}")]
     InitializeTdx(#[source] hypervisor::HypervisorCpuError),
 
+    #[cfg(feature = "snp")]
+    #[error("Error initializing SNP: {0}")]
+    InitializeSnp(#[source] hypervisor::HypervisorVmError),
+
     #[cfg(target_arch = "aarch64")]
     #[error("Error initializing PMU: {0}")]
     InitPmu(#[source] hypervisor::HypervisorCpuError),
@@ -728,11 +732,7 @@ impl CpuManager {
     fn create_vcpu(&mut self, cpu_id: u8, snapshot: Option<Snapshot>) -> Result<Arc<Mutex<Vcpu>>> {
         info!("Creating vCPU: cpu_id = {}", cpu_id);
 
-        let mut vcpu = Vcpu::new(
-            cpu_id,
-            &self.vm,
-            None,
-        )?;
+        let mut vcpu = Vcpu::new(cpu_id, &self.vm, None)?;
 
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.
@@ -1140,7 +1140,12 @@ impl CpuManager {
     ) -> Result<Vec<Arc<Mutex<Vcpu>>>> {
         trace_scoped!("create_boot_vcpus");
 
-        self.create_vcpus(self.boot_vcpus(), snapshot)
+        let ret = self.create_vcpus(self.boot_vcpus(), snapshot);
+
+        #[cfg(feature="snp")]
+        self.vm.snp_init().map_err(|e| { Error::InitializeSnp(e.into())})?;
+
+        ret
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
