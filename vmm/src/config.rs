@@ -350,6 +350,7 @@ pub struct VmParams<'a> {
     pub memory: &'a str,
     pub memory_zones: Option<Vec<&'a str>>,
     pub firmware: Option<&'a str>,
+    pub igvm: Option<&'a str>,
     pub kernel: Option<&'a str>,
     pub initramfs: Option<&'a str>,
     pub cmdline: Option<&'a str>,
@@ -388,6 +389,7 @@ impl<'a> VmParams<'a> {
         let rng = args.get_one::<String>("rng").unwrap();
         let serial = args.get_one::<String>("serial").unwrap();
         let firmware = args.get_one::<String>("firmware").map(|x| x as &str);
+        let igvm = args.get_one::<String>("igvm").map(|x| x as &str);
         let kernel = args.get_one::<String>("kernel").map(|x| x as &str);
         let initramfs = args.get_one::<String>("initramfs").map(|x| x as &str);
         let cmdline = args.get_one::<String>("cmdline").map(|x| x as &str);
@@ -434,6 +436,7 @@ impl<'a> VmParams<'a> {
             memory,
             memory_zones,
             firmware,
+            igvm,
             kernel,
             initramfs,
             cmdline,
@@ -2154,12 +2157,13 @@ impl VmConfig {
             numa = Some(numa_config_list);
         }
 
-        let payload = if vm_params.kernel.is_some() || vm_params.firmware.is_some() {
+        let payload = if vm_params.kernel.is_some() || vm_params.firmware.is_some() || vm_params.igvm.is_some() {
             Some(PayloadConfig {
                 kernel: vm_params.kernel.map(PathBuf::from),
                 initramfs: vm_params.initramfs.map(PathBuf::from),
                 cmdline: vm_params.cmdline.map(|s| s.to_string()),
                 firmware: vm_params.firmware.map(PathBuf::from),
+                igvm: vm_params.igvm.map(PathBuf::from),
             })
         } else {
             None
