@@ -196,6 +196,15 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
                 .group("vm-config"),
         )
         .arg(
+            Arg::new("igvm")
+                .long("igvm")
+                .help(
+                    "Path to igvm to load.",
+                )
+                .num_args(1)
+                .group("vm-config"),
+        )
+        .arg(
             Arg::new("kernel")
                 .long("kernel")
                 .help(
@@ -568,7 +577,7 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     .map_err(Error::StartVmmThread)?;
 
     let payload_present =
-        cmd_arguments.contains_id("kernel") || cmd_arguments.contains_id("firmware");
+        cmd_arguments.contains_id("kernel") || cmd_arguments.contains_id("firmware") || cmd_arguments.contains_id("igvm");
 
     if payload_present {
         let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
