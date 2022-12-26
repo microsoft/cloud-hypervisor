@@ -99,6 +99,7 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 use vmm_sys_util::terminal::Terminal;
+use crate::igvm::igvm_loader;
 
 /// Errors associated with VM management
 #[derive(Debug, Error)]
@@ -245,6 +246,12 @@ pub enum Error {
 
     #[error("Error manipulating firmware file: {0}")]
     FirmwareFile(#[source] std::io::Error),
+
+    #[error("Error manipulating IGVM file: {0}")]
+    IgvmFile(#[source] std::io::Error),
+
+    #[error("Cannot load the IGVM file in memory: {0}")]
+    LoadIgvm(#[source] std::io::Error),
 
     #[error("Firmware too big")]
     FirmwareTooLarge,
@@ -977,6 +984,14 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
+    fn load_igvm(mut file: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
+        // Here we need to call load_igvm file
+        info!("Loading IGVM file");
+
+        panic!("Failed to load IGVM file");
+    }
+
+    #[cfg(target_arch = "x86_64")]
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
@@ -984,15 +999,20 @@ impl Vm {
         trace_scoped!("load_payload");
         match (
             &payload.firmware,
+            &payload.igvm,
             &payload.kernel,
             &payload.initramfs,
             &payload.cmdline,
         ) {
-            (Some(firmware), None, None, None) => {
+            (Some(firmware), None, None, None, None) => {
                 let firmware = File::open(firmware).map_err(Error::FirmwareFile)?;
                 Self::load_kernel(firmware, None, memory_manager)
             }
-            (None, Some(kernel), _, _) => {
+            (None, Some(igvm), None, None, None) => {
+                let igvm = File::open(igvm).map_err(Error::IgvmFile)?;
+                Self::load_igvm(igvm, memory_manager)
+            }
+            (None, None, Some(kernel), _, _) => {
                 let kernel = File::open(kernel).map_err(Error::KernelFile)?;
                 let cmdline = Self::generate_cmdline(payload)?;
                 Self::load_kernel(kernel, Some(cmdline), memory_manager)
