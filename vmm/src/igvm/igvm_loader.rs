@@ -101,6 +101,12 @@ pub struct AcpiTables<'a> {
     pub pptt: Option<&'a [u8]>,
 }
 
+impl<'a> AcpiTables<'a> {
+    pub fn new(madt: &'a acpi_tables::sdt::Sdt, srat: &'a acpi_tables::sdt::Sdt) -> Self {
+        AcpiTables { madt: madt.as_slice(), srat: srat.as_slice(), slit: None, pptt: None }
+    }
+}
+
 /// Load the given IGVM file.
 ///
 /// `vtl2_base_address` specifies the absolute guest physical address to relocate the VTL2 region to.

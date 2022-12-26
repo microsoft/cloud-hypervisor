@@ -276,7 +276,7 @@ fn create_tpm2_table() -> Sdt {
     tpm
 }
 
-fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
+pub fn create_srat_table(numa_nodes: &NumaNodes) -> Sdt {
     let mut srat = Sdt::new(*b"SRAT", 36, 3, *b"CLOUDH", *b"CHSRAT  ", 1);
     // SRAT reserved 12 bytes
     srat.append_slice(&[0u8; 12]);

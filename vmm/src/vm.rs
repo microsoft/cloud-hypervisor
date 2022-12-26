@@ -494,17 +494,17 @@ impl Vm {
             .validate()
             .map_err(Error::ConfigValidation)?;
 
-        let load_payload_handle = if snapshot.is_none() {
-            Self::load_payload_async(&memory_manager, &config)?
-        } else {
-            None
-        };
-
         info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(&memory_manager, &cpu_manager, &numa_nodes, &config)?
+        } else {
+            None
+        };
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
@@ -1017,9 +1017,23 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn load_igvm(mut file: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
+    fn load_igvm(mut file: File, memory_manager: Arc<Mutex<MemoryManager>>, cpu_manager: Arc<Mutex<cpu::CpuManager>>, numa_nodes: NumaNodes) -> Result<EntryPoint> {
         // Here we need to call load_igvm file
         info!("Loading IGVM file");
+        let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
+
+        let boot_vcpus = cpu_manager.lock().as_ref().unwrap().boot_vcpus() as u32;
+        let madt = cpu_manager.lock().as_ref().unwrap().create_madt();
+        let srat = crate::acpi::create_srat_table(&numa_nodes);
+
+        info!("{:?}", boot_vcpus);
+        info!("{:?}", madt.as_slice());
+        info!("{:?}", srat.as_slice());
+
+        let acpi_tables = crate::igvm::igvm_loader::AcpiTables::new(&madt, &srat);
+
+        let res = igvm_loader::load_igvm(&file, guest_memory, Vec::new(), boot_vcpus, "", acpi_tables).unwrap();
+        info!("{:?}", res);
 
         panic!("Failed to load IGVM file");
     }
@@ -1028,6 +1042,8 @@ impl Vm {
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        cpu_manager: Arc<Mutex<cpu::CpuManager>>,
+        numa_nodes: NumaNodes
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
         match (
@@ -1043,7 +1059,7 @@ impl Vm {
             }
             (None, Some(igvm), None, None, None) => {
                 let igvm = File::open(igvm).map_err(Error::IgvmFile)?;
-                Self::load_igvm(igvm, memory_manager)
+                Self::load_igvm(igvm, memory_manager, cpu_manager, numa_nodes)
             }
             (None, None, Some(kernel), _, _) => {
                 let kernel = File::open(kernel).map_err(Error::KernelFile)?;
@@ -1074,6 +1090,8 @@ impl Vm {
 
     fn load_payload_async(
         memory_manager: &Arc<Mutex<MemoryManager>>,
+        cpu_manager: &Arc<Mutex<cpu::CpuManager>>,
+        numa_nodes: &NumaNodes,
         config: &Arc<Mutex<VmConfig>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
@@ -1089,11 +1107,13 @@ impl Vm {
             .as_ref()
             .map(|payload| {
                 let memory_manager = memory_manager.clone();
+                let cpu_manager = cpu_manager.clone();
                 let payload = payload.clone();
+                let numa_nodes = numa_nodes.clone();
 
                 std::thread::Builder::new()
                     .name("payload_loader".into())
-                    .spawn(move || Self::load_payload(&payload, memory_manager))
+                    .spawn(move || Self::load_payload(&payload, memory_manager, cpu_manager, numa_nodes))
                     .map_err(Error::KernelLoadThreadSpawn)
             })
             .transpose()
