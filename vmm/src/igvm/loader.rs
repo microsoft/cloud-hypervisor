@@ -4,6 +4,7 @@ use igvm_parser::igvm::IgvmParameterPageType;
 use igvm_parser::importer::{BootPageAcceptance, HV_PAGE_SIZE, IsolationConfig,
     IsolationType, Register, StartupMemoryType};
 use igvm_parser::map_range::{RangeMap, Entry};
+use vm_memory::bitmap::AtomicBitmap;
 
 use std::collections::HashMap;
 use std::mem::Discriminant;
@@ -152,7 +153,7 @@ pub trait ImageLoad {
 
 #[derive(Debug)]
 pub struct Loader {
-    memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
     regs: HashMap<Discriminant<Register>, Register>,
     accepted_ranges: RangeMap<u64, BootPageAcceptance>,
     max_vtl: Vtl,
@@ -161,7 +162,7 @@ pub struct Loader {
 }
 
 impl Loader {
-    pub fn new(memory: GuestMemoryAtomic<GuestMemoryMmap>, max_vtl: Vtl) -> Loader {
+    pub fn new(memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>, max_vtl: Vtl) -> Loader {
         Loader {
             memory,
             regs: HashMap::new(),

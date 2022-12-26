@@ -42,6 +42,7 @@ use vm_memory::GuestMemoryMmap;
 use crate::ArchMemRegion;
 use arch::RegionType;
 use crate::igvm::IgvmLoadedInfo;
+use vm_memory::bitmap::AtomicBitmap;
 
 
 #[derive(Debug, Error)]
@@ -107,7 +108,7 @@ pub struct AcpiTables<'a> {
 /// TODO: only supports underhill for now, with assumptions that the file always has VTL2 enabled.
 pub fn load_igvm(
     mut file: &std::fs::File,
-    memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
