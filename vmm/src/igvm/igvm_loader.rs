@@ -318,6 +318,7 @@ pub fn load_igvm(
                 assert_eq!(gpa % HV_PAGE_SIZE, 0);
                 let mut data: [u8; 4096] = [0; 4096];
                 let len = size_of::<SEV_VMSA>();
+                // Only supported for index zero
                 if *vp_index == 0 {
                     data[..len].copy_from_slice(vmsa.as_bytes());
                     loader
@@ -325,6 +326,7 @@ pub fn load_igvm(
                         .map_err(Error::Loader)?;
                 }
                 loaded_info.vmsa_gpa = *gpa;
+                loaded_info.vmsa = **vmsa;
             }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock {
                 compatibility_mask,
