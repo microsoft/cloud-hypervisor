@@ -206,6 +206,8 @@ pub fn load_igvm(
                             BootPageAcceptance::Exclusive
                         }
                     }
+                    IgvmPageDataType::SECRETS => BootPageAcceptance::SecretsPage,
+                    IgvmPageDataType::CPUID_DATA => BootPageAcceptance::CpuidPage,
                     // TODO: other data types SNP / TDX only, unsupported
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
