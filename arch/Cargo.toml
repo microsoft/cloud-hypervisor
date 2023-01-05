@@ -7,11 +7,13 @@ edition = "2021"
 [features]
 default = []
 tdx = []
+mshv = ["igvm-parser"]
 
 [dependencies]
 anyhow = "1.0.66"
 byteorder = "1.4.3"
 hypervisor = { path = "../hypervisor" }
+igvm-parser = { path = "../../igvm-parser", optional  = true }
 libc = "0.2.138"
 linux-loader = { version = "0.8.1", features = ["elf", "bzimage", "pe"] }
 log = "0.4.17"

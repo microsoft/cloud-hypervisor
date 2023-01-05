@@ -8,7 +8,7 @@ edition = "2021"
 default = []
 guest_debug = ["kvm", "gdbstub", "gdbstub_arch"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
-mshv = ["hypervisor/mshv", "igvm-parser", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv", "zerocopy"]
+mshv = ["arch/mshv", "hypervisor/mshv", "igvm-parser", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv", "zerocopy"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 tracing = ["tracer/tracing"]
 
