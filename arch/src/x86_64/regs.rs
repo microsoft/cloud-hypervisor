@@ -59,7 +59,18 @@ vmsa: Option<SEV_VMSA>,) -> Result<()> {
         mxcsr: 0x1f80,
         ..Default::default()
     };
-
+    #[cfg(feature = "mshv")]
+    {
+        let mut fpu = FpuState {
+            fcw: 0x37f,
+            mxcsr: 0x1f80,
+            ..Default::default()
+        };
+        if let Some(_vmsa) = vmsa {
+            fpu.fcw = _vmsa.x87_fcw;
+            fpu.mxcsr = _vmsa.mxcsr;
+        }
+    }
     vcpu.set_fpu(&fpu).map_err(Error::SetFpuRegisters)
 }
 
@@ -83,7 +94,7 @@ pub fn setup_msrs(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
 /// * `boot_ip` - Starting instruction pointer.
 pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64, #[cfg(feature = "mshv")]
 vmsa: Option<SEV_VMSA>) -> Result<()> {
-    let mut regs = StandardRegisters {
+    let regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
         rip: boot_ip,
@@ -91,6 +102,7 @@ vmsa: Option<SEV_VMSA>) -> Result<()> {
     };
     #[cfg(feature = "mshv")]
     {
+        let mut regs = StandardRegisters::default();
         if let Some(_vmsa) = vmsa {
             regs.rflags = _vmsa.rflags;
             regs.rip = _vmsa.rip;
