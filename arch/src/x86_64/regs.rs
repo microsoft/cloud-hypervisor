@@ -12,7 +12,10 @@ use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
 use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters};
 #[cfg(feature = "mshv")]
-use igvm_parser::snp::SEV_VMSA;
+use igvm_parser::snp::{SEV_SELECTOR, SEV_VMSA};
+#[cfg(feature = "mshv")]
+#[cfg(target_arch = "x86_64")]
+use hypervisor::arch::x86::{ SegmentRegister};
 use std::sync::Arc;
 use std::{mem, result};
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
@@ -121,7 +124,14 @@ vmsa: Option<SEV_VMSA>) -> Result<()> {
 pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &Arc<dyn hypervisor::Vcpu>, #[cfg(feature = "mshv")]
 vmsa: Option<SEV_VMSA>) -> Result<()> {
     let mut sregs: SpecialRegisters = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
+    #[cfg(not(feature = "mshv"))]
     configure_segments_and_sregs(mem, &mut sregs)?;
+    #[cfg(feature = "mshv")]
+    {
+        if let Some(_vmsa) = vmsa {
+            configure_segments_and_sregs_snp(&mut sregs, &_vmsa)?;
+        }
+    }
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
 
@@ -182,6 +192,49 @@ pub fn configure_segments_and_sregs(
 
     sregs.cr0 = CR0_PE;
     sregs.cr4 = 0;
+
+    Ok(())
+}
+
+#[cfg(feature = "mshv")]
+pub fn configure_segments_and_sregs_snp(
+    sregs: &mut SpecialRegisters,
+    vmsa: &SEV_VMSA,
+) -> Result<()> {
+
+    let to_segment = |reg: SEV_SELECTOR| -> SegmentRegister {
+        SegmentRegister {
+            base: reg.base,
+            limit: reg.limit,
+            selector: reg.selector,
+            type_: (reg.attrib & 0xF) as u8,
+            present: ((reg.attrib >> 7) & 0x1) as u8,
+            dpl: ((reg.attrib >> 5) & 0x3) as u8,
+            db: ((reg.attrib >> 14) & 0x1) as u8,
+            s: ((reg.attrib >> 4) & 0x1) as u8,
+            l: ((reg.attrib >> 13) & 0x1) as u8,
+            g: ((reg.attrib >> 15) & 0x1) as u8,
+            avl: ((reg.attrib >> 12) & 0x1) as u8,
+            unusable: 0_u8,
+        }
+    };
+    sregs.gdt.base = vmsa.gdtr.base;
+    sregs.gdt.limit = vmsa.gdtr.limit as u16;
+
+
+    sregs.idt.base = vmsa.idtr.base;
+    sregs.idt.limit = vmsa.idtr.limit as u16;
+
+    sregs.cs = to_segment(vmsa.cs);
+    sregs.ds = to_segment(vmsa.ds);
+    sregs.es = to_segment(vmsa.es);
+    sregs.fs = to_segment(vmsa.fs);
+    sregs.gs = to_segment(vmsa.gs);
+    sregs.ss = to_segment(vmsa.ss);
+    sregs.tr = to_segment(vmsa.tr);
+
+    sregs.cr0 = vmsa.cr0;
+    sregs.cr4 = vmsa.cr4;
 
     Ok(())
 }
