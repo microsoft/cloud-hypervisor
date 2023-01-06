@@ -83,12 +83,20 @@ pub fn setup_msrs(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
 /// * `boot_ip` - Starting instruction pointer.
 pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64, #[cfg(feature = "mshv")]
 vmsa: Option<SEV_VMSA>) -> Result<()> {
-    let regs = StandardRegisters {
+    let mut regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
         rip: boot_ip,
         ..Default::default()
     };
+    #[cfg(feature = "mshv")]
+    {
+        if let Some(_vmsa) = vmsa {
+            regs.rflags = _vmsa.rflags;
+            regs.rip = _vmsa.rip;
+            regs.rbx = _vmsa.rbx;
+        }
+    }
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
 
