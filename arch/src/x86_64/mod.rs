@@ -17,6 +17,8 @@ use crate::InitramfsConfig;
 use crate::RegionType;
 use hypervisor::arch::x86::{CpuIdEntry, CPUID_FLAG_VALID_INDEX};
 use hypervisor::HypervisorError;
+#[cfg(feature = "mshv")]
+use igvm_parser::snp::SEV_VMSA;
 use linux_loader::loader::bootparam::boot_params;
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
@@ -745,6 +747,8 @@ pub fn configure_vcpu(
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
+    #[cfg(feature = "mshv")]
+    vmsa: Option<SEV_VMSA>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
@@ -762,9 +766,9 @@ pub fn configure_vcpu(
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
         if let Some(entry_addr) = kernel_entry_point.entry_addr {
             // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(vcpu, entry_addr.raw_value()).map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(vcpu).map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(&guest_memory.memory(), vcpu).map_err(Error::SregsConfiguration)?;
+            regs::setup_regs(vcpu, entry_addr.raw_value(), #[cfg(feature = "mshv")] vmsa).map_err(Error::RegsConfiguration)?;
+            regs::setup_fpu(vcpu, #[cfg(feature = "mshv")] vmsa).map_err(Error::FpuConfiguration)?;
+            regs::setup_sregs(&guest_memory.memory(), vcpu, #[cfg(feature = "mshv")] vmsa).map_err(Error::SregsConfiguration)?;
         }
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
