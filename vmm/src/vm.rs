@@ -1049,7 +1049,7 @@ impl Vm {
         cpu_manager: Arc<Mutex<cpu::CpuManager>>,
         numa_nodes: NumaNodes
     ) -> Result<EntryPoint> {
-        trace_scoped!("load_payload");
+        info!("load_payload");
         match (
             &payload.firmware,
             &payload.igvm,
