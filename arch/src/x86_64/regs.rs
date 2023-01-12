@@ -55,24 +55,20 @@ pub type Result<T> = result::Result<T, Error>;
 /// # Arguments
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_fpu(vcpu: &Arc<dyn hypervisor::Vcpu>, #[cfg(feature = "mshv")]
-vmsa: Option<SEV_VMSA>,) -> Result<()> {
+pub fn setup_fpu(vcpu: &Arc<dyn hypervisor::Vcpu>, vmsa: Option<SEV_VMSA>,) -> Result<()> {
     let fpu: FpuState = FpuState {
         fcw: 0x37f,
         mxcsr: 0x1f80,
         ..Default::default()
     };
-    #[cfg(feature = "mshv")]
-    {
-        let mut fpu = FpuState {
-            fcw: 0x37f,
-            mxcsr: 0x1f80,
-            ..Default::default()
-        };
-        if let Some(_vmsa) = vmsa {
-            fpu.fcw = _vmsa.x87_fcw;
-            fpu.mxcsr = _vmsa.mxcsr;
-        }
+    let mut fpu = FpuState {
+        fcw: 0x37f,
+        mxcsr: 0x1f80,
+        ..Default::default()
+    };
+    if let Some(_vmsa) = vmsa {
+        fpu.fcw = _vmsa.x87_fcw;
+        fpu.mxcsr = _vmsa.mxcsr;
     }
     vcpu.set_fpu(&fpu).map_err(Error::SetFpuRegisters)
 }
@@ -95,22 +91,18 @@ pub fn setup_msrs(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
 /// * `boot_ip` - Starting instruction pointer.
-pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64, #[cfg(feature = "mshv")]
-vmsa: Option<SEV_VMSA>) -> Result<()> {
+pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64, vmsa: Option<SEV_VMSA>) -> Result<()> {
     let regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
         rip: boot_ip,
         ..Default::default()
     };
-    #[cfg(feature = "mshv")]
-    {
-        let mut regs = StandardRegisters::default();
-        if let Some(_vmsa) = vmsa {
-            regs.rflags = _vmsa.rflags;
-            regs.rip = _vmsa.rip;
-            regs.rbx = _vmsa.rbx;
-        }
+    let mut regs = StandardRegisters::default();
+    if let Some(_vmsa) = vmsa {
+        regs.rflags = _vmsa.rflags;
+        regs.rip = _vmsa.rip;
+        regs.rbx = _vmsa.rbx;
     }
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
@@ -121,16 +113,13 @@ vmsa: Option<SEV_VMSA>) -> Result<()> {
 ///
 /// * `mem` - The memory that will be passed to the guest.
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &Arc<dyn hypervisor::Vcpu>, #[cfg(feature = "mshv")]
-vmsa: Option<SEV_VMSA>) -> Result<()> {
+pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &Arc<dyn hypervisor::Vcpu>, vmsa: Option<SEV_VMSA>) -> Result<()> {
     let mut sregs: SpecialRegisters = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
     #[cfg(not(feature = "mshv"))]
     configure_segments_and_sregs(mem, &mut sregs)?;
-    #[cfg(feature = "mshv")]
-    {
-        if let Some(_vmsa) = vmsa {
-            configure_segments_and_sregs_snp(&mut sregs, &_vmsa)?;
-        }
+
+    if let Some(_vmsa) = vmsa {
+        configure_segments_and_sregs_snp(&mut sregs, &_vmsa)?;
     }
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }

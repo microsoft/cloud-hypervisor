@@ -61,6 +61,7 @@ const KVM_FEATURE_STEAL_TIME_BIT: u8 = 5;
 pub struct EntryPoint {
     /// Address in guest memory where the guest must start execution
     pub entry_addr: Option<GuestAddress>,
+    pub vmsa: Option<SEV_VMSA>,
 }
 
 const E820_RAM: u32 = 1;
@@ -747,7 +748,6 @@ pub fn configure_vcpu(
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
-    #[cfg(feature = "mshv")]
     vmsa: Option<SEV_VMSA>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
@@ -766,9 +766,9 @@ pub fn configure_vcpu(
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
         if let Some(entry_addr) = kernel_entry_point.entry_addr {
             // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(vcpu, entry_addr.raw_value(), #[cfg(feature = "mshv")] vmsa).map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(vcpu, #[cfg(feature = "mshv")] vmsa).map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(&guest_memory.memory(), vcpu, #[cfg(feature = "mshv")] vmsa).map_err(Error::SregsConfiguration)?;
+            regs::setup_regs(vcpu, entry_addr.raw_value(), vmsa).map_err(Error::RegsConfiguration)?;
+            regs::setup_fpu(vcpu, vmsa).map_err(Error::FpuConfiguration)?;
+            regs::setup_sregs(&guest_memory.memory(), vcpu, vmsa).map_err(Error::SregsConfiguration)?;
         }
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;

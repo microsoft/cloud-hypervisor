@@ -55,6 +55,7 @@ use hypervisor::kvm::kvm_bindings;
 #[cfg(feature = "tdx")]
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
+use igvm_parser::snp::SEV_VMSA;
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf::Elf64_Nhdr;
@@ -348,6 +349,7 @@ impl Vcpu {
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
+        vmsa: Option<SEV_VMSA>,
     ) -> Result<()> {
         #[cfg(target_arch = "aarch64")]
         {
@@ -357,7 +359,7 @@ impl Vcpu {
         }
         info!("Configuring vCPU: cpu_id = {}", self.id);
         #[cfg(target_arch = "x86_64")]
-        arch::configure_vcpu(&self.vcpu, self.id, boot_setup, cpuid, kvm_hyperv,  #[cfg(feature = "mshv")] None)
+        arch::configure_vcpu(&self.vcpu, self.id, boot_setup, cpuid, kvm_hyperv,  vmsa)
             .map_err(Error::VcpuConfiguration)?;
 
         Ok(())
@@ -761,6 +763,7 @@ impl CpuManager {
         &self,
         vcpu: Arc<Mutex<Vcpu>>,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
+        vmsa: Option<SEV_VMSA>,
     ) -> Result<()> {
         let mut vcpu = vcpu.lock().unwrap();
 
@@ -768,7 +771,7 @@ impl CpuManager {
         assert!(!self.cpuid.is_empty());
 
         #[cfg(target_arch = "x86_64")]
-        vcpu.configure(boot_setup, self.cpuid.clone(), self.config.kvm_hyperv)?;
+        vcpu.configure(boot_setup, self.cpuid.clone(), self.config.kvm_hyperv, vmsa)?;
 
         #[cfg(target_arch = "aarch64")]
         vcpu.configure(&self.vm, boot_setup)?;
@@ -1175,7 +1178,7 @@ impl CpuManager {
             cmp::Ordering::Greater => {
                 let vcpus = self.create_vcpus(desired_vcpus, None)?;
                 for vcpu in vcpus {
-                    self.configure_vcpu(vcpu, None)?
+                    self.configure_vcpu(vcpu, None, None)?
                 }
                 self.activate_vcpus(desired_vcpus, true, None)?;
                 Ok(true)

@@ -1010,6 +1010,7 @@ impl Vm {
             info!("Kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
             Ok(EntryPoint {
                 entry_addr: Some(entry_addr),
+                vmsa: None,
             })
         } else {
             Err(Error::KernelMissingPvhHeader)
@@ -1033,9 +1034,12 @@ impl Vm {
         let acpi_tables = crate::igvm::igvm_loader::AcpiTables::new(&madt, &srat);
 
         let res = igvm_loader::load_igvm(&file, guest_memory, Vec::new(), boot_vcpus, "", acpi_tables).unwrap();
-        info!("{:?}", res);
+        info!("LOADED IGVM {:?}", res);
 
-        panic!("Failed to load IGVM file");
+        Ok(EntryPoint {
+            entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
+            vmsa: Some(res.vmsa),
+        })
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2119,8 +2123,8 @@ impl Vm {
         current_state.valid_transition(new_state)?;
 
         // Do earlier to parallelise with loading kernel
-        #[cfg(target_arch = "x86_64")]
-        let rsdp_addr = self.create_acpi_tables();
+        // #[cfg(target_arch = "x86_64")]
+        // let rsdp_addr = self.create_acpi_tables();
 
         self.setup_signal_handler()?;
         self.setup_tty()?;
@@ -2128,6 +2132,8 @@ impl Vm {
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
         let entry_point = self.entry_point()?;
+
+        let vmsa = entry_point.unwrap().vmsa;
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = self.config.lock().unwrap().is_tdx_enabled();
@@ -2140,7 +2146,7 @@ impl Vm {
             self.cpu_manager
                 .lock()
                 .unwrap()
-                .configure_vcpu(vcpu, boot_setup)
+                .configure_vcpu(vcpu, boot_setup, vmsa)
                 .map_err(Error::CpuManager)?;
         }
 
@@ -2166,13 +2172,13 @@ impl Vm {
         let rsdp_addr = self.create_acpi_tables();
 
         // Configure shared state based on loaded kernel
-        entry_point
-            .map(|_| {
-                // Safe to unwrap rsdp_addr as we know it can't be None when
-                // the entry_point is Some.
-                self.configure_system(rsdp_addr.unwrap())
-            })
-            .transpose()?;
+        // entry_point
+        //     .map(|_| {
+        //         // Safe to unwrap rsdp_addr as we know it can't be None when
+        //         // the entry_point is Some.
+        //         self.configure_system(rsdp_addr.unwrap())
+        //     })
+        //     .transpose()?;
 
         #[cfg(feature = "tdx")]
         if let Some(hob_address) = hob_address {
