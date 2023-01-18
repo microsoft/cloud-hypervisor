@@ -112,7 +112,7 @@ pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &Arc<dyn hypervisor::Vcpu>, vmsa
     // configure_segments_and_sregs(mem, &mut sregs)?;
 
     if let Some(_vmsa) = vmsa {
-        configure_segments_and_sregs_snp(&mut sregs, &_vmsa)?;
+        configure_segments_and_sregs_snp(mem, &mut sregs, &_vmsa)?;
     }
 
     info!("DUMP SREGS {:?}", sregs);
@@ -181,6 +181,7 @@ pub fn configure_segments_and_sregs(
 }
 
 pub fn configure_segments_and_sregs_snp(
+    mem: &GuestMemoryMmap,
     sregs: &mut SpecialRegisters,
     vmsa: &SEV_VMSA,
 ) -> Result<()> {
@@ -204,7 +205,6 @@ pub fn configure_segments_and_sregs_snp(
     sregs.gdt.base = vmsa.gdtr.base;
     sregs.gdt.limit = vmsa.gdtr.limit as u16;
 
-
     sregs.idt.base = vmsa.idtr.base;
     sregs.idt.limit = vmsa.idtr.limit as u16;
 
@@ -220,7 +220,7 @@ pub fn configure_segments_and_sregs_snp(
     sregs.cr4 = vmsa.cr4;
     sregs.cr3 = vmsa.cr3;
     sregs.efer = vmsa.efer;
-
+    
     Ok(())
 }
 
