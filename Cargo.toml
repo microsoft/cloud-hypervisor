@@ -51,6 +51,10 @@ clap = { version = "4.0.29", features = ["cargo"] }
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.6.0-tdx" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
+[patch."https://github.com/rust-vmm/mshv"]
+mshv-bindings = { path = "../mshv/mshv-bindings" }
+mshv-ioctls = { path = "../mshv/mshv-ioctls" }
+
 [dev-dependencies]
 dirs = "4.0.0"
 net_util = { path = "net_util" }
@@ -60,7 +64,7 @@ test_infra = { path = "test_infra" }
 wait-timeout = "0.2.0"
 
 [features]
-default = ["kvm", "mshv"]
+default = ["kvm"]
 guest_debug = ["vmm/guest_debug"]
 kvm = ["vmm/kvm"]
 mshv = ["vmm/mshv"]
