@@ -55,6 +55,10 @@ kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branc
 kvm-ioctls = { git = "https://github.com/rust-vmm/kvm-ioctls", branch = "main" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
+[patch."https://github.com/rust-vmm/mshv"]
+mshv-bindings = { path = "../mshv/mshv-bindings" }
+mshv-ioctls = { path = "../mshv/mshv-ioctls" }
+
 [dev-dependencies]
 dirs = "5.0.0"
 net_util = { path = "net_util" }
