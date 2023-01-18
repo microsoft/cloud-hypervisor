@@ -219,6 +219,7 @@ pub fn configure_segments_and_sregs_snp(
     sregs.cr0 = vmsa.cr0;
     sregs.cr4 = vmsa.cr4;
     sregs.cr3 = vmsa.cr3;
+    sregs.efer = vmsa.efer;
 
     Ok(())
 }
