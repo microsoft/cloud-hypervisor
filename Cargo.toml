@@ -54,6 +54,10 @@ vm-memory = "0.10.0"
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.6.0-tdx" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch" }
 
+[patch."https://github.com/rust-vmm/mshv"]
+mshv-bindings = { path = "../mshv/mshv-bindings" }
+mshv-ioctls = { path = "../mshv/mshv-ioctls" }
+
 [dev-dependencies]
 dirs = "4.0.0"
 net_util = { path = "net_util" }
