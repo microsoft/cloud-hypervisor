@@ -194,11 +194,11 @@ pub fn configure_segments_and_sregs_snp(
             type_: (reg.attrib & 0xF) as u8,
             present: ((reg.attrib >> 7) & 0x1) as u8,
             dpl: ((reg.attrib >> 5) & 0x3) as u8,
-            db: ((reg.attrib >> 14) & 0x1) as u8,
+            db: ((reg.attrib >> 10) & 0x1) as u8,
             s: ((reg.attrib >> 4) & 0x1) as u8,
-            l: ((reg.attrib >> 13) & 0x1) as u8,
-            g: ((reg.attrib >> 15) & 0x1) as u8,
-            avl: ((reg.attrib >> 12) & 0x1) as u8,
+            l: ((reg.attrib >> 9) & 0x1) as u8,
+            g: ((reg.attrib >> 11) & 0x1) as u8,
+            avl: ((reg.attrib >> 8) & 0x1) as u8,
             unusable: 0_u8,
         }
     };
