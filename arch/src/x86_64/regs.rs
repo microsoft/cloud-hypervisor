@@ -10,9 +10,9 @@ use crate::layout::{BOOT_GDT_START, BOOT_IDT_START, PVH_INFO_START};
 use crate::GuestMemoryMmap;
 use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
-use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters};
+use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters, SegmentRegister};
 #[cfg(feature = "igvm")]
-use igvm_parser::snp::SEV_VMSA;
+use igvm_parser::snp::{SEV_VMSA, SEV_SELECTOR};
 use std::sync::Arc;
 use std::{mem, result};
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
@@ -130,6 +130,8 @@ pub fn setup_sregs(
 ) -> Result<()> {
     let mut sregs: SpecialRegisters = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
     configure_segments_and_sregs(mem, &mut sregs)?;
+    #[cfg(feature = "igvm")]
+    configure_segments_and_sregs_for_igvm(&mut sregs, vmsa)?;
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
 
@@ -151,6 +153,52 @@ fn write_idt_value(val: u64, guest_mem: &GuestMemoryMmap) -> Result<()> {
     guest_mem
         .write_obj(val, boot_idt_addr)
         .map_err(Error::WriteIdt)
+}
+
+#[cfg(feature = "igvm")]
+pub fn configure_segments_and_sregs_for_igvm(
+    sregs: &mut SpecialRegisters,
+    vmsa: Option<SEV_VMSA>,
+) -> Result<()> {
+    let to_segment = |reg: SEV_SELECTOR| -> SegmentRegister {
+        SegmentRegister {
+            base: reg.base,
+            limit: reg.limit,
+            selector: reg.selector,
+            type_: (reg.attrib & 0xF) as u8,
+            present: ((reg.attrib >> 7) & 0x1) as u8,
+            dpl: ((reg.attrib >> 5) & 0x3) as u8,
+            db: ((reg.attrib >> 10) & 0x1) as u8,
+            s: ((reg.attrib >> 4) & 0x1) as u8,
+            l: ((reg.attrib >> 9) & 0x1) as u8,
+            g: ((reg.attrib >> 11) & 0x1) as u8,
+            avl: ((reg.attrib >> 8) & 0x1) as u8,
+            unusable: 0_u8,
+        }
+    };
+
+    if let Some(_vmsa) = vmsa {
+        sregs.gdt.base = _vmsa.gdtr.base;
+        sregs.gdt.limit = _vmsa.gdtr.limit as u16;
+
+        sregs.idt.base = _vmsa.idtr.base;
+        sregs.idt.limit = _vmsa.idtr.limit as u16;
+
+        sregs.cs = to_segment(_vmsa.cs);
+        sregs.ds = to_segment(_vmsa.ds);
+        sregs.es = to_segment(_vmsa.es);
+        sregs.fs = to_segment(_vmsa.fs);
+        sregs.gs = to_segment(_vmsa.gs);
+        sregs.ss = to_segment(_vmsa.ss);
+        sregs.tr = to_segment(_vmsa.tr);
+
+        sregs.cr0 = _vmsa.cr0;
+        sregs.cr4 = _vmsa.cr4;
+        sregs.cr3 = _vmsa.cr3;
+        sregs.efer = _vmsa.efer;
+    }
+
+    Ok(())
 }
 
 pub fn configure_segments_and_sregs(
