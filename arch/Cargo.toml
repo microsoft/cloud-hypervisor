@@ -8,6 +8,7 @@ edition = "2021"
 default = []
 tdx = []
 snp = []
+igvm = ["igvm-parser"]
 
 [dependencies]
 anyhow = "1.0.69"
@@ -24,6 +25,7 @@ versionize_derive = "0.1.4"
 vm-memory = { version = "0.10.0", features = ["backend-mmap", "backend-bitmap"] }
 vm-migration = { path = "../vm-migration" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
+igvm-parser = { path = "../../igvm-parser", optional  = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 fdt_parser = { version = "0.1.4", package = "fdt" }
