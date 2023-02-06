@@ -383,6 +383,8 @@ pub struct VmParams<'a> {
     pub gdb: bool,
     pub platform: Option<&'a str>,
     pub tpm: Option<&'a str>,
+    #[cfg(feature = "igvm")]
+    pub igvm: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -2067,6 +2069,8 @@ impl VmConfig {
                 initramfs: vm_params.initramfs.map(PathBuf::from),
                 cmdline: vm_params.cmdline.map(|s| s.to_string()),
                 firmware: vm_params.firmware.map(PathBuf::from),
+                #[cfg(feature = "igvm")]
+                igvm: vm_params.igvm.map(PathBuf::from),
             })
         } else {
             None

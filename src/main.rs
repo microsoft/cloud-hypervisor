@@ -161,6 +161,11 @@ pub struct TopLevel {
     /// size=<guest_memory_region_size>, file=<backing_file>, shared=on|off, hugepages=on|off, hugepage_size=<hugepage_size>, host_numa_node=<node_id>, id=<zone_identifier>, hotplug_size=<hotpluggable_memory_size>, hotplugged_size=<hotplugged_memory_size>, prefault=on|off
     memory_zone: Vec<String>,
 
+    #[cfg(feature = "igvm")]
+    #[argh(option, long = "igvm")]
+    /// path to IGVM file
+    igvm: Option<String>,
+
     #[argh(option, long = "firmware")]
     /// path to firmware that is loaded in an architectural specific way
     firmware: Option<String>,
@@ -302,6 +307,8 @@ impl TopLevel {
         };
         let rng = &self.rng;
         let serial = &self.serial;
+        #[cfg(feature = "igvm")]
+        let igvm = self.igvm.as_deref();
         let firmware = self.firmware.as_deref();
         let kernel = self.kernel.as_deref();
         let initramfs = self.initramfs.as_deref();
@@ -395,6 +402,8 @@ impl TopLevel {
             gdb,
             platform,
             tpm,
+            #[cfg(feature = "igvm")]
+            igvm,
         }
     }
 }
@@ -571,6 +580,7 @@ fn start_vmm(toplevel: TopLevel) -> Result<Option<String>, Error> {
 
     let r: Result<(), Error> = (|| {
         let payload_present = toplevel.kernel.is_some() || toplevel.firmware.is_some();
+        #[cfg(feature = "igvm")] let payload_present = payload_present || toplevel.igvm.is_some();
 
         if payload_present {
             let vm_params = toplevel.to_vm_params();
