@@ -88,12 +88,24 @@ pub fn setup_regs(
     boot_ip: u64,
     #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
 ) -> Result<()> {
-    let regs = StandardRegisters {
+    let mut regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
         rip: boot_ip,
         ..Default::default()
     };
+
+    #[cfg(feature = "igvm")]
+    {
+        if let Some(_vmsa) = vmsa {
+            regs.rflags = _vmsa.rflags;
+            regs.rip = _vmsa.rip;
+            regs.rbx = _vmsa.rbx;
+            regs.rsi = _vmsa.rsi;
+            regs.rsp = _vmsa.rsp;
+        }
+    }
+
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
 
