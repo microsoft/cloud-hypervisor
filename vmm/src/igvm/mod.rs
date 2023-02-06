@@ -10,7 +10,7 @@ pub struct IgvmLoadedInfo {
     pub snp_id_block: IgvmVhsSnpIdBlock,
     pub start_gpa: u64,
     pub length: u64,
-    pub vmsa : SEV_VMSA,
+    pub vmsa: SEV_VMSA,
 }
 
 impl Default for IgvmLoadedInfo {
