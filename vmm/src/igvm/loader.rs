@@ -1,10 +1,10 @@
-use vm_memory::GuestMemoryMmap;
 use igvm_parser::hvdef::Vtl;
 use igvm_parser::igvm::IgvmParameterPageType;
 use igvm_parser::importer::{
     BootPageAcceptance, IsolationConfig, IsolationType, Register, StartupMemoryType, HV_PAGE_SIZE,
 };
 use igvm_parser::map_range::{Entry, RangeMap};
+use vm_memory::GuestMemoryMmap;
 
 use std::collections::HashMap;
 use std::mem::Discriminant;
@@ -158,7 +158,6 @@ pub struct Loader {
     accepted_ranges: RangeMap<u64, BootPageAcceptance>,
     max_vtl: Vtl,
     bytes_written: u64,
-
 }
 
 impl Loader {
@@ -175,8 +174,8 @@ impl Loader {
     pub fn get_initial_regs(self) -> Vec<Register> {
         self.regs.into_values().collect()
     }
-     /// Accept a new page range with a given acceptance into the map of accepted ranges.
-     pub fn accept_new_range(
+    /// Accept a new page range with a given acceptance into the map of accepted ranges.
+    pub fn accept_new_range(
         &mut self,
         page_base: u64,
         page_count: u64,

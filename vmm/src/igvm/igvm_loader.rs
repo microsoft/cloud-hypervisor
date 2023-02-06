@@ -1,11 +1,13 @@
-
 // Copyright (C) Microsoft Corporation. All rights reserved.
 
 //! Loader implementation to load IGVM files.
 
+use crate::igvm::loader::ImageLoad;
 use crate::igvm::loader::Loader;
+use crate::igvm::IgvmLoadedInfo;
+use crate::ArchMemRegion;
+use arch::RegionType;
 use igvm_parser::hvdef::Vtl;
-use igvm_parser::importer::HV_PAGE_SIZE;
 use igvm_parser::igvm::IgvmFile;
 use igvm_parser::igvm::IgvmPageDataType;
 use igvm_parser::igvm::IgvmPlatformHeader;
@@ -21,14 +23,14 @@ use igvm_parser::igvm::IGVM_VHS_MMIO_RANGES;
 use igvm_parser::igvm::IGVM_VHS_PARAMETER;
 use igvm_parser::igvm::IGVM_VHS_PARAMETER_INSERT;
 use igvm_parser::importer::BootPageAcceptance;
-use igvm_parser::memlayout::MemoryRange;
-use igvm_parser::snp::SEV_VMSA;
-use crate::igvm::loader::ImageLoad;
 use igvm_parser::importer::Register;
 use igvm_parser::importer::StartupMemoryType;
 use igvm_parser::importer::TableRegister;
-use igvm_parser::page_table::CpuPagingState;
+use igvm_parser::importer::HV_PAGE_SIZE;
 use igvm_parser::map_range::RangeMap;
+use igvm_parser::memlayout::MemoryRange;
+use igvm_parser::page_table::CpuPagingState;
+use igvm_parser::snp::SEV_VMSA;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::Read;
@@ -36,13 +38,9 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::mem::size_of;
 use thiserror::Error;
-use zerocopy::AsBytes;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::GuestMemoryMmap;
-use crate::ArchMemRegion;
-use arch::RegionType;
-use crate::igvm::IgvmLoadedInfo;
-
+use zerocopy::AsBytes;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -113,7 +111,7 @@ pub fn load_igvm(
     cmdline: &str,
     acpi_tables: AcpiTables<'_>,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
-    let mut loaded_info: Box<IgvmLoadedInfo>  = Box::new(IgvmLoadedInfo::default());
+    let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::default());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
     let mut first_gpa: u64 = 0;
     let mut gpa_found: bool = false;
@@ -122,9 +120,11 @@ pub fn load_igvm(
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
-    let igvm_file =
-        IgvmFile::new_from_binary(&file_contents, Some(igvm_parser::importer::IsolationType::Vbs))
-            .map_err(Error::InvalidIgvmFile)?;
+    let igvm_file = IgvmFile::new_from_binary(
+        &file_contents,
+        Some(igvm_parser::importer::IsolationType::Vbs),
+    )
+    .map_err(Error::InvalidIgvmFile)?;
 
     let (mask, max_vtl) = match &igvm_file.platforms()[0] {
         IgvmPlatformHeader::SupportedPlatform(info) => {
@@ -133,8 +133,8 @@ pub fn load_igvm(
         }
     };
     let max_vtl = max_vtl
-            .try_into()
-            .expect("igvm file should be valid after new_from_binary");
+        .try_into()
+        .expect("igvm file should be valid after new_from_binary");
     let mut loader = Loader::new(memory, max_vtl);
 
     #[derive(Debug)]
@@ -295,7 +295,6 @@ pub fn load_igvm(
                     StartupMemoryType::Ram
                 };
 
-
                 loader
                     .verify_startup_memory_available(
                         gpa / HV_PAGE_SIZE,
@@ -320,8 +319,8 @@ pub fn load_igvm(
                 if *vp_index == 0 {
                     data[..len].copy_from_slice(vmsa.as_bytes());
                     loader
-                    .import_pages(gpa / HV_PAGE_SIZE, 1, BootPageAcceptance::VpContext, &data)
-                    .map_err(Error::Loader)?;
+                        .import_pages(gpa / HV_PAGE_SIZE, 1, BootPageAcceptance::VpContext, &data)
+                        .map_err(Error::Loader)?;
                 }
                 loaded_info.vmsa_gpa = *gpa;
             }
@@ -363,12 +362,16 @@ pub fn load_igvm(
             } => {
                 todo!("VbsVpContext not supported");
             }
-            igvm_parser::igvm::IgvmDirectiveHeader::VbsMeasurement { .. } => todo!("VbsMeasurement not supported"),
-            igvm_parser::igvm::IgvmDirectiveHeader::ParameterInsert(IGVM_VHS_PARAMETER_INSERT {
-                gpa,
-                compatibility_mask: _,
-                parameter_area_index,
-            }) => {
+            igvm_parser::igvm::IgvmDirectiveHeader::VbsMeasurement { .. } => {
+                todo!("VbsMeasurement not supported")
+            }
+            igvm_parser::igvm::IgvmDirectiveHeader::ParameterInsert(
+                IGVM_VHS_PARAMETER_INSERT {
+                    gpa,
+                    compatibility_mask: _,
+                    parameter_area_index,
+                },
+            ) => {
                 if !gpa_found {
                     first_gpa = *gpa;
                     gpa_found = true;

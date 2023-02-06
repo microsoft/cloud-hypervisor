@@ -27,6 +27,7 @@ use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
 #[cfg(feature = "dbus_api")]
 use api::dbus::{DBusApiOptions, DBusApiShutdownChannels};
+use arch::RegionType;
 use libc::{tcsetattr, termios, EFD_NONBLOCK, SIGINT, SIGTERM, TCSANOW};
 use memory_manager::MemoryManagerSnapshotData;
 use pci::PciBdf;
@@ -49,6 +50,8 @@ use std::time::Instant;
 use std::{result, thread};
 use thiserror::Error;
 use tracer::trace_scoped;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
@@ -56,9 +59,6 @@ use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 use vmm_sys_util::terminal::Terminal;
-use versionize::{VersionMap, Versionize, VersionizeResult};
-use versionize_derive::Versionize;
-use arch::RegionType;
 
 mod acpi;
 pub mod api;
