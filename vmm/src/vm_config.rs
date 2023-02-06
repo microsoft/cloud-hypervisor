@@ -545,6 +545,9 @@ pub struct PayloadConfig {
     pub cmdline: Option<String>,
     #[serde(default)]
     pub initramfs: Option<PathBuf>,
+    #[cfg(feature = "igvm")]
+    #[serde(default)]
+    pub igvm: Option<PathBuf>,
 }
 
 pub fn default_serial() -> ConsoleConfig {
