@@ -76,6 +76,7 @@ mshv = ["vmm/mshv"]
 tdx = ["vmm/tdx"]
 snp = ["vmm/snp"]
 tracing = ["vmm/tracing", "tracer/tracing"]
+igvm = ["vmm/igvm"]
 
 [workspace]
 members = [

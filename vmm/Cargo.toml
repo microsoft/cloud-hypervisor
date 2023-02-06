@@ -12,6 +12,7 @@ mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 snp = ["arch/snp", "hypervisor/snp"]
 tracing = ["tracer/tracing"]
+igvm = ["igvm-parser"]
 
 [dependencies]
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main"  }
@@ -58,3 +59,4 @@ vm-migration = { path = "../vm-migration" }
 vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
 zerocopy = "0.6.1"
+igvm-parser = { path = "../../igvm-parser", optional  = true }
