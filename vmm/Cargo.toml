@@ -12,6 +12,7 @@ mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 snp = ["arch/snp", "hypervisor/snp"]
 tracing = ["tracer/tracing"]
+igvm = ["igvm-parser"]
 
 [dependencies]
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main"  }
@@ -27,6 +28,7 @@ event_monitor = { path = "../event_monitor" }
 gdbstub = { version = "0.6.4", optional = true }
 gdbstub_arch = { version = "0.2.4", optional = true }
 hypervisor = { path = "../hypervisor" }
+igvm-parser = { path = "../../igvm-parser", optional  = true }
 libc = "0.2.139"
 linux-loader = { version = "0.8.1", features = ["elf", "bzimage", "pe"] }
 log = "0.4.17"
