@@ -4,13 +4,13 @@
 //
 #[cfg(target_arch = "x86_64")]
 use crate::config::SgxEpcConfig;
-use crate::ArchMemRegion;
 use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
     CoredumpMemoryRegion, CoredumpMemoryRegions, DumpState, GuestDebuggableError,
 };
 use crate::migration::url_to_path;
+use crate::ArchMemRegion;
 use crate::MEMORY_MANAGER_SNAPSHOT_ID;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 use acpi_tables::{aml, Aml};
