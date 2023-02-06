@@ -31,6 +31,8 @@ mod smbios;
 use std::arch::x86_64;
 #[cfg(feature = "tdx")]
 pub mod tdx;
+#[cfg(feature = "igvm")]
+use igvm_parser::snp::SEV_VMSA;
 
 // CPUID feature bits
 const TSC_DEADLINE_TIMER_ECX_BIT: u8 = 24; // tsc deadline timer ecx bit.
@@ -769,6 +771,7 @@ pub fn configure_vcpu(
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
+    #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
@@ -821,9 +824,26 @@ pub fn configure_vcpu(
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
         if let Some(entry_addr) = kernel_entry_point.entry_addr {
             // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(vcpu, entry_addr.raw_value()).map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(vcpu).map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(&guest_memory.memory(), vcpu).map_err(Error::SregsConfiguration)?;
+            regs::setup_regs(
+                vcpu,
+                entry_addr.raw_value(),
+                #[cfg(feature = "igvm")]
+                vmsa,
+            )
+            .map_err(Error::RegsConfiguration)?;
+            regs::setup_fpu(
+                vcpu,
+                #[cfg(feature = "igvm")]
+                vmsa,
+            )
+            .map_err(Error::FpuConfiguration)?;
+            regs::setup_sregs(
+                &guest_memory.memory(),
+                vcpu,
+                #[cfg(feature = "igvm")]
+                vmsa,
+            )
+            .map_err(Error::SregsConfiguration)?;
         }
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;

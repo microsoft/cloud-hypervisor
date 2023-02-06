@@ -11,6 +11,8 @@ use crate::GuestMemoryMmap;
 use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
 use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters};
+#[cfg(feature = "igvm")]
+use igvm_parser::snp::SEV_VMSA;
 use std::sync::Arc;
 use std::{mem, result};
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
@@ -50,7 +52,10 @@ pub type Result<T> = result::Result<T, Error>;
 /// # Arguments
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_fpu(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
+pub fn setup_fpu(
+    vcpu: &Arc<dyn hypervisor::Vcpu>,
+    #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
+) -> Result<()> {
     let fpu: FpuState = FpuState {
         fcw: 0x37f,
         mxcsr: 0x1f80,
@@ -78,7 +83,11 @@ pub fn setup_msrs(vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
 /// * `boot_ip` - Starting instruction pointer.
-pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64) -> Result<()> {
+pub fn setup_regs(
+    vcpu: &Arc<dyn hypervisor::Vcpu>,
+    boot_ip: u64,
+    #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
+) -> Result<()> {
     let regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
@@ -94,7 +103,11 @@ pub fn setup_regs(vcpu: &Arc<dyn hypervisor::Vcpu>, boot_ip: u64) -> Result<()> 
 ///
 /// * `mem` - The memory that will be passed to the guest.
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &Arc<dyn hypervisor::Vcpu>) -> Result<()> {
+pub fn setup_sregs(
+    mem: &GuestMemoryMmap,
+    vcpu: &Arc<dyn hypervisor::Vcpu>,
+    #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
+) -> Result<()> {
     let mut sregs: SpecialRegisters = vcpu.get_sregs().map_err(Error::GetStatusRegisters)?;
     configure_segments_and_sregs(mem, &mut sregs)?;
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)

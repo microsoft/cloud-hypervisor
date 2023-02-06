@@ -580,7 +580,8 @@ fn start_vmm(toplevel: TopLevel) -> Result<Option<String>, Error> {
 
     let r: Result<(), Error> = (|| {
         let payload_present = toplevel.kernel.is_some() || toplevel.firmware.is_some();
-        #[cfg(feature = "igvm")] let payload_present = payload_present || toplevel.igvm.is_some();
+        #[cfg(feature = "igvm")]
+        let payload_present = payload_present || toplevel.igvm.is_some();
 
         if payload_present {
             let vm_params = toplevel.to_vm_params();
