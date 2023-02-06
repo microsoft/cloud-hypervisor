@@ -56,11 +56,19 @@ pub fn setup_fpu(
     vcpu: &Arc<dyn hypervisor::Vcpu>,
     #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
 ) -> Result<()> {
-    let fpu: FpuState = FpuState {
+    let mut fpu: FpuState = FpuState {
         fcw: 0x37f,
         mxcsr: 0x1f80,
         ..Default::default()
     };
+
+    #[cfg(feature = "igvm")]
+    {
+        if let Some(_vmsa) = vmsa {
+            fpu.fcw = _vmsa.x87_fcw;
+            fpu.mxcsr = _vmsa.mxcsr;
+        }
+    }
 
     vcpu.set_fpu(&fpu).map_err(Error::SetFpuRegisters)
 }
