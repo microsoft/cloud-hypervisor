@@ -64,6 +64,8 @@ pub const _NSIG: i32 = 65;
 pub struct EntryPoint {
     /// Address in guest memory where the guest must start execution
     pub entry_addr: Option<GuestAddress>,
+    #[cfg(feature = "igvm")]
+    pub vmsa: Option<SEV_VMSA>,
 }
 
 const E820_RAM: u32 = 1;
