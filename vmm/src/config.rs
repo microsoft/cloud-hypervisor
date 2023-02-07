@@ -2063,7 +2063,11 @@ impl VmConfig {
             numa = Some(numa_config_list);
         }
 
-        let payload = if vm_params.kernel.is_some() || vm_params.firmware.is_some() {
+        let payload_present = vm_params.kernel.is_some() || vm_params.firmware.is_some();
+        #[cfg(feature = "igvm")]
+        let payload_present = payload_present || vm_params.igvm.is_some();
+
+        let payload = if payload_present {
             Some(PayloadConfig {
                 kernel: vm_params.kernel.map(PathBuf::from),
                 initramfs: vm_params.initramfs.map(PathBuf::from),

@@ -1,4 +1,4 @@
-mod igvm_loader;
+pub mod igvm_loader;
 mod loader;
 use igvm_parser::igvm::IgvmVhsSnpIdBlock;
 use igvm_parser::snp::SEV_VMSA;

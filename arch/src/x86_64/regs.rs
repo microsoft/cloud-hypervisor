@@ -10,9 +10,9 @@ use crate::layout::{BOOT_GDT_START, BOOT_IDT_START, PVH_INFO_START};
 use crate::GuestMemoryMmap;
 use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
-use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters, SegmentRegister};
+use hypervisor::arch::x86::{FpuState, SegmentRegister, SpecialRegisters, StandardRegisters};
 #[cfg(feature = "igvm")]
-use igvm_parser::snp::{SEV_VMSA, SEV_SELECTOR};
+use igvm_parser::snp::{SEV_SELECTOR, SEV_VMSA};
 use std::sync::Arc;
 use std::{mem, result};
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
@@ -114,6 +114,8 @@ pub fn setup_regs(
         }
     }
 
+    info!("DUMP REGS: {:?}", regs);
+
     vcpu.set_regs(&regs).map_err(Error::SetBaseRegisters)
 }
 
@@ -132,6 +134,9 @@ pub fn setup_sregs(
     configure_segments_and_sregs(mem, &mut sregs)?;
     #[cfg(feature = "igvm")]
     configure_segments_and_sregs_for_igvm(&mut sregs, vmsa)?;
+
+    info!("DUMP SREGS: {:?}", sregs);
+
     vcpu.set_sregs(&sregs).map_err(Error::SetStatusRegisters)
 }
 
