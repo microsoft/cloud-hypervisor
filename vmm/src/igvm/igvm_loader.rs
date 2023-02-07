@@ -38,6 +38,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::mem::size_of;
 use thiserror::Error;
+use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::GuestMemoryMmap;
 use zerocopy::AsBytes;
@@ -105,11 +106,10 @@ pub struct AcpiTables<'a> {
 /// TODO: only supports underhill for now, with assumptions that the file always has VTL2 enabled.
 pub fn load_igvm(
     mut file: &std::fs::File,
-    memory: GuestMemoryAtomic<GuestMemoryMmap>,
+    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
-    acpi_tables: AcpiTables<'_>,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::default());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
@@ -243,26 +243,26 @@ pub fn load_igvm(
             igvm_parser::igvm::IgvmDirectiveHeader::VpCount(info) => {
                 import_parameter(&mut parameter_areas, info, proc_count.as_bytes())?;
             }
-            igvm_parser::igvm::IgvmDirectiveHeader::Srat(info) => {
-                import_parameter(&mut parameter_areas, info, acpi_tables.srat)?;
-            }
-            igvm_parser::igvm::IgvmDirectiveHeader::Madt(info) => {
-                import_parameter(&mut parameter_areas, info, acpi_tables.madt)?;
-            }
-            igvm_parser::igvm::IgvmDirectiveHeader::Slit(info) => {
-                if let Some(slit) = acpi_tables.slit {
-                    import_parameter(&mut parameter_areas, info, slit)?;
-                } else {
-                    warn!("igvm file requested a SLIT, but no SLIT was provided")
-                }
-            }
-            igvm_parser::igvm::IgvmDirectiveHeader::Pptt(info) => {
-                if let Some(pptt) = acpi_tables.pptt {
-                    import_parameter(&mut parameter_areas, info, pptt)?;
-                } else {
-                    warn!("igvm file requested a PPTT, but no PPTT was provided")
-                }
-            }
+            // igvm_parser::igvm::IgvmDirectiveHeader::Srat(info) => {
+            //     import_parameter(&mut parameter_areas, info, acpi_tables.unwrap().srat)?;
+            // }
+            // igvm_parser::igvm::IgvmDirectiveHeader::Madt(info) => {
+            //     import_parameter(&mut parameter_areas, info, acpi_tables.unwrap().madt)?;
+            // }
+            // igvm_parser::igvm::IgvmDirectiveHeader::Slit(info) => {
+            //     if let Some(slit) = acpi_tables.unwrap().slit {
+            //         import_parameter(&mut parameter_areas, info, slit)?;
+            //     } else {
+            //         warn!("igvm file requested a SLIT, but no SLIT was provided")
+            //     }
+            // }
+            // igvm_parser::igvm::IgvmDirectiveHeader::Pptt(info) => {
+            //     if let Some(pptt) = acpi_tables.unwrap().pptt {
+            //         import_parameter(&mut parameter_areas, info, pptt)?;
+            //     } else {
+            //         warn!("igvm file requested a PPTT, but no PPTT was provided")
+            //     }
+            // }
             igvm_parser::igvm::IgvmDirectiveHeader::MmioRanges(info) => {
                 todo!("unsupported IgvmPageDataType");
             }
@@ -400,6 +400,9 @@ pub fn load_igvm(
             }
             igvm_parser::igvm::IgvmDirectiveHeader::ErrorRange { .. } => {
                 todo!("Error Range not supported")
+            }
+            _ => {
+                todo!("Header not supported!!")
             }
         }
     }
