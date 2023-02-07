@@ -25,6 +25,7 @@ use crate::device_manager::{Console, DeviceManager, DeviceManagerError, PtyPair}
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
 use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayload};
+use crate::igvm::*;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
@@ -103,11 +104,19 @@ use vmm_sys_util::terminal::Terminal;
 /// Errors associated with VM management
 #[derive(Debug, Error)]
 pub enum Error {
+    #[cfg(feature = "igvm")]
+    #[error("Cannot open igvm file: {0}")]
+    IgvmFile(#[source] io::Error),
+
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
     #[error("Cannot open initramfs file: {0}")]
     InitramfsFile(#[source] io::Error),
+
+    #[cfg(feature = "igvm")]
+    #[error("Cannot load the igvm into memory: {0}")]
+    IgvmLoad(#[source] igvm_loader::Error),
 
     #[error("Cannot load the kernel into memory: {0}")]
     KernelLoad(#[source] linux_loader::loader::Error),
@@ -961,6 +970,17 @@ impl Vm {
         Ok(EntryPoint { entry_addr })
     }
 
+    #[cfg(feature = "igvm")]
+    fn load_igvm(igvm: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
+        let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
+        let res = igvm_loader::load_igvm(&igvm, guest_memory, Vec::new(), 1, "")
+            .map_err(Error::IgvmLoad)?;
+        Ok(EntryPoint {
+            entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
+            vmsa: Some(res.vmsa),
+        })
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn load_kernel(
         mut kernel: File,
@@ -991,6 +1011,8 @@ impl Vm {
             info!("Kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
             Ok(EntryPoint {
                 entry_addr: Some(entry_addr),
+                #[cfg(feature = "igvm")]
+                vmsa: None,
             })
         } else {
             Err(Error::KernelMissingPvhHeader)
@@ -1003,23 +1025,29 @@ impl Vm {
         memory_manager: Arc<Mutex<MemoryManager>>,
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
-        match (
-            &payload.firmware,
-            &payload.kernel,
-            &payload.initramfs,
-            &payload.cmdline,
-        ) {
-            (Some(firmware), None, None, None) => {
-                let firmware = File::open(firmware).map_err(Error::FirmwareFile)?;
-                Self::load_kernel(firmware, None, memory_manager)
+        let firmware = &payload.firmware;
+        let kernel = &payload.kernel;
+        let initramfs = &payload.initramfs;
+        let cmdline = &payload.cmdline;
+        let igvm: Option<std::path::PathBuf> = None;
+        #[cfg(feature = "igvm")]
+        let igvm = &payload.igvm;
+
+        if firmware.is_some() {
+            let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            return Self::load_kernel(firmware, None, memory_manager);
+        } else if kernel.is_some() {
+            let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            let cmdline = Self::generate_cmdline(payload)?;
+            return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+        } else if igvm.is_some() {
+            #[cfg(feature = "igvm")]
+            {
+                let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
+                return Self::load_igvm(igvm, memory_manager);
             }
-            (None, Some(kernel), _, _) => {
-                let kernel = File::open(kernel).map_err(Error::KernelFile)?;
-                let cmdline = Self::generate_cmdline(payload)?;
-                Self::load_kernel(kernel, Some(cmdline), memory_manager)
-            }
-            _ => Err(Error::InvalidPayload),
         }
+        Err(Error::InvalidPayload)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2072,6 +2100,7 @@ impl Vm {
         current_state.valid_transition(new_state)?;
 
         // Do earlier to parallelise with loading kernel
+        #[cfg(not(feature = "igvm"))]
         #[cfg(target_arch = "x86_64")]
         let rsdp_addr = self.create_acpi_tables();
 
@@ -2081,6 +2110,7 @@ impl Vm {
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
         let entry_point = self.entry_point()?;
+        let vmsa = entry_point.unwrap().vmsa;
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = self.config.lock().unwrap().is_tdx_enabled();
@@ -2093,7 +2123,7 @@ impl Vm {
             self.cpu_manager
                 .lock()
                 .unwrap()
-                .configure_vcpu(vcpu, boot_setup)
+                .configure_vcpu(vcpu, boot_setup, #[cfg(feature = "igvm")] vmsa)
                 .map_err(Error::CpuManager)?;
         }
 
@@ -2118,6 +2148,7 @@ impl Vm {
         #[cfg(target_arch = "aarch64")]
         let rsdp_addr = self.create_acpi_tables();
 
+        #[cfg(not(feature = "igvm"))]
         // Configure shared state based on loaded kernel
         entry_point
             .map(|_| {
