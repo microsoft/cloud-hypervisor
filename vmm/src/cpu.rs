@@ -57,6 +57,8 @@ use hypervisor::kvm::kvm_ioctls::Cap;
 #[cfg(feature = "tdx")]
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
+#[cfg(feature = "igvm")]
+use igvm_parser::snp::SEV_VMSA;
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf::Elf64_Nhdr;
@@ -84,7 +86,6 @@ use vm_migration::{
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
-use igvm_parser::snp::SEV_VMSA;
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -763,7 +764,13 @@ impl CpuManager {
         assert!(!self.cpuid.is_empty());
 
         #[cfg(target_arch = "x86_64")]
-        vcpu.configure(boot_setup, self.cpuid.clone(), self.config.kvm_hyperv, #[cfg(feature = "igvm")] vmsa)?;
+        vcpu.configure(
+            boot_setup,
+            self.cpuid.clone(),
+            self.config.kvm_hyperv,
+            #[cfg(feature = "igvm")]
+            vmsa,
+        )?;
 
         #[cfg(target_arch = "aarch64")]
         vcpu.configure(&self.vm, boot_setup)?;
@@ -1178,7 +1185,12 @@ impl CpuManager {
             cmp::Ordering::Greater => {
                 let vcpus = self.create_vcpus(desired_vcpus, None)?;
                 for vcpu in vcpus {
-                    self.configure_vcpu(vcpu, None, #[cfg(feature = "igvm")] None)?
+                    self.configure_vcpu(
+                        vcpu,
+                        None,
+                        #[cfg(feature = "igvm")]
+                        None,
+                    )?
                 }
                 self.activate_vcpus(desired_vcpus, true, None)?;
                 Ok(true)
