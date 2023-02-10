@@ -25,6 +25,7 @@ use crate::device_manager::{DeviceManager, DeviceManagerError, PtyPair};
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
 use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayload};
+#[cfg(feature = "igvm")]
 use crate::igvm::*;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
@@ -591,6 +592,16 @@ impl Vm {
         )
         .map_err(Error::DeviceManager)?;
 
+        #[cfg(feature = "snp")]
+        if !config.lock().unwrap().is_snp_enabled() {
+            device_manager
+                .lock()
+                .unwrap()
+                .create_devices(serial_pty, console_pty, console_resize_pipe)
+                .map_err(Error::DeviceManager)?;
+        }
+
+        #[cfg(not(feature = "snp"))]
         device_manager
             .lock()
             .unwrap()
@@ -2010,6 +2021,7 @@ impl Vm {
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
         let entry_point = self.entry_point()?;
+        #[cfg(feature = "igvm")]
         let vmsa = entry_point.unwrap().vmsa;
 
         #[cfg(feature = "tdx")]
@@ -2023,7 +2035,12 @@ impl Vm {
             self.cpu_manager
                 .lock()
                 .unwrap()
-                .configure_vcpu(vcpu, boot_setup, #[cfg(feature = "igvm")] vmsa)
+                .configure_vcpu(
+                    vcpu,
+                    boot_setup,
+                    #[cfg(feature = "igvm")]
+                    vmsa,
+                )
                 .map_err(Error::CpuManager)?;
         }
 
