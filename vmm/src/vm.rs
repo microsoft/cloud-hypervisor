@@ -975,8 +975,7 @@ impl Vm {
 
     #[cfg(feature = "igvm")]
     fn load_igvm(igvm: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
-        let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
-        let res = igvm_loader::load_igvm(&igvm, guest_memory, Vec::new(), 1, "")
+        let res = igvm_loader::load_igvm(&igvm, memory_manager, Vec::new(), 1, "")
             .map_err(Error::IgvmLoad)?;
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
@@ -2118,17 +2117,17 @@ impl Vm {
             self.vm.tdx_finalize().map_err(Error::FinalizeTdx)?;
         }
 
-        #[cfg(target_arch = "x86_64")]
-        // Note: For x86, always call this function before invoking start boot vcpus.
-        // Otherwise guest would fail to boot because we haven't created the
-        // userspace mappings to update the hypervisor about the memory mappings.
-        // These mappings must be created before we start the vCPU threads for
-        // the very first time.
-        self.memory_manager
-            .lock()
-            .unwrap()
-            .allocate_address_space()
-            .map_err(Error::MemoryManager)?;
+        // #[cfg(target_arch = "x86_64")]
+        // // Note: For x86, always call this function before invoking start boot vcpus.
+        // // Otherwise guest would fail to boot because we haven't created the
+        // // userspace mappings to update the hypervisor about the memory mappings.
+        // // These mappings must be created before we start the vCPU threads for
+        // // the very first time.
+        // self.memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .allocate_address_space()
+        //     .map_err(Error::MemoryManager)?;
 
         self.cpu_manager
             .lock()
