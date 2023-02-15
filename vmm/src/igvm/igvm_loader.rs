@@ -5,6 +5,7 @@
 use crate::igvm::loader::ImageLoad;
 use crate::igvm::loader::Loader;
 use crate::igvm::IgvmLoadedInfo;
+use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::ArchMemRegion;
 use arch::RegionType;
 use igvm_parser::hvdef::Vtl;
@@ -37,6 +38,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::mem::size_of;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
@@ -71,6 +73,8 @@ pub enum Error {
     RelocationVtl,
     #[error("page table builder")]
     PageTableBuilder(#[source] igvm_parser::page_table::Error),
+    #[error("allocate address space")]
+    MemoryManager(MemoryManagerError),
 }
 
 fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
@@ -106,7 +110,7 @@ pub struct AcpiTables<'a> {
 /// TODO: only supports underhill for now, with assumptions that the file always has VTL2 enabled.
 pub fn load_igvm(
     mut file: &std::fs::File,
-    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
+    memory_manager: Arc<Mutex<MemoryManager>>,
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
@@ -116,6 +120,7 @@ pub fn load_igvm(
     let mut first_gpa: u64 = 0;
     let mut gpa_found: bool = false;
     let mut file_contents = Vec::new();
+    let memory = memory_manager.lock().as_ref().unwrap().guest_memory();
 
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
@@ -408,5 +413,12 @@ pub fn load_igvm(
     }
     loaded_info.first_gpa = first_gpa;
     loaded_info.length = loader.gets_total_bytes_written();
+
+    memory_manager
+        .lock()
+        .unwrap()
+        .allocate_address_space()
+        .map_err(Error::MemoryManager)?;
+
     Ok(loaded_info)
 }
