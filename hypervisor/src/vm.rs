@@ -214,10 +214,20 @@ pub enum HypervisorVmError {
     #[error("Failed to create Vgic: {0}")]
     CreateVgic(#[source] anyhow::Error),
     ///
-    /// Create Vgic error
+    /// Initialize SNP error
     ///
     #[error("Failed to initialize SNP: {0}")]
     SnpInit(#[source] anyhow::Error),
+    ///
+    /// Import isolated pages error
+    ///
+    #[error("Failed to import isolated pages: {0}")]
+    ImportIsolatedPages(#[source] anyhow::Error),
+    ///
+    /// Modify GPA host access error
+    ///
+    #[error("Failed to modify GPA host access: {0}")]
+    ModifyGpaHostAccess(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
