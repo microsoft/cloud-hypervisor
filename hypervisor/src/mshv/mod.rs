@@ -1281,7 +1281,7 @@ impl vm::Vm for MshvVm {
         }
         self.fd
             .import_isolated_pages(&isolated_pages[0])
-            .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
+            .map_err(|e| vm::HypervisorVmError::ImportIsolatedPages(e.into()))
     }
 
     #[cfg(feature = "snp")]
@@ -1306,6 +1306,6 @@ impl vm::Vm for MshvVm {
         }
         self.fd
             .modify_gpa_host_access(&gpa_list[0])
-            .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
+            .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
     }
 }
