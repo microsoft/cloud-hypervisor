@@ -115,7 +115,7 @@ pub fn load_igvm(
     proc_count: u32,
     cmdline: &str,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
-    let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::default());
+    let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::new());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
     let mut first_gpa: u64 = 0;
     let mut gpa_found: bool = false;
@@ -216,7 +216,7 @@ pub fn load_igvm(
                     // TODO: other data types SNP / TDX only, unsupported
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
-
+                loaded_info.gpas.push(*gpa);
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
                     .map_err(Error::Loader)?;
@@ -301,7 +301,7 @@ pub fn load_igvm(
                 } else {
                     StartupMemoryType::Ram
                 };
-
+                loaded_info.gpas.push(*gpa);
                 loader
                     .verify_startup_memory_available(
                         gpa / HV_PAGE_SIZE,
@@ -332,6 +332,7 @@ pub fn load_igvm(
                 }
                 loaded_info.vmsa_gpa = *gpa;
                 loaded_info.vmsa = **vmsa;
+                loaded_info.gpas.push(*gpa);
             }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock {
                 compatibility_mask,
@@ -402,6 +403,7 @@ pub fn load_igvm(
                     ParameterAreaState::Inserted => panic!("igvmfile is invalid, multiple insert"),
                 }
                 *area = ParameterAreaState::Inserted;
+                loaded_info.gpas.push(*gpa);
             }
             igvm_parser::igvm::IgvmDirectiveHeader::ErrorRange { .. } => {
                 todo!("Error Range not supported")
