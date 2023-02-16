@@ -1290,9 +1290,8 @@ impl vm::Vm for MshvVm {
         acquire: u8,
         gpas: &[u64],
     ) -> vm::Result<()> {
-        let mut gpa_list =
-            vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
-            gpa_list[0].gpa_list_size = gpas.len() as u64;
+        let mut gpa_list = vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
+        gpa_list[0].gpa_list_size = gpas.len() as u64;
         // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
         // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
         // everything from gpas.
