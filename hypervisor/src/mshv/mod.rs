@@ -1260,4 +1260,48 @@ impl vm::Vm for MshvVm {
             )
             .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
     }
+    #[cfg(feature = "snp")]
+    fn import_isolated_pages(
+        &self,
+        page_type: i32,
+        page_size: u32,
+        pages: &[u64],
+    ) -> vm::Result<()> {
+        let mut isolated_pages =
+            vec_with_array_field::<mshv_import_isolated_pages, u64>(pages.len());
+        isolated_pages[0].num_pages = pages.len() as u64;
+        // SAFETY: isolated_pages initialized with pages.len() and now it is being turned into
+        // pages_slice with pages.len() again. It is guaranteed to be large enough to hold
+        // everything from pages.
+        unsafe {
+            let pages_slice: &mut [u64] = isolated_pages[0].page_number.as_mut_slice(pages.len());
+            pages_slice.copy_from_slice(&pages);
+        }
+        self.fd
+            .import_isolated_pages(&isolated_pages[0])
+            .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
+    }
+
+    #[cfg(feature = "snp")]
+    fn modify_gpa_host_access(
+        &self,
+        host_access: u32,
+        flags: u32,
+        acquire: u8,
+        gpas: &[u64],
+    ) -> vm::Result<()> {
+        let mut gpa_list =
+            vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
+            gpa_list[0].gpa_list_size = gpas.len() as u64;
+        // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
+        // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
+        // everything from gpas.
+        unsafe {
+            let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
+            gpas_slice.copy_from_slice(&gpas);
+        }
+        self.fd
+            .modify_gpa_host_access(&gpa_list[0])
+            .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
+    }
 }
