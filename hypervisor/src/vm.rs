@@ -359,7 +359,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn import_isolated_pages(&self, page_type: i32, page_size: u32, pages: &[u64]) -> Result<()> {
+    fn import_isolated_pages(&self, page_type: u32, page_size: u32, pages: &[u64]) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
