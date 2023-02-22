@@ -369,9 +369,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn import_isolated_pages(&self, page_type: u32, page_size: u32, pages: &[u64]) -> Result<()> {
-        unimplemented!()
-    }
+    fn import_isolated_pages(&self, page_type: u32, page_size: u32, pages: &[u64]) -> Result<()>; 
     #[cfg(feature = "snp")]
     fn modify_gpa_host_access(
         &self,
@@ -379,9 +377,7 @@ pub trait Vm: Send + Sync + Any {
         flags: u32,
         acquire: u8,
         gpas: &[u64],
-    ) -> Result<()> {
-        unimplemented!()
-    }
+    ) -> Result<()> ;
 }
 
 pub trait VmOps: Send + Sync {
