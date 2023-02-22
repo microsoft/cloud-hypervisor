@@ -44,6 +44,7 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::GuestMemoryMmap;
 use zerocopy::AsBytes;
+use hypervisor::mshv::*;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -75,6 +76,10 @@ pub enum Error {
     PageTableBuilder(#[source] igvm_parser::page_table::Error),
     #[error("allocate address space")]
     MemoryManager(MemoryManagerError),
+    #[error("Error modifying host access to isolated pages: {0}")]
+    ModifyHostAccess(#[source] hypervisor::HypervisorVmError),
+    #[error("Error importing isolated pages: {0}")]
+    ImportIsolatedPages(#[source] hypervisor::HypervisorVmError),
 }
 
 fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
@@ -103,6 +108,11 @@ pub struct AcpiTables<'a> {
     pub pptt: Option<&'a [u8]>,
 }
 
+struct GpaPages {
+    pub gpa: u64,
+    pub page_type: u32,
+    pub page_size: u32,
+}
 /// Load the given IGVM file.
 ///
 /// `vtl2_base_address` specifies the absolute guest physical address to relocate the VTL2 region to.
@@ -121,6 +131,7 @@ pub fn load_igvm(
     let mut gpa_found: bool = false;
     let mut file_contents = Vec::new();
     let memory = memory_manager.lock().as_ref().unwrap().guest_memory();
+    let mut gpas: Vec<GpaPages> = Vec::new();
 
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
@@ -206,17 +217,26 @@ pub fn load_igvm(
                         if flags & IGVM_VHF_PAGE_DATA_FLAGS_UNMEASURED
                             == IGVM_VHF_PAGE_DATA_FLAGS_UNMEASURED
                         {
+                            gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_unmeasured, page_size:hv_isolated_page_size_hv_isolated_page_size4_kb });
                             BootPageAcceptance::ExclusiveUnmeasured
                         } else {
+                            gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_normal, page_size:hv_isolated_page_size_hv_isolated_page_size4_kb });
                             BootPageAcceptance::Exclusive
                         }
                     }
-                    IgvmPageDataType::SECRETS => BootPageAcceptance::SecretsPage,
-                    IgvmPageDataType::CPUID_DATA => BootPageAcceptance::CpuidPage,
+                    IgvmPageDataType::SECRETS => {
+                        gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_secrets, page_size:hv_isolated_page_size_hv_isolated_page_size4_kb });
+                        BootPageAcceptance::SecretsPage
+                    }
+                    IgvmPageDataType::CPUID_DATA => {
+                        gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_cpuid, page_size:hv_isolated_page_size_hv_isolated_page_size4_kb });
+                        BootPageAcceptance::CpuidPage
+                    }
                     // TODO: other data types SNP / TDX only, unsupported
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
-                loaded_info.gpas.push(*gpa);
+                
+                
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
                     .map_err(Error::Loader)?;
@@ -246,6 +266,7 @@ pub fn load_igvm(
                 }
             }
             igvm_parser::igvm::IgvmDirectiveHeader::VpCount(info) => {
+
                 import_parameter(&mut parameter_areas, info, proc_count.as_bytes())?;
             }
             // igvm_parser::igvm::IgvmDirectiveHeader::Srat(info) => {
@@ -332,7 +353,8 @@ pub fn load_igvm(
                 }
                 loaded_info.vmsa_gpa = *gpa;
                 loaded_info.vmsa = **vmsa;
-                loaded_info.gpas.push(*gpa);
+                gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_vmsa,
+                    page_size: hv_isolated_page_size_hv_isolated_page_size4_kb });
             }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock {
                 compatibility_mask,
@@ -403,7 +425,8 @@ pub fn load_igvm(
                     ParameterAreaState::Inserted => panic!("igvmfile is invalid, multiple insert"),
                 }
                 *area = ParameterAreaState::Inserted;
-                loaded_info.gpas.push(*gpa);
+                gpas.push(GpaPages { gpa: *gpa, page_type: hv_isolated_page_type_hv_isolated_page_type_normal,
+                    page_size: hv_isolated_page_size_hv_isolated_page_size4_kb });
             }
             igvm_parser::igvm::IgvmDirectiveHeader::ErrorRange { .. } => {
                 todo!("Error Range not supported")
@@ -415,12 +438,81 @@ pub fn load_igvm(
     }
     loaded_info.first_gpa = first_gpa;
     loaded_info.length = loader.gets_total_bytes_written();
-
+    // TODO: Need to change paramter
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .modify_gpa_host_access(0,  HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
+            false as u8, &gpas.iter().map(|x| x.gpa).collect::<Vec<u64>>()).map_err(Error::ModifyHostAccess)?;
+        
     memory_manager
         .lock()
         .unwrap()
         .allocate_address_space()
         .map_err(Error::MemoryManager)?;
+
+    
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_normal,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_normal as u32 )
+            .map(|x| x.gpa).collect::<Vec<u64>>())
+            .map_err(Error::ImportIsolatedPages)?;
+    
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_normal,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_normal as u32 )
+            .map(|x| x.gpa).collect::<Vec<u64>>())
+        .map_err(Error::ImportIsolatedPages)?;
+   
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_vmsa,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32 )
+            .map(|x| x.gpa).collect::<Vec<u64>>())
+        .map_err(Error::ImportIsolatedPages)?;
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_cpuid,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_cpuid as u32 )
+            .map(|x| x.gpa).collect::<Vec<u64>>())
+        .map_err(Error::ImportIsolatedPages)?;
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_unmeasured,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_unmeasured as u32 )
+        .map(|x| x.gpa).collect::<Vec<u64>>()).map_err(Error::ImportIsolatedPages)?;
+    memory_manager
+        .lock()
+        .unwrap()
+        .vm
+        .import_isolated_pages(hv_isolated_page_type_hv_isolated_page_type_secrets,
+            hv_isolated_page_size_hv_isolated_page_size4_kb,
+            &gpas.iter()
+            .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_secrets as u32 )
+        .map(|x| x.gpa).collect::<Vec<u64>>()).map_err(Error::ImportIsolatedPages)?;
 
     Ok(loaded_info)
 }
