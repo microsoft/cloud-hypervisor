@@ -973,6 +973,7 @@ impl Vm {
     fn load_igvm(igvm: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
         let res = igvm_loader::load_igvm(&igvm, memory_manager, Vec::new(), 1, "")
             .map_err(Error::IgvmLoad)?;
+
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
             vmsa: Some(res.vmsa),
