@@ -1268,7 +1268,7 @@ impl vm::Vm for MshvVm {
         pages: &[u64],
     ) -> vm::Result<()> {
         if pages.len() == 0 {
-            Ok(())
+            return Ok(());
         }
         let mut isolated_pages =
             vec_with_array_field::<mshv_import_isolated_pages, u64>(pages.len());
