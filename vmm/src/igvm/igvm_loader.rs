@@ -438,6 +438,9 @@ pub fn load_igvm(
     }
     loaded_info.first_gpa = first_gpa;
     loaded_info.length = loader.gets_total_bytes_written();
+
+    #[cfg(feature = "snp")]
+    {
     // TODO: Need to change paramter
     memory_manager
         .lock()
@@ -513,6 +516,7 @@ pub fn load_igvm(
             &gpas.iter()
             .filter(|x| x.page_type == hv_isolated_page_type_hv_isolated_page_type_secrets as u32 )
         .map(|x| x.gpa).collect::<Vec<u64>>()).map_err(Error::ImportIsolatedPages)?;
+    }
 
     Ok(loaded_info)
 }
