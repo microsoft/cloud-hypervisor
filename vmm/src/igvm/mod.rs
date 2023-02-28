@@ -13,7 +13,6 @@ pub struct IgvmLoadedInfo {
     pub start_gpa: u64,
     pub length: u64,
     pub vmsa: SEV_VMSA,
-
 }
 
 impl Default for IgvmLoadedInfo {
@@ -23,8 +22,8 @@ impl Default for IgvmLoadedInfo {
     }
 }
 impl IgvmLoadedInfo {
-    pub  fn new() -> Self {
-        IgvmLoadedInfo{
+    pub fn new() -> Self {
+        IgvmLoadedInfo {
             gpas: Vec::new(),
             ..Default::default()
         }
