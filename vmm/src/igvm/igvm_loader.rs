@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
-use vm_memory::GuestMemoryMmap;
+use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
 #[derive(Debug, Error)]
@@ -151,7 +151,7 @@ pub fn load_igvm(
     let max_vtl = max_vtl
         .try_into()
         .expect("igvm file should be valid after new_from_binary");
-    let mut loader = Loader::new(memory, max_vtl);
+    let mut loader = Loader::new(memory.clone(), max_vtl);
 
     #[derive(Debug)]
     enum ParameterAreaState {
@@ -466,7 +466,7 @@ pub fn load_igvm(
             .unwrap()
             .allocate_address_space()
             .map_err(Error::MemoryManager)?;
-        
+
         // TODO: Need to change paramter
         memory_manager
             .lock()
@@ -476,7 +476,16 @@ pub fn load_igvm(
                 0,
                 HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
                 false as u8,
-                &gpas.iter().map(|x| x.gpa).collect::<Vec<u64>>(),
+                &gpas
+                    .iter()
+                    .map(|x| {
+                        memory
+                            .clone()
+                            .memory()
+                            .get_host_address(GuestAddress(x.gpa))
+                            .unwrap() as u64
+                    })
+                    .collect::<Vec<u64>>(),
             )
             .map_err(Error::ModifyHostAccess)?;
 
