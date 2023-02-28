@@ -489,6 +489,26 @@ pub fn load_igvm(
             )
             .map_err(Error::ModifyHostAccess)?;
 
+            println!("Start importing vmsa pages!");
+            memory_manager
+                .lock()
+                .unwrap()
+                .vm
+                .import_isolated_pages(
+                    hv_isolated_page_type_hv_isolated_page_type_vmsa,
+                    hv_isolated_page_size_hv_isolated_page_size4_kb,
+                    &gpas
+                        .iter()
+                        .filter(|x| {
+                            x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32
+                        })
+                        .map(|x| x.gpa)
+                        .collect::<Vec<u64>>(),
+                )
+                .map_err(Error::ImportIsolatedPages)?;
+    
+
+        println!("Start importing normal pages!");
         memory_manager
             .lock()
             .unwrap()
@@ -506,39 +526,25 @@ pub fn load_igvm(
             )
             .map_err(Error::ImportIsolatedPages)?;
 
+        println!("Start importing zero pages!");
         memory_manager
             .lock()
             .unwrap()
             .vm
             .import_isolated_pages(
-                hv_isolated_page_type_hv_isolated_page_type_normal,
+                hv_isolated_page_type_hv_isolated_page_type_zero,
                 hv_isolated_page_size_hv_isolated_page_size4_kb,
                 &gpas
                     .iter()
                     .filter(|x| {
-                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_normal as u32
+                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_zero as u32
                     })
                     .map(|x| x.gpa)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
 
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_hv_isolated_page_type_vmsa,
-                hv_isolated_page_size_hv_isolated_page_size4_kb,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32
-                    })
-                    .map(|x| x.gpa)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
+        println!("Start importing cpuid pages!");
         memory_manager
             .lock()
             .unwrap()
@@ -555,22 +561,24 @@ pub fn load_igvm(
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_hv_isolated_page_type_unmeasured,
-                hv_isolated_page_size_hv_isolated_page_size4_kb,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_unmeasured as u32
-                    })
-                    .map(|x| x.gpa)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
+
+        println!("Start importing secrets pages!");
+        // memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .vm
+        //     .import_isolated_pages(
+        //         hv_isolated_page_type_hv_isolated_page_type_unmeasured,
+        //         hv_isolated_page_size_hv_isolated_page_size4_kb,
+        //         &gpas
+        //             .iter()
+        //             .filter(|x| {
+        //                 x.page_type == hv_isolated_page_type_hv_isolated_page_type_unmeasured as u32
+        //             })
+        //             .map(|x| x.gpa)
+        //             .collect::<Vec<u64>>(),
+        //     )
+        //     .map_err(Error::ImportIsolatedPages)?;
         memory_manager
             .lock()
             .unwrap()
