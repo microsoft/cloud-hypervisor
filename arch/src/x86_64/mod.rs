@@ -66,6 +66,8 @@ pub struct EntryPoint {
     pub entry_addr: Option<GuestAddress>,
     #[cfg(feature = "igvm")]
     pub vmsa: Option<SEV_VMSA>,
+    #[cfg(feature = "snp")]
+    pub vmsa_pfn: u64,
 }
 
 const E820_RAM: u32 = 1;

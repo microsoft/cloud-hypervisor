@@ -981,6 +981,7 @@ impl Vm {
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
             vmsa: Some(res.vmsa),
+            vmsa_pfn: res.vmsa_gpa / 4096,
         })
     }
 
@@ -1016,6 +1017,8 @@ impl Vm {
                 entry_addr: Some(entry_addr),
                 #[cfg(feature = "igvm")]
                 vmsa: None,
+                #[cfg(feature = "snp")]
+                vmsa_pfn: 0,
             })
         } else {
             Err(Error::KernelMissingPvhHeader)
@@ -2049,6 +2052,8 @@ impl Vm {
         let entry_point = self.entry_point()?;
         #[cfg(feature = "igvm")]
         let vmsa = entry_point.unwrap().vmsa;
+        #[cfg(feature = "snp")]
+        let vmsa_pfn = entry_point.unwrap().vmsa_pfn;
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = self.config.lock().unwrap().is_tdx_enabled();
@@ -2066,6 +2071,8 @@ impl Vm {
                     boot_setup,
                     #[cfg(feature = "igvm")]
                     vmsa,
+                    #[cfg(feature = "snp")]
+                    vmsa_pfn,
                 )
                 .map_err(Error::CpuManager)?;
         }
