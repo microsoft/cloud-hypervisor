@@ -19,6 +19,8 @@ use crate::cpu::Vcpu;
 use crate::ClockData;
 use crate::UserMemoryRegion;
 use crate::{IoEventAddress, IrqRoutingEntry};
+#[cfg(feature = "snp")]
+use igvm_parser::igvm::IgvmVhsSnpIdBlock;
 use std::any::Any;
 #[cfg(target_arch = "x86_64")]
 use std::fs::File;
@@ -380,6 +382,10 @@ pub trait Vm: Send + Sync + Any {
         acquire: u8,
         gpas: &[u64],
     ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "snp")]
+    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> Result<()> {
         unimplemented!()
     }
 }
