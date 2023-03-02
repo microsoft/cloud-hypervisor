@@ -230,6 +230,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to modify GPA host access: {0}")]
     ModifyGpaHostAccess(#[source] anyhow::Error),
+    ///
+    /// Failed to complete isolated import
+    ///
+    #[error("Failed to complete isolated import: {0}")]
+    CompleteIsolatedImport(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
