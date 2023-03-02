@@ -214,6 +214,11 @@ pub enum HypervisorCpuError {
     #[error("Failed to set system register: {0}")]
     SetSysRegister(#[source] anyhow::Error),
     ///
+    /// Setting AArch64 system register error
+    ///
+    #[error("Failed to set sev control register: {0}")]
+    SetSevControlRegister(#[source] anyhow::Error),
+    ///
     /// GVA translation error
     ///
     #[error("Failed to translate GVA: {0}")]
@@ -453,5 +458,9 @@ pub trait Vcpu: Send + Sync {
     ///
     fn tsc_khz(&self) -> Result<Option<u32>> {
         Ok(None)
+    }
+    #[cfg(feature="snp")]
+    fn set_sev_control_register(&self, reg: u64) -> Result<()>{
+        unimplemented!()
     }
 }

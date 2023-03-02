@@ -426,6 +426,12 @@ impl Vcpu {
     pub fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError> {
         self.vcpu.run()
     }
+
+    #[cfg(feature = "snp")]
+    pub fn set_sev_control_register(&self, vmsa_pfn: u64) -> Result<()> {
+        self.vcpu.set_sev_control_register(vmsa_pfn).unwrap();
+        Ok(())
+    }
 }
 
 impl Pausable for Vcpu {}
@@ -787,8 +793,12 @@ impl CpuManager {
         vcpu: Arc<Mutex<Vcpu>>,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
+        #[cfg(feature = "snp")] vmsa_pfn: u64,
     ) -> Result<()> {
         let mut vcpu = vcpu.lock().unwrap();
+
+        #[cfg(feature = "snp")]
+        vcpu.set_sev_control_register(vmsa_pfn)?;
 
         #[cfg(target_arch = "x86_64")]
         assert!(!self.cpuid.is_empty());
@@ -1220,6 +1230,8 @@ impl CpuManager {
                         None,
                         #[cfg(feature = "igvm")]
                         None,
+                        #[cfg(feature = "snp")]
+                        0,
                     )?
                 }
                 self.activate_vcpus(desired_vcpus, true, None)?;
