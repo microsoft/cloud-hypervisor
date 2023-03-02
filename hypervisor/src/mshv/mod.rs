@@ -1317,6 +1317,23 @@ impl vm::Vm for MshvVm {
 
     #[cfg(feature = "snp")]
     fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> vm::Result<()> {
-        Ok(())
+        let data = mshv_complete_isolated_import {
+            import_data: hv_partition_complete_isolated_import_data {
+                psp_parameters: hv_psp_launch_finish_data {
+                    id_block: hv_snp_id_block {
+                        ..Default::default()
+                    },
+                    id_auth_info: hv_snp_id_auth_info {
+                        ..Default::default()
+                    },
+                    host_data: [0u8; 32],
+                    id_block_enabled: false,
+                    author_key_enabled: false,
+                },
+            },
+        };
+        self.fd
+            .complete_isolated_import(&data)
+            .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
 }
