@@ -42,6 +42,9 @@ use crate::arch::x86::{
     CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters, StandardRegisters,
 };
 
+#[cfg(feature = "snp")]
+use igvm_parser::igvm::IgvmVhsSnpIdBlock;
+
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
 
@@ -1310,5 +1313,10 @@ impl vm::Vm for MshvVm {
         self.fd
             .modify_gpa_host_access(&gpa_list[0])
             .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
+    }
+
+    #[cfg(feature = "snp")]
+    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> vm::Result<()> {
+        Ok(())
     }
 }
