@@ -80,6 +80,8 @@ pub enum Error {
     ModifyHostAccess(#[source] hypervisor::HypervisorVmError),
     #[error("Error importing isolated pages: {0}")]
     ImportIsolatedPages(#[source] hypervisor::HypervisorVmError),
+    #[error("Error completing importing isolated pages: {0}")]
+    CompleteIsolatedImport(#[source] hypervisor::HypervisorVmError),
 }
 
 fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
@@ -489,24 +491,23 @@ pub fn load_igvm(
             )
             .map_err(Error::ModifyHostAccess)?;
 
-            println!("Start importing vmsa pages!");
-            memory_manager
-                .lock()
-                .unwrap()
-                .vm
-                .import_isolated_pages(
-                    hv_isolated_page_type_hv_isolated_page_type_vmsa,
-                    hv_isolated_page_size_hv_isolated_page_size4_kb,
-                    &gpas
-                        .iter()
-                        .filter(|x| {
-                            x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32
-                        })
-                        .map(|x| x.gpa)
-                        .collect::<Vec<u64>>(),
-                )
-                .map_err(Error::ImportIsolatedPages)?;
-    
+        println!("Start importing vmsa pages!");
+        memory_manager
+            .lock()
+            .unwrap()
+            .vm
+            .import_isolated_pages(
+                hv_isolated_page_type_hv_isolated_page_type_vmsa,
+                hv_isolated_page_size_hv_isolated_page_size4_kb,
+                &gpas
+                    .iter()
+                    .filter(|x| {
+                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32
+                    })
+                    .map(|x| x.gpa)
+                    .collect::<Vec<u64>>(),
+            )
+            .map_err(Error::ImportIsolatedPages)?;
 
         println!("Start importing normal pages!");
         memory_manager
@@ -595,6 +596,14 @@ pub fn load_igvm(
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
+
+        // Call Complete Isolated Import since we are done importing isolated pages
+        memory_manager
+            .lock()
+            .unwrap()
+            .vm
+            .complete_isolated_import(loaded_info.snp_id_block)
+            .map_err(Error::CompleteIsolatedImport)?;
     }
 
     Ok(loaded_info)

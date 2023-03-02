@@ -487,6 +487,7 @@ dependencies = [
  "byteorder",
  "env_logger",
  "iced-x86",
+ "igvm-parser",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
