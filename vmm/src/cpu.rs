@@ -770,17 +770,17 @@ impl CpuManager {
         #[cfg(feature = "snp")]
         vcpu.set_sev_control_register(vmsa_pfn)?;
 
-        #[cfg(target_arch = "x86_64")]
-        assert!(!self.cpuid.is_empty());
+        // #[cfg(target_arch = "x86_64")]
+        // assert!(!self.cpuid.is_empty());
 
-        #[cfg(target_arch = "x86_64")]
-        vcpu.configure(
-            boot_setup,
-            self.cpuid.clone(),
-            self.config.kvm_hyperv,
-            #[cfg(feature = "igvm")]
-            vmsa,
-        )?;
+        // #[cfg(target_arch = "x86_64")]
+        // vcpu.configure(
+        //     boot_setup,
+        //     self.cpuid.clone(),
+        //     self.config.kvm_hyperv,
+        //     #[cfg(feature = "igvm")]
+        //     vmsa,
+        // )?;
 
         #[cfg(target_arch = "aarch64")]
         vcpu.configure(&self.vm, boot_setup)?;
