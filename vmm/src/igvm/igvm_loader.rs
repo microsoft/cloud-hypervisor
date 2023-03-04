@@ -492,23 +492,35 @@ pub fn load_igvm(
             .map_err(Error::ModifyHostAccess)?;
 
         println!("Start importing vmsa pages!");
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_hv_isolated_page_type_vmsa,
-                hv_isolated_page_size_hv_isolated_page_size4_kb,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_hv_isolated_page_type_vmsa as u32
-                    })
-                    .map(|x| x.gpa)
-                    .collect::<Vec<u64>>(),
+        let vec_iso_types: Vec<u32> = vec![
+            hv_isolated_page_type_hv_isolated_page_type_vmsa,
+            hv_isolated_page_type_hv_isolated_page_type_normal,
+            hv_isolated_page_type_hv_isolated_page_type_zero,
+            hv_isolated_page_type_hv_isolated_page_type_cpuid,
+            hv_isolated_page_type_hv_isolated_page_type_secrets,
+            //hv_isolated_page_type_hv_isolated_page_type_unmeasured,
+
+        ];
+        for pg_type in vec_iso_types {
+            println!("Start importing {:?} pages!", pg_type);
+            memory_manager
+                .lock()
+                .unwrap()
+                .vm
+                .import_isolated_pages(
+                    pg_type,
+                    hv_isolated_page_size_hv_isolated_page_size4_kb,
+                    &gpas
+                        .iter()
+                        .filter(|x| {
+                            x.page_type == pg_type as u32
+                        })
+                        .map(|x| x.gpa)
+                        .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
-
+        }
+        /*
         println!("Start importing normal pages!");
         memory_manager
             .lock()
@@ -596,7 +608,7 @@ pub fn load_igvm(
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
-
+        */
         // Call Complete Isolated Import since we are done importing isolated pages
         memory_manager
             .lock()
