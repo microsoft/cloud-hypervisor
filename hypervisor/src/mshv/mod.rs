@@ -588,6 +588,29 @@ impl cpu::Vcpu for MshvVcpu {
                     debug!("Exception Info {:?}", { info.exception_vector });
                     Ok(cpu::VmExit::Ignore)
                 }
+                hv_message_type_HVMSG_UNACCEPTED_GPA_INTERCEPT => {
+                    let info = x.to_memory_info().unwrap();
+                    let gva = info.guest_virtual_address;
+                    let gpa = info.guest_physical_address;
+                    info!("GVA: {:x}, GPA: {:x}", gva, gpa);
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit"
+                    )))
+                }
+                hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
+                    let info = x.to_gpa_attribute_info().unwrap();
+                    let vp_index = info.vp_index;
+                    info!("vp_index: {:?}", vp_index);
+                    let ranges = info.ranges;
+                    unsafe {
+                        for range in ranges {
+                            info!("range: {:?}", range.address_space);
+                        }
+                    }
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit"
+                    )))
+                }
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
                     exit
