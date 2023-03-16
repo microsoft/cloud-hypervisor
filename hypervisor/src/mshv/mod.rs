@@ -602,14 +602,9 @@ impl cpu::Vcpu for MshvVcpu {
                     let vp_index = info.vp_index;
                     info!("vp_index: {:?}", vp_index);
                     let ranges = info.ranges;
-                    unsafe {
-                        for range in ranges {
-                            info!("range: {:?}", range.address_space);
-                        }
-                    }
-                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                        "Unhandled VCPU exit"
-                    )))
+                    let (gpa_start, gpa_count) = snp::parse_gpa_range(ranges[0]).unwrap();
+                    info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
+                    Ok(cpu::VmExit::GpaModify(gpa_start, gpa_count))
                 }
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
