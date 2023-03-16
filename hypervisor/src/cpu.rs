@@ -19,7 +19,9 @@ use crate::kvm::{TdxExitDetails, TdxExitStatus};
 use crate::CpuState;
 use crate::MpState;
 use thiserror::Error;
-use vm_memory::GuestAddress;
+use vm_memory::bitmap::AtomicBitmap;
+use vm_memory::GuestMemoryAtomic;
+use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 
 #[derive(Error, Debug)]
 ///
@@ -409,7 +411,10 @@ pub trait Vcpu: Send + Sync {
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
-    fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError>;
+    fn run(
+        &self,
+        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
+    ) -> std::result::Result<VmExit, HypervisorCpuError>;
     #[cfg(target_arch = "x86_64")]
     ///
     /// Translate guest virtual address to guest physical address
