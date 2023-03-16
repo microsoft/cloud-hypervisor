@@ -771,7 +771,7 @@ impl cpu::Vcpu for MshvVcpu {
         ]
         .to_vec()
     }
-    #[cfg(feature="snp")]
+    #[cfg(feature = "snp")]
     fn set_sev_control_register(&self, vmsa_pfn: u64) -> cpu::Result<()> {
         let sev_control_reg = snp::get_sev_control_register(vmsa_pfn);
 

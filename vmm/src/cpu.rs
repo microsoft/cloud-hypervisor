@@ -58,6 +58,8 @@ use hypervisor::kvm::kvm_ioctls::Cap;
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
 #[cfg(feature = "igvm")]
+use igvm_parser::importer::HV_PAGE_SIZE;
+#[cfg(feature = "igvm")]
 use igvm_parser::snp::SEV_VMSA;
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -79,7 +81,7 @@ use vm_device::BusDevice;
 use vm_memory::ByteValued;
 #[cfg(feature = "guest_debug")]
 use vm_memory::{Bytes, GuestAddressSpace};
-use vm_memory::{GuestAddress, GuestMemoryAtomic};
+use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::{
     snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable,
     Transportable,
@@ -87,8 +89,6 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
 use zerocopy::AsBytes;
-#[cfg(feature = "igvm")]
-use igvm_parser::importer::HV_PAGE_SIZE;
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -1083,10 +1083,14 @@ impl CpuManager {
                                     }
                                     #[cfg(feature = "snp")]
                                     VmExit::GpaModify(base_gpa, gpa_count) => {
+                                        info!("VmExit::GpaModify");
                                         let mut gpa_list = Vec::new();
                                         for i in 0..gpa_count {
-                                            gpa_list.push(base_gpa + i * HV_PAGE_SIZE);
+                                            let gpa = guest_memory.clone().memory().get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
+                                            gpa_list.push(gpa);
                                         }
+                                        vm.modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice()).unwrap();
+                                        break;
                                     }
                                     _ => {
                                         error!(
@@ -1165,7 +1169,13 @@ impl CpuManager {
         // This reuses any inactive vCPUs as well as any that were newly created
         for vcpu_id in self.present_vcpus()..desired_vcpus {
             let vcpu = Arc::clone(&self.vcpus[vcpu_id as usize]);
-            self.start_vcpu(vcpu, vcpu_id, vcpu_thread_barrier.clone(), inserting, guest_memory)?;
+            self.start_vcpu(
+                vcpu,
+                vcpu_id,
+                vcpu_thread_barrier.clone(),
+                inserting,
+                guest_memory,
+            )?;
         }
 
         // Unblock all CPU threads.
@@ -1211,11 +1221,18 @@ impl CpuManager {
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
-    pub fn start_boot_vcpus(&mut self, paused: bool, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>) -> Result<()> {
+    pub fn start_boot_vcpus(
+        &mut self,
+        paused: bool,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> Result<()> {
         self.activate_vcpus(self.boot_vcpus(), false, Some(paused), guest_memory)
     }
 
-    pub fn start_restored_vcpus(&mut self, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,) -> Result<()> {
+    pub fn start_restored_vcpus(
+        &mut self,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> Result<()> {
         self.activate_vcpus(self.vcpus.len() as u8, false, Some(true), guest_memory)
             .map_err(|e| {
                 Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {:#?}", e))
@@ -1224,7 +1241,11 @@ impl CpuManager {
         Ok(())
     }
 
-    pub fn resize(&mut self, desired_vcpus: u8, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,) -> Result<bool> {
+    pub fn resize(
+        &mut self,
+        desired_vcpus: u8,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> Result<bool> {
         if desired_vcpus.cmp(&self.present_vcpus()) == cmp::Ordering::Equal {
             return Ok(false);
         }
