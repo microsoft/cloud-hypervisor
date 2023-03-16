@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_arch = "aarch64")]
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
+use vm_memory::bitmap::AtomicBitmap;
 use vmm_sys_util::eventfd::EventFd;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
@@ -92,6 +93,7 @@ pub use kvm_ioctls::{Cap, Kvm};
 use std::mem;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
+use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 #[cfg(feature = "tdx")]
 use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_ioc_nr, ioctl_iowr_nr};
 ///
@@ -1526,7 +1528,10 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
-    fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
+    fn run(
+        &self,
+        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
+    ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         match self.fd.run() {
             Ok(run) => match run {
                 #[cfg(target_arch = "x86_64")]

@@ -13,6 +13,7 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
+use igvm_parser::importer::HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd};
 use std::any::Any;
@@ -20,6 +21,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
+use vm_memory::bitmap::AtomicBitmap;
+use vm_memory::GuestAddress;
+use vm_memory::GuestAddressSpace;
+use vm_memory::GuestMemory;
+use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
@@ -319,6 +325,7 @@ pub struct MshvVcpu {
     cpuid: Vec<CpuIdEntry>,
     msrs: Vec<MsrEntry>,
     vm_ops: Option<Arc<dyn vm::VmOps>>,
+    vm_fd: Arc<VmFd>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -441,7 +448,10 @@ impl cpu::Vcpu for MshvVcpu {
         Ok(())
     }
     #[allow(non_upper_case_globals)]
-    fn run(&self) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
+    fn run(
+        &self,
+        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
+    ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         let hv_message: hv_message = hv_message::default();
         match self.fd.run(hv_message) {
             Ok(x) => match x.header.message_type {
@@ -604,7 +614,24 @@ impl cpu::Vcpu for MshvVcpu {
                     let ranges = info.ranges;
                     let (gpa_start, gpa_count) = snp::parse_gpa_range(ranges[0]).unwrap();
                     info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
-                    Ok(cpu::VmExit::GpaModify(gpa_start, gpa_count))
+                    let mut gpa_list = Vec::new();
+                    for i in 0..gpa_count {
+                        let gpa = guest_memory
+                            .clone()
+                            .memory()
+                            .get_host_address(GuestAddress(gpa_start + i * HV_PAGE_SIZE))
+                            .unwrap() as u64;
+                        gpa_list.push(gpa);
+                    }
+                    _modify_gpa_host_access(
+                        self.vm_fd.clone(),
+                        0,
+                        HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
+                        false as u8,
+                        gpa_list.as_slice(),
+                    )
+                    .unwrap();
+                    Ok(cpu::VmExit::Ignore)
                 }
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
@@ -1062,6 +1089,7 @@ impl vm::Vm for MshvVm {
             cpuid: Vec::new(),
             msrs: self.msrs.clone(),
             vm_ops,
+            vm_fd: self.fd.clone(),
         };
         Ok(Arc::new(vcpu))
     }
@@ -1324,21 +1352,7 @@ impl vm::Vm for MshvVm {
         acquire: u8,
         gpas: &[u64],
     ) -> vm::Result<()> {
-        let mut gpa_list = vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
-        gpa_list[0].gpa_list_size = gpas.len() as u64;
-        gpa_list[0].host_access = host_access;
-        gpa_list[0].acquire = acquire;
-        gpa_list[0].flags = flags;
-        // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
-        // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
-        // everything from gpas.
-        unsafe {
-            let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
-            gpas_slice.copy_from_slice(&gpas);
-        }
-        self.fd
-            .modify_gpa_host_access(&gpa_list[0])
-            .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
+        _modify_gpa_host_access(self.fd.clone(), host_access, flags, acquire, gpas)
     }
 
     #[cfg(feature = "snp")]
@@ -1362,4 +1376,28 @@ impl vm::Vm for MshvVm {
             .complete_isolated_import(&data)
             .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
+}
+
+#[cfg(feature = "snp")]
+fn _modify_gpa_host_access(
+    fd: Arc<VmFd>,
+    host_access: u32,
+    flags: u32,
+    acquire: u8,
+    gpas: &[u64],
+) -> vm::Result<()> {
+    let mut gpa_list = vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
+    gpa_list[0].gpa_list_size = gpas.len() as u64;
+    gpa_list[0].host_access = host_access;
+    gpa_list[0].acquire = acquire;
+    gpa_list[0].flags = flags;
+    // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
+    // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
+    // everything from gpas.
+    unsafe {
+        let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
+        gpas_slice.copy_from_slice(&gpas);
+    }
+    fd.modify_gpa_host_access(&gpa_list[0])
+        .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
 }

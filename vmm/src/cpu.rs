@@ -425,8 +425,11 @@ impl Vcpu {
     ///
     /// Note that the state of the VCPU and associated VM must be setup first for this to do
     /// anything useful.
-    pub fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError> {
-        self.vcpu.run()
+    pub fn run(
+        &self,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> std::result::Result<VmExit, HypervisorCpuError> {
+        self.vcpu.run(guest_memory)
     }
 
     #[cfg(feature = "snp")]
@@ -892,6 +895,7 @@ impl CpuManager {
         let panic_exit_evt = self.exit_evt.try_clone().unwrap();
         let vcpu_kill_signalled = self.vcpus_kill_signalled.clone();
         let vcpu_pause_signalled = self.vcpus_pause_signalled.clone();
+        let gm = guest_memory.clone();
 
         let vcpu_kill = self.vcpu_states[usize::from(vcpu_id)].kill.clone();
         let vcpu_run_interrupted = self.vcpu_states[usize::from(vcpu_id)]
@@ -997,7 +1001,7 @@ impl CpuManager {
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
                                     vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(true);
-                                    if !matches!(vcpu.lock().unwrap().run(), Ok(VmExit::Ignore)) {
+                                    if !matches!(vcpu.lock().unwrap().run(&gm), Ok(VmExit::Ignore)) {
                                         error!("Unexpected VM exit on \"immediate_exit\" run");
                                         break;
                                     }
@@ -1024,7 +1028,7 @@ impl CpuManager {
                             #[cfg(not(feature = "tdx"))]
                             let vcpu = vcpu.lock().unwrap();
                             // vcpu.run() returns false on a triple-fault so trigger a reset
-                            match vcpu.run() {
+                            match vcpu.run(&gm) {
                                 Ok(run) => match run {
                                     #[cfg(feature = "kvm")]
                                     VmExit::Debug => {
@@ -1086,10 +1090,10 @@ impl CpuManager {
                                         info!("VmExit::GpaModify");
                                         let mut gpa_list = Vec::new();
                                         for i in 0..gpa_count {
-                                            let gpa = guest_memory.clone().memory().get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
+                                            let gpa = gm.clone().memory().get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
                                             gpa_list.push(gpa);
                                         }
-                                        vm.modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice()).unwrap();
+                                        //vm.modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice()).unwrap();
                                         break;
                                     }
                                     _ => {
