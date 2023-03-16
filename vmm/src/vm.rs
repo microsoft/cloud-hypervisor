@@ -91,7 +91,7 @@ use tracer::trace_scoped;
 use vm_device::Bus;
 #[cfg(feature = "tdx")]
 use vm_memory::{Address, ByteValued, GuestMemory, GuestMemoryRegion};
-use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, guest_memory};
 use vm_migration::protocol::{Request, Response, Status};
 use vm_migration::{
     protocol::MemoryRangeTable, snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot,
@@ -1324,12 +1324,14 @@ impl Vm {
     ) -> Result<()> {
         event!("vm", "resizing");
 
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
+
         if let Some(desired_vcpus) = desired_vcpus {
             if self
                 .cpu_manager
                 .lock()
                 .unwrap()
-                .resize(desired_vcpus)
+                .resize(desired_vcpus, &guest_memory)
                 .map_err(Error::CpuManager)?
             {
                 self.device_manager
@@ -2205,11 +2207,11 @@ impl Vm {
         //     .unwrap()
         //     .allocate_address_space()
         //     .map_err(Error::MemoryManager)?;
-
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_boot_vcpus(new_state == VmState::BreakPoint)
+            .start_boot_vcpus(new_state == VmState::BreakPoint, &guest_memory)
             .map_err(Error::CpuManager)?;
 
         let mut state = self.state.try_write().map_err(|_| Error::PoisonedState)?;
@@ -2220,6 +2222,7 @@ impl Vm {
 
     pub fn restore(&mut self) -> Result<()> {
         event!("vm", "restoring");
+        let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
 
         #[cfg(target_arch = "x86_64")]
         // Note: For x86, always call this function before invoking start boot vcpus.
@@ -2237,7 +2240,7 @@ impl Vm {
         self.cpu_manager
             .lock()
             .unwrap()
-            .start_restored_vcpus()
+            .start_restored_vcpus(&guest_memory)
             .map_err(Error::CpuManager)?;
 
         self.setup_signal_handler()?;

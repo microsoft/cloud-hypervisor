@@ -84,6 +84,8 @@ use vm_migration::{
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
+#[cfg(feature = "igvm")]
+use igvm_parser::importer::HV_PAGE_SIZE;
 
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
@@ -840,6 +842,7 @@ impl CpuManager {
         vcpu_id: u8,
         vcpu_thread_barrier: Arc<Barrier>,
         inserting: bool,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         let reset_evt = self.reset_evt.try_clone().unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
@@ -856,6 +859,7 @@ impl CpuManager {
             .vcpu_run_interrupted
             .clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
+        let vm = self.vm.clone();
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
@@ -1038,6 +1042,13 @@ impl CpuManager {
                                             unreachable!("Couldn't get a mutable reference from Arc<dyn Vcpu> as there are multiple instances");
                                         }
                                     }
+                                    #[cfg(feature = "snp")]
+                                    VmExit::GpaModify(base_gpa, gpa_count) => {
+                                        let mut gpa_list = Vec::new();
+                                        for i in 0..gpa_count {
+                                            gpa_list.push(base_gpa + i * HV_PAGE_SIZE);
+                                        }
+                                    }
                                     _ => {
                                         error!(
                                             "VCPU generated error: {:?}",
@@ -1086,6 +1097,7 @@ impl CpuManager {
         desired_vcpus: u8,
         inserting: bool,
         paused: Option<bool>,
+        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         if desired_vcpus > self.config.max_vcpus {
             return Err(Error::DesiredVCpuCountExceedsMax);
@@ -1110,7 +1122,7 @@ impl CpuManager {
         // This reuses any inactive vCPUs as well as any that were newly created
         for vcpu_id in self.present_vcpus()..desired_vcpus {
             let vcpu = Arc::clone(&self.vcpus[vcpu_id as usize]);
-            self.start_vcpu(vcpu, vcpu_id, vcpu_thread_barrier.clone(), inserting)?;
+            self.start_vcpu(vcpu, vcpu_id, vcpu_thread_barrier.clone(), inserting, guest_memory)?;
         }
 
         // Unblock all CPU threads.
@@ -1156,12 +1168,12 @@ impl CpuManager {
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
-    pub fn start_boot_vcpus(&mut self, paused: bool) -> Result<()> {
-        self.activate_vcpus(self.boot_vcpus(), false, Some(paused))
+    pub fn start_boot_vcpus(&mut self, paused: bool, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>) -> Result<()> {
+        self.activate_vcpus(self.boot_vcpus(), false, Some(paused), guest_memory)
     }
 
-    pub fn start_restored_vcpus(&mut self) -> Result<()> {
-        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true))
+    pub fn start_restored_vcpus(&mut self, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,) -> Result<()> {
+        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true), guest_memory)
             .map_err(|e| {
                 Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {:#?}", e))
             })?;
@@ -1169,7 +1181,7 @@ impl CpuManager {
         Ok(())
     }
 
-    pub fn resize(&mut self, desired_vcpus: u8) -> Result<bool> {
+    pub fn resize(&mut self, desired_vcpus: u8, guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,) -> Result<bool> {
         if desired_vcpus.cmp(&self.present_vcpus()) == cmp::Ordering::Equal {
             return Ok(false);
         }
@@ -1191,7 +1203,7 @@ impl CpuManager {
                         0,
                     )?
                 }
-                self.activate_vcpus(desired_vcpus, true, None)?;
+                self.activate_vcpus(desired_vcpus, true, None, guest_memory)?;
                 Ok(true)
             }
             cmp::Ordering::Less => {

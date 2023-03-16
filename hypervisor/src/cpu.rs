@@ -268,6 +268,8 @@ pub enum VmExit<'a> {
     Tdx,
     #[cfg(feature = "kvm")]
     Debug,
+    #[cfg(feature = "snp")]
+    GpaModify(u64 /* base_gpa */, u64 /* gpa_count */)
 }
 
 ///
