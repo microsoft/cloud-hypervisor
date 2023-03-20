@@ -380,6 +380,12 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
+    fn complete_mem_exclusive(
+        &self,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "snp")]
     fn modify_gpa_host_access(
         &self,
         host_access: u32,
