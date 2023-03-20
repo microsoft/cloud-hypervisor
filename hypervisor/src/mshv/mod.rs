@@ -610,7 +610,8 @@ impl cpu::Vcpu for MshvVcpu {
                 hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
                     let info = x.to_gpa_attribute_info().unwrap();
                     let vp_index = info.vp_index;
-                    info!("vp_index: {:?}", vp_index);
+                    let host_vis = info.__bindgen_anon_1.host_visibility();
+                    info!("vp_index: {:?}, host_vis: {:?}", vp_index, host_vis);
                     let ranges = info.ranges;
                     let (gpa_start, gpa_count) = snp::parse_gpa_range(ranges[0]).unwrap();
                     info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
@@ -621,12 +622,13 @@ impl cpu::Vcpu for MshvVcpu {
                             .memory()
                             .get_host_address(GuestAddress(gpa_start + i * HV_PAGE_SIZE))
                             .unwrap() as u64;
+                        // let gpa = gpa_start + i * HV_PAGE_SIZE;
                         gpa_list.push(gpa);
                     }
                     _modify_gpa_host_access(
                         self.vm_fd.clone(),
                         0,
-                        HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
+                        0,
                         false as u8,
                         gpa_list.as_slice(),
                     )
@@ -1353,6 +1355,15 @@ impl vm::Vm for MshvVm {
         gpas: &[u64],
     ) -> vm::Result<()> {
         _modify_gpa_host_access(self.fd.clone(), host_access, flags, acquire, gpas)
+    }
+
+    #[cfg(feature = "snp")]
+    fn complete_mem_exclusive(
+        &self
+    ) -> vm::Result<()> {
+        self.fd
+        .complete_mem_exclusive()
+        .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
 
     #[cfg(feature = "snp")]

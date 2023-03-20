@@ -474,21 +474,7 @@ pub fn load_igvm(
             .lock()
             .unwrap()
             .vm
-            .modify_gpa_host_access(
-                0,
-                HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
-                false as u8,
-                &gpas
-                    .iter()
-                    .map(|x| {
-                        memory
-                            .clone()
-                            .memory()
-                            .get_host_address(GuestAddress(x.gpa))
-                            .unwrap() as u64
-                    })
-                    .collect::<Vec<u64>>(),
-            )
+            .complete_mem_exclusive()
             .map_err(Error::ModifyHostAccess)?;
 
         println!("Start importing vmsa pages!");
