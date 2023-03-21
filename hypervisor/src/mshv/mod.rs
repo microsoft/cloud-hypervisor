@@ -654,7 +654,12 @@ impl cpu::Vcpu for MshvVcpu {
                     // }
                 }
                 hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
-                    unimplemented!();
+                    let info = x.to_vmg_intercept_info().unwrap();
+                    let ghcb_msr: u64 = info.ghcb_msr;
+                    let op = ghcb_msr & GHCB_INFO_MASK as u64;
+                    // Only MSR based intercept supported
+                    assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
+                    Ok(cpu::VmExit::Ignore)
                 }
                    
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
