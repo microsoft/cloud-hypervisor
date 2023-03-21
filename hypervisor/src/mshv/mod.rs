@@ -659,6 +659,21 @@ impl cpu::Vcpu for MshvVcpu {
                     let op = ghcb_msr & GHCB_INFO_MASK as u64;
                     // Only MSR based intercept supported
                     assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
+                    if op == GHCB_INFO_REGISTER_REQUEST as u64 {
+                        debug!("Register request");
+                        /*let ghcb_page_msr = hv_x64_register_sev_ghcb { as_uint64: 0_u64 };
+                        unsafe {
+                            //ghcb_page_msr.__bindgen_anon_1.set_enabled(0);
+                            let arr_reg_name_value = [
+                                (
+                                    hv_x64_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
+                                    ghcb_page_msr.as_uint64,
+                                ),
+                            ];
+                            set_registers_64!(self.fd, arr_reg_name_value)
+                                .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                        }*/
+                    }
                     Ok(cpu::VmExit::Ignore)
                 }
                    
