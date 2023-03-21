@@ -653,6 +653,10 @@ impl cpu::Vcpu for MshvVcpu {
                     //     Ok(cpu::VmExit::Ignore)
                     // }
                 }
+                hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
+                    unimplemented!();
+                }
+                   
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
                     exit
