@@ -591,6 +591,10 @@ impl cpu::Vcpu for MshvVcpu {
                     info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
                     Ok(cpu::VmExit::GpaModify(gpa_start, gpa_count))
                 }
+                hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
+                    unimplemented!();
+                }
+                   
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
                     exit
