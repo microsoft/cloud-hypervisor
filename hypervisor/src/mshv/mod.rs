@@ -31,7 +31,7 @@ use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 pub mod x86_64;
 use crate::{
     ClockData, CpuState, IoEventAddress, IrqRoutingEntry, MpState, UserMemoryRegion,
-    USER_MEMORY_REGION_EXECUTE, USER_MEMORY_REGION_READ, USER_MEMORY_REGION_WRITE,
+    USER_MEMORY_REGION_EXECUTE, USER_MEMORY_REGION_READ, USER_MEMORY_REGION_WRITE, USER_MEMORY_REGION_ADJUST_PERMISSION,
 };
 use vmm_sys_util::eventfd::EventFd;
 #[cfg(target_arch = "x86_64")]
@@ -76,6 +76,9 @@ impl From<mshv_user_mem_region> for UserMemoryRegion {
         if region.flags & HV_MAP_GPA_EXECUTABLE != 0 {
             flags |= USER_MEMORY_REGION_EXECUTE;
         }
+        if region.flags & HV_MAP_GPA_ADJUSTABLE != 0 {
+            flags |= USER_MEMORY_REGION_ADJUST_PERMISSION;
+        }
 
         UserMemoryRegion {
             guest_phys_addr: (region.guest_pfn << PAGE_SHIFT as u64)
@@ -99,6 +102,9 @@ impl From<UserMemoryRegion> for mshv_user_mem_region {
         }
         if region.flags & USER_MEMORY_REGION_EXECUTE != 0 {
             flags |= HV_MAP_GPA_EXECUTABLE;
+        }
+        if region.flags & USER_MEMORY_REGION_ADJUST_PERMISSION != 0 {
+            flags |= HV_MAP_GPA_ADJUSTABLE;
         }
 
         mshv_user_mem_region {
@@ -625,15 +631,27 @@ impl cpu::Vcpu for MshvVcpu {
                         // let gpa = gpa_start + i * HV_PAGE_SIZE;
                         gpa_list.push(gpa);
                     }
-                    _modify_gpa_host_access(
-                        self.vm_fd.clone(),
-                        0,
-                        0,
-                        false as u8,
-                        gpa_list.as_slice(),
-                    )
-                    .unwrap();
-                    Ok(cpu::VmExit::Ignore)
+                    // if host_vis != 3 {
+                        _modify_gpa_host_access(
+                            self.vm_fd.clone(),
+                            0,
+                            0,
+                            false as u8,
+                            gpa_list.as_slice(),
+                        )
+                        .unwrap();
+                        Ok(cpu::VmExit::Ignore)
+                    // } else {
+                    //     _modify_gpa_host_access(
+                    //         self.vm_fd.clone(),
+                    //         host_vis,
+                    //         0,
+                    //         true as u8,
+                    //         gpa_list.as_slice(),
+                    //     )
+                    //     .unwrap();
+                    //     Ok(cpu::VmExit::Ignore)
+                    // }
                 }
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                     "Unhandled VCPU exit {:?}",
@@ -1187,9 +1205,10 @@ impl vm::Vm for MshvVm {
         readonly: bool,
         _log_dirty_pages: bool,
     ) -> UserMemoryRegion {
-        let mut flags = HV_MAP_GPA_READABLE | HV_MAP_GPA_EXECUTABLE;
+        let mut flags = HV_MAP_GPA_READABLE | HV_MAP_GPA_EXECUTABLE | HV_MAP_GPA_ADJUSTABLE;
         if !readonly {
             flags |= HV_MAP_GPA_WRITABLE;
+            //flags |= HV_MAP_GPA_ADJUSTABLE;
         }
 
         mshv_user_mem_region {
