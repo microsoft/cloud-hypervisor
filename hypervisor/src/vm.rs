@@ -404,4 +404,6 @@ pub trait VmOps: Send + Sync {
     fn pio_read(&self, port: u64, data: &mut [u8]) -> Result<()>;
     #[cfg(target_arch = "x86_64")]
     fn pio_write(&self, port: u64, data: &[u8]) -> Result<()>;
+    #[cfg(feature = "snp")]
+    fn gpa_modify(&self, base_gpa: u64, gpa_count: u64)-> Result<()>;
 }

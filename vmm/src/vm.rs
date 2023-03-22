@@ -58,6 +58,8 @@ use gdbstub_arch::aarch64::reg::AArch64CoreRegs as CoreRegs;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs as CoreRegs;
 use hypervisor::{HypervisorVmError, VmOps};
+#[cfg(feature = "igvm")]
+use igvm_parser::importer::HV_PAGE_SIZE;
 use linux_loader::cmdline::Cmdline;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf;
@@ -92,6 +94,7 @@ use vm_device::Bus;
 #[cfg(feature = "tdx")]
 use vm_memory::{Address, ByteValued, GuestMemory, GuestMemoryRegion};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::GuestMemory;
 use vm_migration::protocol::{Request, Response, Status};
 use vm_migration::{
     protocol::MemoryRangeTable, snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot,
@@ -373,6 +376,8 @@ struct VmOpsHandler {
     #[cfg(target_arch = "x86_64")]
     io_bus: Arc<Bus>,
     mmio_bus: Arc<Bus>,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl VmOps for VmOpsHandler {
@@ -433,6 +438,19 @@ impl VmOps for VmOpsHandler {
             }
             _ => {}
         };
+        Ok(())
+    }
+    #[cfg(feature = "snp")]
+    fn gpa_modify(&self, base_gpa: u64, gpa_count: u64)-> result::Result<(), HypervisorVmError> {
+        let mut gpa_list = Vec::new();
+        let guest_mem = self.memory.memory();
+        for i in 0..gpa_count {
+            let gpa = guest_mem.get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
+            gpa_list.push(gpa);
+        }
+        self.vm
+            .modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice())
+            .map_err(|e| HypervisorVmError::ModifyGpaHostAccess(e.into()));
         Ok(())
     }
 }
@@ -530,6 +548,8 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             io_bus: io_bus.clone(),
             mmio_bus: mmio_bus.clone(),
+            #[cfg(feature = "snp")]
+            vm: vm.clone(),
         });
 
         let cpus_config = { &config.lock().unwrap().cpus.clone() };

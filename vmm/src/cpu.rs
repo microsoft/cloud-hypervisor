@@ -842,7 +842,6 @@ impl CpuManager {
         vcpu_id: u8,
         vcpu_thread_barrier: Arc<Barrier>,
         inserting: bool,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         let reset_evt = self.reset_evt.try_clone().unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
@@ -859,7 +858,6 @@ impl CpuManager {
             .vcpu_run_interrupted
             .clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
-        let vm = self.vm.clone();
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
@@ -1042,17 +1040,6 @@ impl CpuManager {
                                             unreachable!("Couldn't get a mutable reference from Arc<dyn Vcpu> as there are multiple instances");
                                         }
                                     }
-                                    #[cfg(feature = "snp")]
-                                    VmExit::GpaModify(base_gpa, gpa_count) => {
-                                        info!("VmExit::GpaModify");
-                                        let mut gpa_list = Vec::new();
-                                        for i in 0..gpa_count {
-                                            let gpa = guest_memory.clone().memory().get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
-                                            gpa_list.push(gpa);
-                                        }
-                                        vm.modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice()).unwrap();
-                                        break;
-                                    }
                                     _ => {
                                         error!(
                                             "VCPU generated error: {:?}",
@@ -1101,7 +1088,6 @@ impl CpuManager {
         desired_vcpus: u8,
         inserting: bool,
         paused: Option<bool>,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         if desired_vcpus > self.config.max_vcpus {
             return Err(Error::DesiredVCpuCountExceedsMax);
@@ -1131,7 +1117,6 @@ impl CpuManager {
                 vcpu_id,
                 vcpu_thread_barrier.clone(),
                 inserting,
-                guest_memory,
             )?;
         }
 
@@ -1183,14 +1168,14 @@ impl CpuManager {
         paused: bool,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
-        self.activate_vcpus(self.boot_vcpus(), false, Some(paused), guest_memory)
+        self.activate_vcpus(self.boot_vcpus(), false, Some(paused))
     }
 
     pub fn start_restored_vcpus(
         &mut self,
         guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
-        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true), guest_memory)
+        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true))
             .map_err(|e| {
                 Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {:#?}", e))
             })?;
@@ -1224,7 +1209,7 @@ impl CpuManager {
                         0,
                     )?
                 }
-                self.activate_vcpus(desired_vcpus, true, None, guest_memory)?;
+                self.activate_vcpus(desired_vcpus, true, None)?;
                 Ok(true)
             }
             cmp::Ordering::Less => {

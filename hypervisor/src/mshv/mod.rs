@@ -589,7 +589,12 @@ impl cpu::Vcpu for MshvVcpu {
                     let ranges = info.ranges;
                     let (gpa_start, gpa_count) = snp::parse_gpa_range(ranges[0]).unwrap();
                     info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
-                    Ok(cpu::VmExit::GpaModify(gpa_start, gpa_count))
+                    if let Some(vm_ops) = &self.vm_ops {
+                        vm_ops
+                            .gpa_modify(gpa_start, gpa_count)
+                            .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
+                    }
+                    Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
                     let info = x.to_vmg_intercept_info().unwrap();
