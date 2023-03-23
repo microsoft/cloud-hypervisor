@@ -659,6 +659,7 @@ impl cpu::Vcpu for MshvVcpu {
                     let op = ghcb_msr & GHCB_INFO_MASK as u64;
                     // Only MSR based intercept supported
                     assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
+                    assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
                     if op == GHCB_INFO_REGISTER_REQUEST as u64 {
                         debug!("Register request");
                          // The VMM sets the HvX64RegisterSevGhcbGpa register as specified by the guest
@@ -687,6 +688,22 @@ impl cpu::Vcpu for MshvVcpu {
                             ];
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                    }
+                    else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
+                        let pbit_encryption: u8 = 200;
+                        let mut write_msr: u64 = GHCB_INFO_SEV_INFO_RESPONSE as u64;
+                        write_msr |= (GHCB_PROTOCOL_VERSION_MAX as u64) << 48;
+                        write_msr |= (GHCB_PROTOCOL_VERSION_MIN as u64) << 32;
+                        write_msr |= (pbit_encryption as u64) << 24;
+                        let arr_reg_name_value = [
+                                (
+                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    write_msr,
+                                ),
+                            ];
+                        set_registers_64!(self.fd, arr_reg_name_value)
+                            .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
