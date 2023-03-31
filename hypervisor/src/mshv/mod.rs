@@ -491,8 +491,8 @@ impl cpu::Vcpu for MshvVcpu {
                                 ),
                                 (hv_x64_register_name_HV_X64_REGISTER_RAX, ret_rax),
                             ];
-                            set_registers_64!(self.fd, arr_reg_name_value)
-                                .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                            // set_registers_64!(self.fd, arr_reg_name_value)
+                            //     .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                             return Ok(cpu::VmExit::Ignore);
                         }
                         _ => {}
@@ -540,8 +540,8 @@ impl cpu::Vcpu for MshvVcpu {
                         ),
                         (hv_x64_register_name_HV_X64_REGISTER_RAX, ret_rax),
                     ];
-                    set_registers_64!(self.fd, arr_reg_name_value)
-                        .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                    // set_registers_64!(self.fd, arr_reg_name_value)
+                    //     .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     Ok(cpu::VmExit::Ignore)
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
@@ -595,7 +595,7 @@ impl cpu::Vcpu for MshvVcpu {
                     let gpa = info.guest_physical_address;
                     info!("GVA: {:x}, GPA: {:x}", gva, gpa);
                     Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                        "Unhandled VCPU exit"
+                        "Unhandled VCPU exit reallyyyyy"
                     )))
                 }
                 hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
@@ -616,7 +616,7 @@ impl cpu::Vcpu for MshvVcpu {
                         // let gpa = gpa_start + i * HV_PAGE_SIZE;
                         gpa_list.push(gpa);
                     }
-                    // if host_vis != 3 {
+                    if host_vis != 3 {
                         _modify_gpa_host_access(
                             self.vm_fd.clone(),
                             0,
@@ -626,6 +626,7 @@ impl cpu::Vcpu for MshvVcpu {
                         )
                         .unwrap();
                         Ok(cpu::VmExit::Ignore)
+                    }
                     // } else {
                     //     _modify_gpa_host_access(
                     //         self.vm_fd.clone(),
