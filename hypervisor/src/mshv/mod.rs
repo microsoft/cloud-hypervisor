@@ -510,7 +510,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                             return Ok(cpu::VmExit::Ignore);
                         }
-                        _ => {}
+                        _ => {println!("VMEXIT Ddddddddddddddddddddddddddd: port {:0x}", { port});}
                     }
 
                     assert!(
@@ -657,11 +657,13 @@ impl cpu::Vcpu for MshvVcpu {
                     let info = x.to_vmg_intercept_info().unwrap();
                     let ghcb_msr: u64 = info.ghcb_msr;
                     let op = ghcb_msr & GHCB_INFO_MASK as u64;
-                    // Only MSR based intercept supported
+                    let ghcb_data = (ghcb_msr >> GHCB_INFO_BIT_WIDTH) as u64;
+
+                    println!("VMG_EXIT: ");
                     assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
                     if op == GHCB_INFO_REGISTER_REQUEST as u64 {
-                        debug!("Register request");
+                        println!("GHCB_INFO_REGISTER_REQUEST");
                          // The VMM sets the HvX64RegisterSevGhcbGpa register as specified by the guest
                         let mut ghcb_page_msr = hv_x64_register_sev_ghcb { as_uint64: 0_u64 };
                         unsafe {
@@ -678,7 +680,7 @@ impl cpu::Vcpu for MshvVcpu {
                         }
                         // The VMM writes the result to the GHCB register
                         let mut write_msr = ghcb_msr;
-                        write_msr &= (GHCB_DATA_MASK << GHCB_INFO_BIT_WIDTH); //clear GHCB info
+                        write_msr &= GHCB_DATA_MASK << GHCB_INFO_BIT_WIDTH; //clear GHCB info
                         write_msr |= GHCB_INFO_REGISTER_RESPONSE as u64;
                         let arr_reg_name_value = [
                                 (
@@ -690,7 +692,12 @@ impl cpu::Vcpu for MshvVcpu {
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     }
                     else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
-                        let pbit_encryption: u8 = 200;
+                        println!("GHCB_INFO_SEV_INFO_REQUEST");
+                        let function = 0x8000_001F;
+                        let cpu_leaf = self.fd.get_cpuid_values(function, 0).unwrap();
+                        let ebx = cpu_leaf[1];
+                        let pbit_encryption: u8 = (ebx & 0x3f) as u8;
+                        println!("EBX: {:0x}, bit: {:0x}", ebx, pbit_encryption);
                         let mut write_msr: u64 = GHCB_INFO_SEV_INFO_RESPONSE as u64;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MAX as u64) << 48;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MIN as u64) << 32;
@@ -704,6 +711,26 @@ impl cpu::Vcpu for MshvVcpu {
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
 
+                    }
+                    else if op == GHCB_INFO_HYP_FEATURE_REQUEST as u64{
+                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
+                        // GHCB data must be zero
+                        assert!(ghcb_data == 0);
+
+                        let mut write_msr: u64 = GHCB_INFO_HYP_FEATURE_RESPONSE as u64;
+                        write_msr = write_msr | ((0x1 << GHCB_INFO_BIT_WIDTH) as u64 );
+                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
+                        let arr_reg_name_value = [
+                                (
+                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    write_msr,
+                                ),
+                            ];
+                        set_registers_64!(self.fd, arr_reg_name_value)
+                            .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                    }
+                    else {
+                        println!("VMGexit: Unhandled operations {:0x}", op);
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
