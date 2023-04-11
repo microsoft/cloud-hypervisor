@@ -659,7 +659,7 @@ impl cpu::Vcpu for MshvVcpu {
                     let op = ghcb_msr & GHCB_INFO_MASK as u64;
                     let ghcb_data = (ghcb_msr >> GHCB_INFO_BIT_WIDTH) as u64;
 
-                    println!("VMG_EXIT: ");
+                    //println!("VMG_EXIT: ");
                     // Don't understand the need for this check????
                     // assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
@@ -732,6 +732,13 @@ impl cpu::Vcpu for MshvVcpu {
                             ];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                    }
+                    else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
+                        let data = ghcb_msr >> 16;
+                        let bytes = data.to_le_bytes();
+                        if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
+                            print!("{}", s);
+                        }
                     }
                     else {
                         println!("VMGexit: Unhandled operations {:0x}", op);
