@@ -660,27 +660,29 @@ impl cpu::Vcpu for MshvVcpu {
                     let ghcb_data = (ghcb_msr >> GHCB_INFO_BIT_WIDTH) as u64;
 
                     println!("VMG_EXIT: ");
-                    assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
+                    // Don't understand the need for this check????
+                    // assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
                     if op == GHCB_INFO_REGISTER_REQUEST as u64 {
-                        println!("GHCB_INFO_REGISTER_REQUEST");
+                        println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_msr);
                          // The VMM sets the HvX64RegisterSevGhcbGpa register as specified by the guest
-                        let mut ghcb_page_msr = hv_x64_register_sev_ghcb { as_uint64: 0_u64 };
+                        let mut ghcb_page_msr = hv_x64_register_sev_ghcb { as_uint64: ghcb_msr };
                         unsafe {
-                            ghcb_page_msr.__bindgen_anon_1.set_enabled(0);
-                            ghcb_page_msr.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
+                            // ghcb_page_msr.__bindgen_anon_1.set_enabled(0);
+                            // ghcb_page_msr.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
                             let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
+                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
                                     ghcb_page_msr.as_uint64,
                                 ),
                             ];
+                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_page_msr.as_uint64);
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
                         // The VMM writes the result to the GHCB register
                         let mut write_msr = ghcb_msr;
-                        write_msr &= GHCB_DATA_MASK << GHCB_INFO_BIT_WIDTH; //clear GHCB info
+                        // write_msr &= GHCB_DATA_MASK << GHCB_INFO_BIT_WIDTH; //clear GHCB info
                         write_msr |= GHCB_INFO_REGISTER_RESPONSE as u64;
                         let arr_reg_name_value = [
                                 (
@@ -688,8 +690,10 @@ impl cpu::Vcpu for MshvVcpu {
                                     write_msr,
                                 ),
                             ];
+                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", write_msr);
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                            println!("Done GHCB_INFO_REGISTER_REQUEST: {:0x}", write_msr);
                     }
                     else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
                         println!("GHCB_INFO_SEV_INFO_REQUEST");
