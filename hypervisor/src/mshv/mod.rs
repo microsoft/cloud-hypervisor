@@ -486,10 +486,10 @@ impl cpu::Vcpu for MshvVcpu {
                             /* Advance RIP and update RAX */
                             let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_RIP,
+                                    hv_register_name_HV_X64_REGISTER_RIP,
                                     info.header.rip + insn_len,
                                 ),
-                                (hv_x64_register_name_HV_X64_REGISTER_RAX, ret_rax),
+                                (hv_register_name_HV_X64_REGISTER_RAX, ret_rax),
                             ];
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
@@ -535,10 +535,10 @@ impl cpu::Vcpu for MshvVcpu {
                     /* Advance RIP and update RAX */
                     let arr_reg_name_value = [
                         (
-                            hv_x64_register_name_HV_X64_REGISTER_RIP,
+                            hv_register_name_HV_X64_REGISTER_RIP,
                             info.header.rip + insn_len,
                         ),
-                        (hv_x64_register_name_HV_X64_REGISTER_RAX, ret_rax),
+                        (hv_register_name_HV_X64_REGISTER_RAX, ret_rax),
                     ];
                     set_registers_64!(self.fd, arr_reg_name_value)
                         .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
@@ -657,7 +657,7 @@ impl cpu::Vcpu for MshvVcpu {
                             // ghcb_page_msr.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
                             let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     ghcb_page_msr.as_uint64,
                                 ),
                             ];
@@ -671,7 +671,7 @@ impl cpu::Vcpu for MshvVcpu {
                         write_msr |= GHCB_INFO_REGISTER_RESPONSE as u64;
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
@@ -693,7 +693,7 @@ impl cpu::Vcpu for MshvVcpu {
                         write_msr |= (pbit_encryption as u64) << 24;
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
@@ -711,7 +711,7 @@ impl cpu::Vcpu for MshvVcpu {
                         println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
