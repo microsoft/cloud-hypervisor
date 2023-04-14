@@ -1377,15 +1377,6 @@ impl vm::Vm for MshvVm {
     }
 
     #[cfg(feature = "snp")]
-    fn complete_mem_exclusive(
-        &self
-    ) -> vm::Result<()> {
-        self.fd
-        .complete_mem_exclusive()
-        .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
-    }
-
-    #[cfg(feature = "snp")]
     fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> vm::Result<()> {
         let data = mshv_complete_isolated_import {
             import_data: hv_partition_complete_isolated_import_data {
