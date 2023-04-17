@@ -604,7 +604,7 @@ impl cpu::Vcpu for MshvVcpu {
                     debug!("Exception Info {:?}", { info.exception_vector });
                     Ok(cpu::VmExit::Ignore)
                 }
-                hv_message_type_HVMSG_UNACCEPTED_GPA_INTERCEPT => {
+                hv_message_type_HVMSG_UNACCEPTED_GPA => {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
@@ -672,7 +672,7 @@ impl cpu::Vcpu for MshvVcpu {
                             // ghcb_page_msr.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
                             let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     ghcb_page_msr.as_uint64,
                                 ),
                             ];
@@ -686,7 +686,7 @@ impl cpu::Vcpu for MshvVcpu {
                         write_msr |= GHCB_INFO_REGISTER_RESPONSE as u64;
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
@@ -708,7 +708,7 @@ impl cpu::Vcpu for MshvVcpu {
                         write_msr |= (pbit_encryption as u64) << 24;
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
@@ -726,7 +726,7 @@ impl cpu::Vcpu for MshvVcpu {
                         println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value = [
                                 (
-                                    hv_x64_register_name_HV_X64_REGISTER_GHCB,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
                                     write_msr,
                                 ),
                             ];
