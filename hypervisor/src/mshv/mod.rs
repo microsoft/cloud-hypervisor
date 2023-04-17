@@ -732,7 +732,8 @@ impl cpu::Vcpu for MshvVcpu {
                         println!("Software exit code {:0x}", _exit_code);
                         match _exit_code {
                             0x7b => {
-                                println!("IOIO_PROT");
+                                let exit_info1 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1;
+                                let port_into = (exit_info1 & 0xFFFFFFFF) as u32;
                             },
                             _ => {
                                 println!("Unhandled exit code: ");
