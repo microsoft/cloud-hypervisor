@@ -482,7 +482,7 @@ pub fn load_igvm(
                     .filter(|x| {
                         x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u32
                     })
-                    .map(|x| x.gpa)
+                    .map(|x| x.gpa / 4096)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
@@ -500,7 +500,7 @@ pub fn load_igvm(
                     .filter(|x| {
                         x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u32
                     })
-                    .map(|x| x.gpa)
+                    .map(|x| x.gpa / 4096)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
@@ -518,7 +518,7 @@ pub fn load_igvm(
                     .filter(|x| {
                         x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO as u32
                     })
-                    .map(|x| x.gpa)
+                    .map(|x| x.gpa / 4096)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
@@ -536,7 +536,7 @@ pub fn load_igvm(
                     .filter(|x| {
                         x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u32
                     })
-                    .map(|x| x.gpa)
+                    .map(|x| x.gpa / 4096)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
@@ -570,7 +570,7 @@ pub fn load_igvm(
                     .filter(|x| {
                         x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u32
                     })
-                    .map(|x| x.gpa)
+                    .map(|x| x.gpa / 4096)
                     .collect::<Vec<u64>>(),
             )
             .map_err(Error::ImportIsolatedPages)?;
