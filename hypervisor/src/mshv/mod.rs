@@ -658,25 +658,26 @@ impl cpu::Vcpu for MshvVcpu {
                     let ghcb_msr: u64 = info.ghcb_msr;
                     let op = ghcb_msr & GHCB_INFO_MASK as u64;
                     let ghcb_data = (ghcb_msr >> GHCB_INFO_BIT_WIDTH) as u64;
-
+                    let mut ghcb_gpa = hv_x64_register_sev_ghcb::default();
                     //println!("VMG_EXIT: ");
                     // Don't understand the need for this check????
                     // assert!(info.__bindgen_anon_1.ghcb_page_valid() != 1);
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
                     if op == GHCB_INFO_REGISTER_REQUEST as u64 {
-                        println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_msr);
+                        println!("GHCB_INFO_REGISTER_REQUEST 1: {:0x}", ghcb_msr);
                          // The VMM sets the HvX64RegisterSevGhcbGpa register as specified by the guest
                         let mut ghcb_page_msr = hv_x64_register_sev_ghcb { as_uint64: ghcb_msr };
                         unsafe {
-                            // ghcb_page_msr.__bindgen_anon_1.set_enabled(0);
-                            // ghcb_page_msr.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
+                            ghcb_gpa.__bindgen_anon_1.set_enabled(1);
+                            ghcb_gpa.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
                             let arr_reg_name_value = [
                                 (
-                                    hv_register_name_HV_X64_REGISTER_GHCB,
-                                    ghcb_page_msr.as_uint64,
+                                    hv_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
+                                    //ghcb_page_msr.as_uint64,
+                                    ghcb_gpa.as_uint64,
                                 ),
                             ];
-                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_page_msr.as_uint64);
+                            println!("GHCB_INFO_REGISTER_REQUEST 2: {:0x}", ghcb_gpa.as_uint64);
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
@@ -690,10 +691,10 @@ impl cpu::Vcpu for MshvVcpu {
                                     write_msr,
                                 ),
                             ];
-                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", write_msr);
+                            println!("GHCB_INFO_REGISTER_REQUEST 3: {:0x}", write_msr);
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                            println!("Done GHCB_INFO_REGISTER_REQUEST: {:0x}", write_msr);
+                            println!("Done GHCB_INFO_REGISTER_REQUEST 4: {:0x}", write_msr);
                     }
                     else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
                         println!("GHCB_INFO_SEV_INFO_REQUEST");
@@ -741,13 +742,13 @@ impl cpu::Vcpu for MshvVcpu {
                         }
                     }
                     else {
-                        println!("VMGexit: Unhandled operations {:0x}", op);
+                        println!("--------------------------------------------VMGexit: Unhandled operations {:0x}", op);
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
                    
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                    "Unhandled VCPU exit {:?}",
+                    "--------------------------- Unhandled VCPU exit {:?}",
                     exit
                 ))),
             },
