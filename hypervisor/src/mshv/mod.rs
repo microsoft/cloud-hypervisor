@@ -673,12 +673,14 @@ impl cpu::Vcpu for MshvVcpu {
                             ghcb_gpa.__bindgen_anon_1.set_page_number((ghcb_msr >> GHCB_INFO_BIT_WIDTH) & GHCB_DATA_MASK);
                             let arr_reg_name_value = [
                                 (
-                                    hv_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
-                                    //ghcb_page_msr.as_uint64,
-                                    ghcb_gpa.as_uint64,
+                                    hv_register_name_HV_X64_REGISTER_GHCB,
+                                    ghcb_page_msr.as_uint64,
+                                    //hv_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
+                                    //ghcb_gpa.as_uint64,
                                 ),
                             ];
-                            println!("GHCB_INFO_REGISTER_REQUEST 2: {:0x}", ghcb_gpa.as_uint64);
+                            //println!("GHCB_INFO_REGISTER_REQUEST 2: {:0x}", ghcb_gpa.as_uint64);
+                            println!("GHCB_INFO_REGISTER_REQUEST 2: {:0x}", ghcb_page_msr.as_uint64);
                             set_registers_64!(self.fd, arr_reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
