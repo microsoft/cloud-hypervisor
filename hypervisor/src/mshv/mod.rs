@@ -7,6 +7,7 @@ use crate::arch::emulator::{PlatformEmulator, PlatformError};
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::emulator::{Emulator, EmulatorCpuState};
+use byteorder::BigEndian;
 use crate::cpu;
 use crate::cpu::Vcpu;
 use crate::hypervisor;
@@ -739,6 +740,66 @@ impl cpu::Vcpu for MshvVcpu {
                         let bytes = data.to_le_bytes();
                         if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
                             print!("{}", s);
+                        }
+                    }
+                    else if op == GHCB_INFO_NORMAL as u64{
+                        println!("GHCB_INFO_NORMAL");
+                        // SAFETY: access_info is valid, otherwise we won't be here
+                        let _exit_code = unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code };
+                        println!("Software exit code {:0x}", _exit_code);
+                        match _exit_code {
+                            0x7b => {
+                                let exit_info1 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1;
+                                let addr = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;;
+                                let port_into = hv_sev_vmgexit_port_info {as_uint32: (exit_info1 & 0xFFFFFFFF) as u32 };
+                                let port = unsafe {port_into.__bindgen_anon_1.intercepted_port() };
+                                let mut len = 4;
+                                unsafe {
+                                    if port_into.__bindgen_anon_1.operand_size_16bit() == 1 {
+                                        len = 2;
+                                    } else if port_into.__bindgen_anon_1.operand_size_8bit() == 1 {
+                                        len = 1;
+                                    }
+                                }
+                                let pfn: u64  = ghcb_msr >> GHCB_INFO_BIT_WIDTH;
+                                let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
+                                let is_write = unsafe { port_into.__bindgen_anon_1.access_type() == 1 };
+                                let mut arg: mshv_read_write_gpa = mshv_read_write_gpa::default();
+                                arg.base_gpa = gpa + 0x01F8;
+                                arg.byte_count = 8;
+                                self.fd.gpa_read(&mut arg).unwrap();
+                                let mut bytes: [u8; 8] = [0u8;8];
+                                bytes.copy_from_slice(&arg.data[0..8]);
+                                let rax: u64 = u64::from_be_bytes(bytes);
+                                let data = (rax as u32).to_le_bytes();
+                                if is_write {
+                                    if let Some(vm_ops) = &self.vm_ops {
+                                        vm_ops
+                                            .pio_write(addr, &data[0..len])
+                                            .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
+                                    }
+                                } else {
+                                    let mut data: [u8; 4] = [0; 4];
+                                    
+                                    if let Some(vm_ops) = &self.vm_ops {
+                                        vm_ops
+                                            .pio_read(port.into(), &mut data[0..len])
+                                            .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
+                                    }
+            
+                                    let v = u32::from_le_bytes(data);
+                                    /* Preserve high bits in EAX but clear out high bits in RAX */
+                                    let mask = 0xffffffff >> (32 - len * 8);
+                                    let eax = (rax as u32 & !mask) | (v & mask);
+                                    let ret_rax = eax as u64;
+                                    arg.data.copy_from_slice(&ret_rax.to_le_bytes());
+                                    self.fd.gpa_write(&mut arg).unwrap();
+                                }
+                                
+                            },
+                            _ => {
+                                println!("Unhandled exit code: ");
+                            }
                         }
                     }
                     else {
