@@ -780,7 +780,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     let mut ghcb_doorbell_gpa = hv_x64_register_sev_hv_doorbell::default();
                                     unsafe {
                                         ghcb_doorbell_gpa.__bindgen_anon_1.set_enabled(1);
-                                        ghcb_doorbell_gpa.__bindgen_anon_1.set_page_number(exit_info2);
+                                        ghcb_doorbell_gpa.__bindgen_anon_1.set_page_number(exit_info2 >> 12);
                                     }
                                     let write_msr = unsafe { ghcb_doorbell_gpa.as_uint64 };
                                     let arr_reg_name_value =
@@ -794,6 +794,12 @@ impl cpu::Vcpu for MshvVcpu {
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
                                     arg.data[0..8].copy_from_slice(&value.to_le_bytes());
+                                    self.fd.gpa_write(&mut arg).unwrap();
+
+                                    let value1 = 0_u64;
+                                    arg.base_gpa = gpa + 0x398;
+                                    arg.byte_count = 8;
+                                    arg.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 SVM_NAE_HV_DOORBELL_PAGE_QUERY => {
