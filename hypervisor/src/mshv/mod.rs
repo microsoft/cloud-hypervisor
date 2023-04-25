@@ -612,9 +612,9 @@ impl cpu::Vcpu for MshvVcpu {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
-                    info!("GVA: {:x}, GPA: {:x}", gva, gpa);
+                    info!("Unaccepted GPA: GVA: {:x}, GPA: {:x}", gva, gpa);
                     Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                        "Unhandled VCPU exit"
+                        "Unhandled VCPU exit: Unaccepted GPA"
                     )))
                 }
                 hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
@@ -759,11 +759,13 @@ impl cpu::Vcpu for MshvVcpu {
                             unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
                         let exit_info1 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
                         let exit_info2 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info2;
+                        let sw_scratch = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
                         let pfn: u64 = unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
                         println!("Software exit code {:0x}", _exit_code);
-                        println!("Software exit exit_info1111 {:0x}", exit_info1);
+                        println!("Software exit exit_info1 {:0x}", exit_info1);
                         println!("Software exit exit_info2 {:0x}", exit_info2);
+                        println!("Software exit sw_scratch {:0x}",sw_scratch);
                         println!("Software exit pfn {:0x}", gpa);
                         match _exit_code {
                             SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1 {
