@@ -176,7 +176,7 @@ pub struct MemoryManager {
     snapshot_memory_ranges: MemoryRangeTable,
     memory_zones: MemoryZones,
     log_dirty: bool, // Enable dirty logging for created RAM regions
-    arch_mem_regions: Vec<ArchMemRegion>,
+    pub arch_mem_regions: Vec<ArchMemRegion>,
     ram_allocator: AddressAllocator,
     dynamic: bool,
 

@@ -16,6 +16,7 @@ use igvm_parser::igvm::IgvmPlatformHeader;
 use igvm_parser::igvm::IgvmPlatformType;
 use igvm_parser::igvm::IgvmRelocatableRegion;
 use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_MEMORY;
+use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_PLATFORM_RESERVED;
 use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_VTL2_PROTECTABLE;
 use igvm_parser::igvm::IGVM_VHF_PAGE_DATA_FLAGS_UNMEASURED;
 use igvm_parser::igvm::IGVM_VHF_REQUIRED_MEMORY_FLAGS_VTL2_PROTECTABLE;
@@ -94,12 +95,22 @@ fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
 
 fn memory_map_entry(range: &ArchMemRegion) -> IGVM_VHS_MEMORY_MAP_ENTRY {
     assert!(range.size as u64 % HV_PAGE_SIZE == 0);
-    IGVM_VHS_MEMORY_MAP_ENTRY {
-        starting_gpa_page_number: range.base / HV_PAGE_SIZE,
-        number_of_pages: range.size as u64 / HV_PAGE_SIZE,
-        entry_type: IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_MEMORY,
-        flags: 0,
-        reserved: 0,
+    if range.r_type == RegionType::Ram {
+        IGVM_VHS_MEMORY_MAP_ENTRY {
+            starting_gpa_page_number: range.base / HV_PAGE_SIZE,
+            number_of_pages: range.size as u64 / HV_PAGE_SIZE,
+            entry_type: IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_MEMORY,
+            flags: 0,
+            reserved: 0,
+        }
+    } else {
+        IGVM_VHS_MEMORY_MAP_ENTRY {
+            starting_gpa_page_number: range.base / HV_PAGE_SIZE,
+            number_of_pages: range.size as u64 / HV_PAGE_SIZE,
+            entry_type: IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_PLATFORM_RESERVED,
+            flags: 0,
+            reserved: 0,
+        }
     }
 }
 
