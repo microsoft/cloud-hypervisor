@@ -15,6 +15,8 @@ use crate::config::{
     add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
     UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
 };
+use crate::ArchMemRegion;
+use arch::RegionType;
 use crate::config::{NumaConfig, PayloadConfig};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -971,7 +973,25 @@ impl Vm {
 
     #[cfg(feature = "igvm")]
     fn load_igvm(igvm: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
-        let res = igvm_loader::load_igvm(&igvm, memory_manager, Vec::new(), 1, "")
+
+        /*
+        BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable 
+        BIOS-e820: [mem 0x00000000000a0000-0x00000000000fffff] reserved
+        BIOS-e820: [mem 0x0000000000100000-0x00000000001fffff] ACPI data
+        BIOS-e820: [mem 0x0000000001a00000-0x0000000003c79fff] usable
+         */
+        let mut arch_mem_regions: Vec<ArchMemRegion> = Vec::new();
+        arch_mem_regions.push(ArchMemRegion {
+            base: 0x00000000e8000000,
+            size: 0x10000000,
+            r_type: RegionType::Reserved,
+        });
+        arch_mem_regions.push(ArchMemRegion {
+            base: 0x200000,
+            size: 2 * 1024 * 1024 * 1024 - 0x200000,
+            r_type: RegionType::Ram,
+        });
+        let res = igvm_loader::load_igvm(&igvm, memory_manager, arch_mem_regions, 1, "")
             .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
