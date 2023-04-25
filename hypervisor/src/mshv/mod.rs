@@ -759,7 +759,7 @@ impl cpu::Vcpu for MshvVcpu {
                             unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
                         let exit_info1 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
                         let exit_info2 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info2;
-                        let pfn: u64 = unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };;
+                        let pfn: u64 = unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
                         println!("Software exit code {:0x}", _exit_code);
                         println!("Software exit exit_info1111 {:0x}", exit_info1);
@@ -844,6 +844,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     as_uint32: (exit_info1 & 0xFFFFFFFF) as u32,
                                 };
                                 let port = unsafe { port_into.__bindgen_anon_1.intercepted_port() };
+                                println!("$$$$$$ Port we are trying to handle {0:0x}", port);
                                 let mut len = 4;
                                 unsafe {
                                     if port_into.__bindgen_anon_1.operand_size_16bit() == 1 {
@@ -852,8 +853,12 @@ impl cpu::Vcpu for MshvVcpu {
                                         len = 1;
                                     }
                                 }
+                                println!("$$$$$$ Port we are trying to handle len {0:0x}", len);
                                 let is_write =
-                                    unsafe { port_into.__bindgen_anon_1.access_type() == 1 };
+                                    unsafe { port_into.__bindgen_anon_1.access_type() == 0 };
+                                println!("$$$$$$ Port we are trying to handle write {}", is_write);
+                                println!("$$$$$$ Port we are trying to handle gpa {0:0x}", gpa);
+                                println!("$$$$$$ Port we are trying to handle addr {0:0x}", addr);
                                 let mut arg: mshv_read_write_gpa = mshv_read_write_gpa::default();
                                 arg.base_gpa = gpa + 0x01F8;
                                 arg.byte_count = 8;
@@ -882,9 +887,17 @@ impl cpu::Vcpu for MshvVcpu {
                                     let mask = 0xffffffff >> (32 - len * 8);
                                     let eax = (rax as u32 & !mask) | (v & mask);
                                     let ret_rax = eax as u64;
-                                    arg.data.copy_from_slice(&ret_rax.to_le_bytes());
+                                    arg.data[0..8].copy_from_slice(&ret_rax.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
+
+                                let mut arg_exit1: mshv_read_write_gpa =
+                                mshv_read_write_gpa::default();
+                                let value1 = 0_u64;
+                                arg_exit1.base_gpa = gpa + 0x398;
+                                arg_exit1.byte_count = 8;
+                                arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
+                                self.fd.gpa_write(&mut arg_exit1).unwrap();
                             }
                             _ => {
                                 panic!("Unhandled exit code: {:0x}", _exit_code);
