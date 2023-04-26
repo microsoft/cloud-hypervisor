@@ -846,7 +846,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     as_uint32: (exit_info1 & 0xFFFFFFFF) as u32,
                                 };
                                 let port = unsafe { port_into.__bindgen_anon_1.intercepted_port() };
-                                println!("$$$$$$ Port we are trying to handle {0:0x}", port);
+                                // println!("$$$$$$ Port we are trying to handle {0:0x}", port);
                                 let mut len = 4;
                                 unsafe {
                                     if port_into.__bindgen_anon_1.operand_size_16bit() == 1 {
@@ -871,7 +871,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data = (rax as u32).to_le_bytes();
                                 if is_write {
                                     if let Some(vm_ops) = &self.vm_ops {
-                                        vm_ops.pio_write(addr, &data[0..len]).map_err(|e| {
+                                        vm_ops.pio_write(port.into(), &data[0..len]).map_err(|e| {
                                             cpu::HypervisorCpuError::RunVcpu(e.into())
                                         })?;
                                     }
@@ -885,10 +885,10 @@ impl cpu::Vcpu for MshvVcpu {
                                     }
 
                                     let v = u32::from_le_bytes(data);
-                                    /* Preserve high bits in EAX but clear out high bits in RAX */
-                                    let mask = 0xffffffff >> (32 - len * 8);
-                                    let eax = (rax as u32 & !mask) | (v & mask);
-                                    let ret_rax = eax as u64;
+                                    // /* Preserve high bits in EAX but clear out high bits in RAX */
+                                    // let mask = 0xffffffff >> (32 - len * 8);
+                                    // let eax = (rax as u32 & !mask) | (v & mask);
+                                    let ret_rax = v as u64;
                                     arg.data[0..8].copy_from_slice(&ret_rax.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
