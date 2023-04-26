@@ -697,7 +697,7 @@ impl cpu::Vcpu for MshvVcpu {
 
                         let mut ghcb_gpa = hv_x64_register_sev_ghcb::default();
                         unsafe {
-                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_msr.__bindgen_anon_2.gpa_page_number());
+                            // println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_msr.__bindgen_anon_2.gpa_page_number());
                             ghcb_gpa.__bindgen_anon_1.set_enabled(1);
                             ghcb_gpa.__bindgen_anon_1.set_page_number(ghcb_msr.__bindgen_anon_2.gpa_page_number());
 
@@ -720,7 +720,7 @@ impl cpu::Vcpu for MshvVcpu {
                             set_registers_64!(self.fd, reg_name_value).map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
                     } else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
-                        println!("GHCB_INFO_SEV_INFO_REQUEST");
+                        // println!("GHCB_INFO_SEV_INFO_REQUEST");
                         let function = 0x8000_001F;
                         let cpu_leaf = self.fd.get_cpuid_values(function, 0).unwrap();
                         let ebx = cpu_leaf[1];
@@ -735,13 +735,13 @@ impl cpu::Vcpu for MshvVcpu {
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     } else if op == GHCB_INFO_HYP_FEATURE_REQUEST as u64 {
-                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
+                        // println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
                         // GHCB data must be zero
                         assert!(ghcb_data == 0);
 
                         let mut write_msr: u64 = GHCB_INFO_HYP_FEATURE_RESPONSE as u64;
                         write_msr = write_msr | ((0x1 << GHCB_INFO_BIT_WIDTH) as u64);
-                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
+                        // println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value =
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
@@ -753,7 +753,7 @@ impl cpu::Vcpu for MshvVcpu {
                             print!("{}", s);
                         }
                     } else if op == GHCB_INFO_NORMAL as u64 {
-                        println!("GHCB_INFO_NORMAL");
+                        // println!("GHCB_INFO_NORMAL");
                         // SAFETY: access_info is valid, otherwise we won't be here
                         let _exit_code =
                             unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
@@ -762,11 +762,11 @@ impl cpu::Vcpu for MshvVcpu {
                         let sw_scratch = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
                         let pfn: u64 = unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
-                        println!("Software exit code {:0x}", _exit_code);
-                        println!("Software exit exit_info1 {:0x}", exit_info1);
-                        println!("Software exit exit_info2 {:0x}", exit_info2);
-                        println!("Software exit sw_scratch {:0x}",sw_scratch);
-                        println!("Software exit pfn {:0x}", gpa);
+                        // println!("Software exit code {:0x}", _exit_code);
+                        // println!("Software exit exit_info1 {:0x}", exit_info1);
+                        // println!("Software exit exit_info2 {:0x}", exit_info2);
+                        // println!("Software exit sw_scratch {:0x}",sw_scratch);
+                        // println!("Software exit pfn {:0x}", gpa);
                         match _exit_code {
                             SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1 {
                                 SVM_NAE_HV_DOORBELL_PAGE_GET_PREFERRED => {
@@ -855,12 +855,12 @@ impl cpu::Vcpu for MshvVcpu {
                                         len = 1;
                                     }
                                 }
-                                println!("$$$$$$ Port we are trying to handle len {0:0x}", len);
+                                // println!("$$$$$$ Port we are trying to handle len {0:0x}", len);
                                 let is_write =
                                     unsafe { port_into.__bindgen_anon_1.access_type() == 0 };
-                                println!("$$$$$$ Port we are trying to handle write {}", is_write);
-                                println!("$$$$$$ Port we are trying to handle gpa {0:0x}", gpa);
-                                println!("$$$$$$ Port we are trying to handle addr {0:0x}", addr);
+                                // println!("$$$$$$ Port we are trying to handle write {}", is_write);
+                                // println!("$$$$$$ Port we are trying to handle gpa {0:0x}", gpa);
+                                // println!("$$$$$$ Port we are trying to handle addr {0:0x}", addr);
                                 let mut arg: mshv_read_write_gpa = mshv_read_write_gpa::default();
                                 arg.base_gpa = gpa + 0x01F8;
                                 arg.byte_count = 8;
