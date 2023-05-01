@@ -612,7 +612,8 @@ impl cpu::Vcpu for MshvVcpu {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
-                    info!("Unaccepted GPA: GVA: {:x}, GPA: {:x}", gva, gpa);
+                    let GB = gpa /(1024*1024*1024);
+                    info!("Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}", gva, gpa, GB);
                     Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit: Unaccepted GPA"
                     )))
@@ -706,6 +707,7 @@ impl cpu::Vcpu for MshvVcpu {
                             ];
 
                             set_registers_64!(self.fd, reg_name_value).map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x} Done", reg_name_value[0].1);
                         }
 
                         let mut resp_ghcb_msr = svm_ghcb_msr::default();
@@ -725,7 +727,7 @@ impl cpu::Vcpu for MshvVcpu {
                         let cpu_leaf = self.fd.get_cpuid_values(function, 0).unwrap();
                         let ebx = cpu_leaf[1];
                         let pbit_encryption: u8 = (ebx & 0x3f) as u8;
-                        println!("EBX: {:0x}, bit: {:0x}", ebx, pbit_encryption);
+                        
                         let mut write_msr: u64 = GHCB_INFO_SEV_INFO_RESPONSE as u64;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MAX as u64) << 48;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MIN as u64) << 32;
@@ -734,6 +736,7 @@ impl cpu::Vcpu for MshvVcpu {
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                        println!("GHCB_INFO_SEV_INFO_REQUEST EBX: {:0x}, bit: {:0x} Done", ebx, pbit_encryption);
                     } else if op == GHCB_INFO_HYP_FEATURE_REQUEST as u64 {
                         // println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
                         // GHCB data must be zero
@@ -741,11 +744,12 @@ impl cpu::Vcpu for MshvVcpu {
 
                         let mut write_msr: u64 = GHCB_INFO_HYP_FEATURE_RESPONSE as u64;
                         write_msr = write_msr | ((0x1 << GHCB_INFO_BIT_WIDTH) as u64);
-                        // println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
+                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value =
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x} done", write_msr);
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
                         let data = unsafe { ghcb_msr.as_uint64 } >> 16;
                         let bytes = data.to_le_bytes();
@@ -867,30 +871,36 @@ impl cpu::Vcpu for MshvVcpu {
                                 self.fd.gpa_read(&mut arg).unwrap();
                                 let mut bytes: [u8; 8] = [0u8; 8];
                                 bytes.copy_from_slice(&arg.data[0..8]);
-                                let rax: u64 = u64::from_be_bytes(bytes);
+                                let rax: u64 = u64::from_le_bytes(bytes);
                                 let data = (rax as u32).to_le_bytes();
                                 if is_write {
                                     if let Some(vm_ops) = &self.vm_ops {
+                                        //println!("gpamwrite bytes: {:02X?}", bytes);
+                                        //println!("pio_write bytes: {:02X?}", &data[0..len]);
                                         vm_ops.pio_write(port.into(), &data[0..len]).map_err(|e| {
                                             cpu::HypervisorCpuError::RunVcpu(e.into())
                                         })?;
+                                        //println!("######## Ports write: {:0x}, value {:0x} len {}", port, rax, len);
                                     }
                                 } else {
                                     let mut data: [u8; 4] = [0; 4];
-
+                                    //println!("######## Ports read: Port: {:0x} len: {}", port, len);
                                     if let Some(vm_ops) = &self.vm_ops {
                                         vm_ops.pio_read(port.into(), &mut data[0..len]).map_err(
                                             |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
                                         )?;
                                     }
 
-                                    let v = u32::from_le_bytes(data);
+                                    let mut v = u32::from_le_bytes(data);
+                                    //v =  ((v) & ((1u64 << ((len) * 8)) - 1) as u32);
                                     // /* Preserve high bits in EAX but clear out high bits in RAX */
                                     // let mask = 0xffffffff >> (32 - len * 8);
                                     // let eax = (rax as u32 & !mask) | (v & mask);
                                     let ret_rax = v as u64;
                                     arg.data[0..8].copy_from_slice(&ret_rax.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
+                                    //println!("######## Ports read done: value: {:0x} ", ret_rax);
+
                                 }
 
                                 let mut arg_exit1: mshv_read_write_gpa =
@@ -900,6 +910,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 arg_exit1.byte_count = 8;
                                 arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                 self.fd.gpa_write(&mut arg_exit1).unwrap();
+                                //println!("$$$$$$$: Port handle done is_write( {:?}): GPA: {:0x}, Port: {:0x}, ", is_write, gpa, port);
                             }
                             _ => {
                                 panic!("Unhandled exit code: {:0x}", _exit_code);
@@ -1385,38 +1396,46 @@ impl vm::Vm for MshvVm {
         addr: &IoEventAddress,
         datamatch: Option<DataMatch>,
     ) -> vm::Result<()> {
-        let addr = &mshv_ioctls::IoEventAddress::from(*addr);
-        debug!(
-            "register_ioevent fd {} addr {:x?} datamatch {:?}",
-            fd.as_raw_fd(),
-            addr,
-            datamatch
-        );
-        if let Some(dm) = datamatch {
-            match dm {
-                vm::DataMatch::DataMatch32(mshv_dm32) => self
-                    .fd
-                    .register_ioevent(fd, addr, mshv_dm32)
-                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
-                vm::DataMatch::DataMatch64(mshv_dm64) => self
-                    .fd
-                    .register_ioevent(fd, addr, mshv_dm64)
-                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+        #[cfg(not(feature = "snp"))] {
+            let addr = &mshv_ioctls::IoEventAddress::from(*addr);
+            debug!(
+                "register_ioevent fd {} addr {:x?} datamatch {:?}",
+                fd.as_raw_fd(),
+                addr,
+                datamatch
+            );
+            if let Some(dm) = datamatch {
+                match dm {
+                    vm::DataMatch::DataMatch32(mshv_dm32) => self
+                        .fd
+                        .register_ioevent(fd, addr, mshv_dm32)
+                        .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+                    vm::DataMatch::DataMatch64(mshv_dm64) => self
+                        .fd
+                        .register_ioevent(fd, addr, mshv_dm64)
+                        .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+                }
+            } else {
+                self.fd
+                    .register_ioevent(fd, addr, NoDatamatch)
+                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
             }
-        } else {
-            self.fd
-                .register_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
         }
+        #[cfg(feature = "snp")]
+        Ok(())
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
-        let addr = &mshv_ioctls::IoEventAddress::from(*addr);
-        debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
+        #[cfg(not(feature = "snp"))] {
+            let addr = &mshv_ioctls::IoEventAddress::from(*addr);
+            debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
-        self.fd
-            .unregister_ioevent(fd, addr, NoDatamatch)
-            .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+            self.fd
+                .unregister_ioevent(fd, addr, NoDatamatch)
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+        }
+        #[cfg(feature = "snp")]
+        Ok(())
     }
 
     /// Creates a guest physical memory region.

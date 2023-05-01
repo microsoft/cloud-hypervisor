@@ -991,7 +991,7 @@ impl DeviceManager {
             } else {
                 1
             };
-
+        println!("DeviceManager: new num_pci_segments {:?}",num_pci_segments);
         let start_of_device_area = memory_manager.lock().unwrap().start_of_device_area().0;
         let end_of_device_area = memory_manager.lock().unwrap().end_of_device_area().0;
 
@@ -3306,6 +3306,10 @@ impl DeviceManager {
             .map_err(DeviceManagerError::AddPciDevice)?;
 
         self.bus_devices.push(Arc::clone(&bus_device));
+
+        for b in bars.iter() {
+            info!("{:x?} {:x?}", b.addr(), b.size());
+        }
 
         pci_bus
             .register_mapping(

@@ -594,16 +594,6 @@ impl Vm {
         )
         .map_err(Error::DeviceManager)?;
 
-        #[cfg(feature = "snp")]
-        if !config.lock().unwrap().is_snp_enabled() {
-            device_manager
-                .lock()
-                .unwrap()
-                .create_devices(serial_pty, console_pty, console_resize_pipe)
-                .map_err(Error::DeviceManager)?;
-        }
-
-        #[cfg(not(feature = "snp"))]
         device_manager
             .lock()
             .unwrap()
