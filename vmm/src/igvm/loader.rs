@@ -220,11 +220,7 @@ impl ImageLoad for Loader {
         acceptance: BootPageAcceptance,
         data: &[u8],
     ) -> Result<(), Error> {
-        debug!(
-            "importing pages: {:?}, {:?}, {:?}",
-            page_base, page_count, acceptance
-        );
-
+        
         // Track accepted ranges for duplicate imports.
         self.accept_new_range(page_base, page_count, acceptance)?;
 
