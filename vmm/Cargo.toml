@@ -12,7 +12,7 @@ mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 snp = ["arch/snp", "hypervisor/snp"]
 tracing = ["tracer/tracing"]
-igvm = ["igvm-parser", "zerocopy", "arch/igvm"]
+igvm = ["igvm-parser", "zerocopy", "arch/igvm", "mshv-bindings"]
 
 [dependencies]
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main"  }
@@ -60,3 +60,4 @@ vm-virtio = { path = "../vm-virtio" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
 zerocopy = { version = "0.6.1", optional = true }
 igvm-parser = { path = "../../igvm-parser", optional  = true }
+mshv-bindings = { git = "https://github.com/rust-vmm/mshv", branch = "main", features = ["with-serde", "fam-wrappers"], optional  = true }

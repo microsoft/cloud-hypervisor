@@ -77,6 +77,11 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to get Lapic state: {0}")]
     GetlapicState(#[source] anyhow::Error),
+        ///
+    /// Setting MSR entries error
+    ///
+    #[error("Failed to set CPUID entries: {0}")]
+    GetCpuidVales(#[source] anyhow::Error),
     ///
     /// Setting MSR entries error
     ///
@@ -456,6 +461,9 @@ pub trait Vcpu: Send + Sync {
     ///
     fn tsc_khz(&self) -> Result<Option<u32>> {
         Ok(None)
+    }
+    fn get_cpuid_values(&self, function: u32, index: u32) -> Result<[u32; 4]> {
+        unimplemented!()
     }
     #[cfg(feature = "snp")]
     fn set_sev_control_register(&self, reg: u64) -> Result<()> {
