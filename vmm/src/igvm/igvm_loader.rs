@@ -47,6 +47,7 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
+pub use mshv_bindings::*;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -256,6 +257,11 @@ pub fn load_igvm(
                         BootPageAcceptance::SecretsPage
                     }
                     IgvmPageDataType::CPUID_DATA => {
+                        unsafe {
+                            let cpuid_page_p: *const hv_psp_cpuid_page = data.as_ptr() as *const hv_psp_cpuid_page;
+                            let cpuid_page: &hv_psp_cpuid_page = &*cpuid_page_p;
+                            println!("Really this is correct count: {:x}", cpuid_page.count);
+                        }
                         gpas.push(GpaPages {
                             gpa: *gpa,
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,

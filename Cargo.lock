@@ -2382,6 +2382,7 @@ dependencies = [
  "linux-loader",
  "log",
  "micro_http",
+ "mshv-bindings",
  "net_util",
  "once_cell",
  "option_parser",

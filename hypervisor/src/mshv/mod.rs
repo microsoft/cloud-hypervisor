@@ -447,6 +447,10 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
     }
 
+    fn get_cpuid_values(&self, function: u32, index: u32) -> cpu::Result<[u32; 4]> {
+        self.fd.get_cpuid_values(function, index).map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
+    }
+
     #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call to enable HyperV SynIC
