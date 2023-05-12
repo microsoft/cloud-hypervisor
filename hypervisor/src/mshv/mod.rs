@@ -612,8 +612,11 @@ impl cpu::Vcpu for MshvVcpu {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
-                    let GB = gpa /(1024*1024*1024);
-                    info!("Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}", gva, gpa, GB);
+                    let GB = gpa / (1024 * 1024 * 1024);
+                    info!(
+                        "Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}",
+                        gva, gpa, GB
+                    );
                     Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit: Unaccepted GPA"
                     )))
@@ -663,7 +666,9 @@ impl cpu::Vcpu for MshvVcpu {
                     //let ghcb_msr: u64 = info.ghcb_msr;
                     //let op = ghcb_msr & GHCB_INFO_MASK as u64;
                     let ghcb_data = (info.ghcb_msr >> GHCB_INFO_BIT_WIDTH) as u64;
-                    let ghcb_msr = svm_ghcb_msr { as_uint64: info.ghcb_msr };
+                    let ghcb_msr = svm_ghcb_msr {
+                        as_uint64: info.ghcb_msr,
+                    };
                     let op = unsafe { ghcb_msr.__bindgen_anon_2.ghcb_info() as u64 };
                     //println!("VMG_EXIT: ");
                     // Don't understand the need for this check????
@@ -700,26 +705,39 @@ impl cpu::Vcpu for MshvVcpu {
                         unsafe {
                             // println!("GHCB_INFO_REGISTER_REQUEST: {:0x}", ghcb_msr.__bindgen_anon_2.gpa_page_number());
                             ghcb_gpa.__bindgen_anon_1.set_enabled(1);
-                            ghcb_gpa.__bindgen_anon_1.set_page_number(ghcb_msr.__bindgen_anon_2.gpa_page_number());
+                            ghcb_gpa
+                                .__bindgen_anon_1
+                                .set_page_number(ghcb_msr.__bindgen_anon_2.gpa_page_number());
 
-                            let reg_name_value = [
-                                (hv_register_name_HV_X64_REGISTER_SEV_GHCB_GPA, ghcb_gpa.as_uint64)
-                            ];
+                            let reg_name_value = [(
+                                hv_register_name_HV_X64_REGISTER_SEV_GHCB_GPA,
+                                ghcb_gpa.as_uint64,
+                            )];
 
-                            set_registers_64!(self.fd, reg_name_value).map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                            println!("GHCB_INFO_REGISTER_REQUEST: {:0x} Done", reg_name_value[0].1);
+                            set_registers_64!(self.fd, reg_name_value)
+                                .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                            println!(
+                                "GHCB_INFO_REGISTER_REQUEST: {:0x} Done",
+                                reg_name_value[0].1
+                            );
                         }
 
                         let mut resp_ghcb_msr = svm_ghcb_msr::default();
                         unsafe {
-                            resp_ghcb_msr.__bindgen_anon_2.set_ghcb_info(GHCB_INFO_REGISTER_RESPONSE as u64);
-                            resp_ghcb_msr.__bindgen_anon_2.set_gpa_page_number(ghcb_msr.__bindgen_anon_2.gpa_page_number());
+                            resp_ghcb_msr
+                                .__bindgen_anon_2
+                                .set_ghcb_info(GHCB_INFO_REGISTER_RESPONSE as u64);
+                            resp_ghcb_msr
+                                .__bindgen_anon_2
+                                .set_gpa_page_number(ghcb_msr.__bindgen_anon_2.gpa_page_number());
 
-                            let reg_name_value = [
-                                (hv_register_name_HV_X64_REGISTER_GHCB, resp_ghcb_msr.as_uint64)
-                            ];
+                            let reg_name_value = [(
+                                hv_register_name_HV_X64_REGISTER_GHCB,
+                                resp_ghcb_msr.as_uint64,
+                            )];
 
-                            set_registers_64!(self.fd, reg_name_value).map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+                            set_registers_64!(self.fd, reg_name_value)
+                                .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
                     } else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
                         // println!("GHCB_INFO_SEV_INFO_REQUEST");
@@ -727,7 +745,7 @@ impl cpu::Vcpu for MshvVcpu {
                         let cpu_leaf = self.fd.get_cpuid_values(function, 0).unwrap();
                         let ebx = cpu_leaf[1];
                         let pbit_encryption: u8 = (ebx & 0x3f) as u8;
-                        
+
                         let mut write_msr: u64 = GHCB_INFO_SEV_INFO_RESPONSE as u64;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MAX as u64) << 48;
                         write_msr |= (GHCB_PROTOCOL_VERSION_MIN as u64) << 32;
@@ -736,7 +754,10 @@ impl cpu::Vcpu for MshvVcpu {
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                        println!("GHCB_INFO_SEV_INFO_REQUEST EBX: {:0x}, bit: {:0x} Done", ebx, pbit_encryption);
+                        println!(
+                            "GHCB_INFO_SEV_INFO_REQUEST EBX: {:0x}, bit: {:0x} Done",
+                            ebx, pbit_encryption
+                        );
                     } else if op == GHCB_INFO_HYP_FEATURE_REQUEST as u64 {
                         // println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
                         // GHCB data must be zero
@@ -749,7 +770,10 @@ impl cpu::Vcpu for MshvVcpu {
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x} done", write_msr);
+                        println!(
+                            "GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x} done",
+                            write_msr
+                        );
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
                         let data = unsafe { ghcb_msr.as_uint64 } >> 16;
                         let bytes = data.to_le_bytes();
@@ -761,10 +785,12 @@ impl cpu::Vcpu for MshvVcpu {
                         // SAFETY: access_info is valid, otherwise we won't be here
                         let _exit_code =
                             unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
-                        let exit_info1 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
+                        let exit_info1 =
+                            info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
                         let exit_info2 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info2;
                         let sw_scratch = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
-                        let pfn: u64 = unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
+                        let pfn: u64 =
+                            unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
                         // println!("Software exit code {:0x}", _exit_code);
                         // println!("Software exit exit_info1 {:0x}", exit_info1);
@@ -783,19 +809,24 @@ impl cpu::Vcpu for MshvVcpu {
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 SVM_NAE_HV_DOORBELL_PAGE_SET => {
-                                    let mut ghcb_doorbell_gpa = hv_x64_register_sev_hv_doorbell::default();
+                                    let mut ghcb_doorbell_gpa =
+                                        hv_x64_register_sev_hv_doorbell::default();
                                     unsafe {
                                         ghcb_doorbell_gpa.__bindgen_anon_1.set_enabled(1);
-                                        ghcb_doorbell_gpa.__bindgen_anon_1.set_page_number(exit_info2 >> 12);
+                                        ghcb_doorbell_gpa
+                                            .__bindgen_anon_1
+                                            .set_page_number(exit_info2 >> 12);
                                     }
                                     let write_msr = unsafe { ghcb_doorbell_gpa.as_uint64 };
-                                    let arr_reg_name_value =
-                                        [(hv_register_name_HV_X64_REGISTER_SEV_DOORBELL_GPA, write_msr)];
+                                    let arr_reg_name_value = [(
+                                        hv_register_name_HV_X64_REGISTER_SEV_DOORBELL_GPA,
+                                        write_msr,
+                                    )];
                                     set_registers_64!(self.fd, arr_reg_name_value).map_err(
                                         |e| cpu::HypervisorCpuError::SetRegister(e.into()),
                                     )?;
                                     let mut arg: mshv_read_write_gpa =
-                                    mshv_read_write_gpa::default();
+                                        mshv_read_write_gpa::default();
                                     let value = exit_info2;
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
@@ -809,9 +840,8 @@ impl cpu::Vcpu for MshvVcpu {
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 SVM_NAE_HV_DOORBELL_PAGE_QUERY => {
-                                    let reg_names = [
-                                        hv_register_name_HV_X64_REGISTER_SEV_DOORBELL_GPA,
-                                    ];
+                                    let reg_names =
+                                        [hv_register_name_HV_X64_REGISTER_SEV_DOORBELL_GPA];
                                     let mut reg_assocs: Vec<hv_register_assoc> = reg_names
                                         .iter()
                                         .map(|name| hv_register_assoc {
@@ -822,7 +852,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     self.fd.get_reg(&mut reg_assocs).unwrap();
                                     let value = unsafe { reg_assocs[0].value.reg64 };
                                     let mut arg: mshv_read_write_gpa =
-                                    mshv_read_write_gpa::default();
+                                        mshv_read_write_gpa::default();
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
                                     arg.data.copy_from_slice(&value.to_le_bytes());
@@ -831,7 +861,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 SVM_NAE_HV_DOORBELL_PAGE_CLEAR => {
                                     let value: u64 = 0;
                                     let mut arg: mshv_read_write_gpa =
-                                    mshv_read_write_gpa::default();
+                                        mshv_read_write_gpa::default();
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
                                     arg.data.copy_from_slice(&value.to_le_bytes());
@@ -877,9 +907,9 @@ impl cpu::Vcpu for MshvVcpu {
                                     if let Some(vm_ops) = &self.vm_ops {
                                         //println!("gpamwrite bytes: {:02X?}", bytes);
                                         //println!("pio_write bytes: {:02X?}", &data[0..len]);
-                                        vm_ops.pio_write(port.into(), &data[0..len]).map_err(|e| {
-                                            cpu::HypervisorCpuError::RunVcpu(e.into())
-                                        })?;
+                                        vm_ops.pio_write(port.into(), &data[0..len]).map_err(
+                                            |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
+                                        )?;
                                         //println!("######## Ports write: {:0x}, value {:0x} len {}", port, rax, len);
                                     }
                                 } else {
@@ -900,11 +930,10 @@ impl cpu::Vcpu for MshvVcpu {
                                     arg.data[0..8].copy_from_slice(&ret_rax.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                     //println!("######## Ports read done: value: {:0x} ", ret_rax);
-
                                 }
 
                                 let mut arg_exit1: mshv_read_write_gpa =
-                                mshv_read_write_gpa::default();
+                                    mshv_read_write_gpa::default();
                                 let value1 = 0_u64;
                                 arg_exit1.base_gpa = gpa + 0x398;
                                 arg_exit1.byte_count = 8;
@@ -1396,7 +1425,8 @@ impl vm::Vm for MshvVm {
         addr: &IoEventAddress,
         datamatch: Option<DataMatch>,
     ) -> vm::Result<()> {
-        #[cfg(not(feature = "snp"))] {
+        #[cfg(not(feature = "snp"))]
+        {
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!(
                 "register_ioevent fd {} addr {:x?} datamatch {:?}",
@@ -1426,7 +1456,8 @@ impl vm::Vm for MshvVm {
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
-        #[cfg(not(feature = "snp"))] {
+        #[cfg(not(feature = "snp"))]
+        {
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 

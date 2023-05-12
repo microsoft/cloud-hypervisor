@@ -15,8 +15,6 @@ use crate::config::{
     add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
     UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
 };
-use crate::ArchMemRegion;
-use arch::RegionType;
 use crate::config::{NumaConfig, PayloadConfig};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::{
@@ -37,6 +35,7 @@ use crate::migration::get_vm_snapshot;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
 use crate::migration::{url_to_path, SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE};
+use crate::ArchMemRegion;
 use crate::GuestMemoryMmap;
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
@@ -50,6 +49,7 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
+use arch::RegionType;
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller;
@@ -962,10 +962,13 @@ impl Vm {
     }
 
     #[cfg(feature = "igvm")]
-    fn load_igvm(igvm: File, memory_manager: Arc<Mutex<MemoryManager>>) -> Result<EntryPoint> {
-
+    fn load_igvm(
+        igvm: File,
+        memory_manager: Arc<Mutex<MemoryManager>>,
+        cpu_manager: Arc<Mutex<CpuManager>>,
+    ) -> Result<EntryPoint> {
         /*
-        BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable 
+        BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
         BIOS-e820: [mem 0x00000000000a0000-0x00000000000fffff] reserved
         BIOS-e820: [mem 0x0000000000100000-0x00000000001fffff] ACPI data
         BIOS-e820: [mem 0x0000000001a00000-0x0000000003c79fff] usable
@@ -981,8 +984,9 @@ impl Vm {
             size: 2 * 1024 * 1024 * 1024 - 0x200000,
             r_type: RegionType::Ram,
         });
-        let res = igvm_loader::load_igvm(&igvm, memory_manager, arch_mem_regions, 1, "")
-            .map_err(Error::IgvmLoad)?;
+        let res =
+            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 1, "")
+                .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
@@ -1035,6 +1039,7 @@ impl Vm {
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        cpu_manager: Arc<Mutex<CpuManager>>,
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
         let firmware = &payload.firmware;
@@ -1056,7 +1061,7 @@ impl Vm {
             #[cfg(feature = "igvm")]
             {
                 let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
-                return Self::load_igvm(igvm, memory_manager);
+                return Self::load_igvm(igvm, memory_manager, cpu_manager);
             }
         }
         Err(Error::InvalidPayload)
@@ -1098,11 +1103,12 @@ impl Vm {
             .as_ref()
             .map(|payload| {
                 let memory_manager = memory_manager.clone();
+                let cpu_manager = cpu_manager.clone();
                 let payload = payload.clone();
 
                 std::thread::Builder::new()
                     .name("payload_loader".into())
-                    .spawn(move || Self::load_payload(&payload, memory_manager))
+                    .spawn(move || Self::load_payload(&payload, memory_manager, cpu_manager))
                     .map_err(Error::KernelLoadThreadSpawn)
             })
             .transpose()
