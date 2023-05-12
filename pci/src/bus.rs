@@ -206,7 +206,6 @@ impl PciConfigIo {
     pub fn config_space_read(&self) -> u32 {
         let enabled = (self.config_address & 0x8000_0000) != 0;
         if !enabled {
-
             //println!("MUISLAM: config_space_read: line: {}", line!());
             return 0xffff_ffff;
         }
@@ -318,7 +317,7 @@ impl BusDevice for PciConfigIo {
 
         // Only allow reads to the register boundary.
         let start = offset as usize % 4;
-        
+
         let end = start + data.len();
         //println!("PciConfigIo: offset: {:?} start {:?} end {:?}", offset, start, end);
         if end <= 4 {

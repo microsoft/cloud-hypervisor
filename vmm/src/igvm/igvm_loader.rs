@@ -2,6 +2,7 @@
 
 //! Loader implementation to load IGVM files.
 
+use crate::cpu::{CpuManager, Error as CpuManagerError};
 use crate::igvm::loader::ImageLoad;
 use crate::igvm::loader::Loader;
 use crate::igvm::IgvmLoadedInfo;
@@ -134,6 +135,7 @@ struct GpaPages {
 pub fn load_igvm(
     mut file: &std::fs::File,
     memory_manager: Arc<Mutex<MemoryManager>>,
+    cpu_manager: Arc<Mutex<CpuManager>>,
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
