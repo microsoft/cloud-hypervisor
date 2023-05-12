@@ -22,7 +22,7 @@ use crate::config::{NumaConfig, PayloadConfig};
 use crate::coredump::{
     CpuElf64Writable, DumpState, Elf64Writable, GuestDebuggable, GuestDebuggableError, NoteDescType,
 };
-use crate::cpu;
+use crate::cpu::{self, CpuManager};
 use crate::device_manager::{DeviceManager, DeviceManagerError, PtyPair};
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
@@ -533,13 +533,6 @@ impl Vm {
         )
         .map_err(Error::CpuManager)?;
 
-
-        let load_payload_handle = if snapshot.is_none() {
-            Self::load_payload_async(&memory_manager, &config)?
-        } else {
-            None
-        };
-
         #[cfg(target_arch = "x86_64")]
         cpu_manager
             .lock()
@@ -567,6 +560,12 @@ impl Vm {
             .unwrap()
             .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
             .map_err(Error::CpuManager)?;
+
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(&memory_manager, &cpu_manager, &config)?
+        } else {
+            None
+        };
 
         #[cfg(feature = "tdx")]
         let dynamic = !tdx_enabled;
@@ -1083,6 +1082,7 @@ impl Vm {
 
     fn load_payload_async(
         memory_manager: &Arc<Mutex<MemoryManager>>,
+        cpu_manager: &Arc<Mutex<CpuManager>>,
         config: &Arc<Mutex<VmConfig>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
