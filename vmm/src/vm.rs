@@ -486,12 +486,6 @@ impl Vm {
             .validate()
             .map_err(Error::ConfigValidation)?;
 
-        let load_payload_handle = if snapshot.is_none() {
-            Self::load_payload_async(&memory_manager, &config)?
-        } else {
-            None
-        };
-
         info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
@@ -538,6 +532,13 @@ impl Vm {
             &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
+
+
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(&memory_manager, &config)?
+        } else {
+            None
+        };
 
         #[cfg(target_arch = "x86_64")]
         cpu_manager
