@@ -447,8 +447,8 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
     }
 
-    fn get_cpuid_values(&self, function: u32, index: u32) -> cpu::Result<[u32; 4]> {
-        self.fd.get_cpuid_values(function, index).map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
+    fn get_cpuid_values(&self, function: u32, index: u32, xfem: u64, xss: u64) -> cpu::Result<[u32; 4]> {
+        self.fd.get_cpuid_values(function, index, xfem, xss).map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -746,7 +746,7 @@ impl cpu::Vcpu for MshvVcpu {
                     } else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
                         // println!("GHCB_INFO_SEV_INFO_REQUEST");
                         let function = 0x8000_001F;
-                        let cpu_leaf = self.fd.get_cpuid_values(function, 0).unwrap();
+                        let cpu_leaf = self.fd.get_cpuid_values(function, 0, 0, 0).unwrap();
                         let ebx = cpu_leaf[1];
                         let pbit_encryption: u8 = (ebx & 0x3f) as u8;
 
