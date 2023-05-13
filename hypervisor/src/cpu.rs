@@ -462,7 +462,7 @@ pub trait Vcpu: Send + Sync {
     fn tsc_khz(&self) -> Result<Option<u32>> {
         Ok(None)
     }
-    fn get_cpuid_values(&self, function: u32, index: u32) -> Result<[u32; 4]> {
+    fn get_cpuid_values(&self, function: u32, index: u32, xfem: u64, xss: u64) -> Result<[u32; 4]> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
