@@ -258,10 +258,29 @@ pub fn load_igvm(
                     }
                     IgvmPageDataType::CPUID_DATA => {
                         unsafe {
-                            let cpuid_page_p: *const hv_psp_cpuid_page = data.as_ptr() as *const hv_psp_cpuid_page;
-                            let cpuid_page: &hv_psp_cpuid_page = &*cpuid_page_p;
-                            println!("Really this is correct count: {:x}", cpuid_page.count);
+                            println!("IgvmPageDataType::CPUID_DATA 1: gpa: {:0x}, data len: {:?}", gpa, data.len());
+                            let cpuid_page_p: *mut hv_psp_cpuid_page = data.as_ptr() as *mut hv_psp_cpuid_page;// as *mut hv_psp_cpuid_page;
+                            let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
+                            println!("IgvmPageDataType::CPUID_DATA 2");
+                            println!("Really this is correct count: {:?}", cpuid_page.count);
+                            let i: usize = 0; /* Type usize */;
+                            for i in 0..cpuid_page.count {
+                                let leaf = cpuid_page.cpuid_leaf_info[i as usize];
+                                let mut in_leaf = cpu_manager.lock().unwrap().get_cpuid_leaf(0, leaf.eax_in, leaf.ecx_in).unwrap();
+                                println!("IN: {:0x} {:0x} xfem:{:?} >>>> OUT {:0x}, {:0x}", leaf.eax_in, leaf.ecx_in, leaf.xss_in, in_leaf[0], in_leaf[1]);
+                                if leaf.eax_in == 1 {
+                                    in_leaf[2] &= 0x7FFFFFFF;
+                                }
+                                cpuid_page.cpuid_leaf_info[i as usize].eax_out = in_leaf[0];
+                                cpuid_page.cpuid_leaf_info[i as usize].ebx_out = in_leaf[1];
+                                cpuid_page.cpuid_leaf_info[i as usize].ecx_out = in_leaf[2];
+                                cpuid_page.cpuid_leaf_info[i as usize].edx_out = in_leaf[3];
+
+                            }
+                            println!("IgvmPageDataType::CPUID_DATA 4");
+                    
                         }
+                        //panic!("IgvmPageDataType::CPUID_DATA");
                         gpas.push(GpaPages {
                             gpa: *gpa,
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
@@ -602,6 +621,6 @@ pub fn load_igvm(
             .complete_isolated_import(loaded_info.snp_id_block)
             .map_err(Error::CompleteIsolatedImport)?;
     }
-
+    println!("loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);
     Ok(loaded_info)
 }

@@ -1802,6 +1802,20 @@ impl CpuManager {
     ) {
         self.interrupt_controller = Some(interrupt_controller);
     }
+
+    pub fn get_cpuid_leaf(
+        &self,
+        cpu_id: u8,
+        eax: u32,
+        ecx: u32,
+    ) -> Result<[u32; 4]> {
+        let leaf_info = unsafe { self.vcpus[usize::from(cpu_id)]
+                    .lock()
+                    .unwrap()
+                    .vcpu
+                    .get_cpuid_values(eax, ecx).unwrap() };
+        Ok(leaf_info)
+    }
 }
 
 struct Cpu {
