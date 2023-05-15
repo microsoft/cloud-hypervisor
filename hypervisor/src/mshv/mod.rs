@@ -883,6 +883,14 @@ impl cpu::Vcpu for MshvVcpu {
                                 let rsp_gpa = exit_info2 as u64;
 
                                 _psp_issue_guest_request(self.vm_fd.clone(), req_gpa, rsp_gpa).unwrap();
+
+                                let mut arg_exit1: mshv_read_write_gpa =
+                                    mshv_read_write_gpa::default();
+                                let value1 = 0_u64;
+                                arg_exit1.base_gpa = gpa + 0x3a0;
+                                arg_exit1.byte_count = 8;
+                                arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
+                                self.fd.gpa_write(&mut arg_exit1).unwrap();
                             }
                             0x7b => {
                                 let addr = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
