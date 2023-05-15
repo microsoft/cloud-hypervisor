@@ -235,6 +235,11 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to complete isolated import: {0}")]
     CompleteIsolatedImport(#[source] anyhow::Error),
+    ///
+    /// PSP issue guest request error
+    ///
+    #[error("Failed to issue PSP guest request: {0}")]
+    PspIssueGuestRequest(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -386,6 +391,14 @@ pub trait Vm: Send + Sync + Any {
         flags: u32,
         acquire: u8,
         gpas: &[u64],
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "snp")]
+    fn psp_issue_guest_request(
+        &self,
+        req_gpa: u64,
+        rsp_gpa: u64,
     ) -> Result<()> {
         unimplemented!()
     }

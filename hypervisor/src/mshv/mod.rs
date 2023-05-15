@@ -878,6 +878,12 @@ impl cpu::Vcpu for MshvVcpu {
                                     );
                                 }
                             },
+                            SVM_EXITCODE_SNP_GUEST_REQUEST => {
+                                let req_gpa = exit_info1 as u64;
+                                let rsp_gpa = exit_info2 as u64;
+
+                                _psp_issue_guest_request(self.vm_fd.clone(), req_gpa, rsp_gpa).unwrap();
+                            }
                             0x7b => {
                                 let addr = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
                                 let port_into = hv_sev_vmgexit_port_info {
@@ -1733,4 +1739,14 @@ fn _modify_gpa_host_access(
     }
     fd.modify_gpa_host_access(&gpa_list[0])
         .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
+}
+
+#[cfg(feature="snp")]
+fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Result<()> {
+    let req = mshv_issue_psp_guest_request {
+        req_gpa,
+        rsp_gpa,
+    };
+
+    fd.psp_issue_guest_request(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }

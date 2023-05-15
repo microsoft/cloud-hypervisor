@@ -266,8 +266,8 @@ pub fn load_igvm(
                             let i: usize = 0; /* Type usize */;
                             for i in 0..cpuid_page.count {
                                 let leaf = cpuid_page.cpuid_leaf_info[i as usize];
+                                println!("IN: {:0x} {:0x} xfem:{:?}", leaf.eax_in, leaf.ecx_in, leaf.xfem_in);
                                 let mut in_leaf = cpu_manager.lock().unwrap().get_cpuid_leaf(0, leaf.eax_in, leaf.ecx_in, leaf.xfem_in, leaf.xss_in).unwrap();
-                                println!("IN: {:0x} {:0x} xfem:{:?} >>>> OUT {:0x}, {:0x}", leaf.eax_in, leaf.ecx_in, leaf.xss_in, in_leaf[0], in_leaf[1]);
                                 if leaf.eax_in == 1 {
                                     in_leaf[2] &= 0x7FFFFFFF;
                                 }
