@@ -385,6 +385,8 @@ pub struct VmParams<'a> {
     pub tpm: Option<&'a str>,
     #[cfg(feature = "igvm")]
     pub igvm: Option<&'a str>,
+    #[cfg(feature = "snp")]
+    pub host_data: Option<&'a str>,
 }
 
 #[derive(Debug)]
