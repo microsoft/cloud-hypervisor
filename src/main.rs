@@ -157,6 +157,11 @@ pub struct TopLevel {
     /// path to IGVM file
     igvm: Option<String>,
 
+    #[cfg(feature = "snp")]
+    #[argh(option, long = "host-data")]
+    /// path to IGVM file
+    host_data: Option<String>,
+
     #[argh(option, long = "firmware")]
     /// path to firmware that is loaded in an architectural specific way
     firmware: Option<String>,
@@ -285,6 +290,9 @@ impl TopLevel {
         let serial = &self.serial;
         #[cfg(feature = "igvm")]
         let igvm = self.igvm.as_deref();
+
+        #[cfg(feature = "snp")]
+        let host_data = self.host_data.as_deref();
         let firmware = self.firmware.as_deref();
         let kernel = self.kernel.as_deref();
         let initramfs = self.initramfs.as_deref();
@@ -380,6 +388,8 @@ impl TopLevel {
             tpm,
             #[cfg(feature = "igvm")]
             igvm,
+            #[cfg(feature = "snp")]
+            host_data,
         }
     }
 }
