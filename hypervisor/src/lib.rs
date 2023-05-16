@@ -142,7 +142,7 @@ pub enum MpState {
     Mshv, /* MSHV does not supprt MpState yet */
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Copy)]
 pub enum IoEventAddress {
     Pio(u64),
     Mmio(u64),

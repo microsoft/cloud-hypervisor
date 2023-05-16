@@ -289,11 +289,13 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             msrs[pos].index = *index;
         }
         let vm_fd = Arc::new(fd);
+        let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(MshvVm {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
+            ioeventfds,
         }))
     }
 
@@ -328,6 +330,7 @@ pub struct MshvVcpu {
     msrs: Vec<MsrEntry>,
     vm_ops: Option<Arc<dyn vm::VmOps>>,
     vm_fd: Arc<VmFd>,
+    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -563,12 +566,19 @@ impl cpu::Vcpu for MshvVcpu {
                 }
                 hv_message_type_HVMSG_UNMAPPED_GPA => {
                     let info = x.to_memory_info().unwrap();
+                    let info1 = info.clone();
                     let insn_len = info.instruction_byte_count as usize;
+
+
+                    let gva = info.guest_virtual_address;
+                    let gpa = info.guest_physical_address;
+                    println!("insn_len : {:?}, gva {:0X}, gpa: {:0X}", insn_len, gva, gpa);
+                    
                     assert!(insn_len > 0 && insn_len <= 16);
 
                     let mut context = MshvEmulatorContext {
                         vcpu: self,
-                        map: (info.guest_virtual_address, info.guest_physical_address),
+                        map: (gva, gpa),
                     };
 
                     // Create a new emulator.
@@ -1253,7 +1263,20 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             gva,
             gpa
         );
+        
+        if let Some((datamatch, efd)) = self
+            .vcpu
+            .ioeventfds
+            .read()
+            .unwrap()
+            .get(&IoEventAddress::Mmio(gpa))
+        {
+            debug!("ioevent {:x} {:x?} {}", gpa, datamatch, efd.as_raw_fd());
 
+            /* TODO: use datamatch to provide the correct semantics */
+            efd.write(1).unwrap();
+        }
+        
         if let Some(vm_ops) = &self.vcpu.vm_ops {
             if vm_ops.guest_mem_write(gpa, data).is_err() {
                 vm_ops
@@ -1323,6 +1346,7 @@ pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
+    ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 
 impl MshvVm {
@@ -1416,6 +1440,7 @@ impl vm::Vm for MshvVm {
             msrs: self.msrs.clone(),
             vm_ops,
             vm_fd: self.fd.clone(),
+            ioeventfds: self.ioeventfds.clone(),
         };
         Ok(Arc::new(vcpu))
     }
@@ -1435,6 +1460,7 @@ impl vm::Vm for MshvVm {
     ) -> vm::Result<()> {
         #[cfg(not(feature = "snp"))]
         {
+            /*
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!(
                 "register_ioevent fd {} addr {:x?} datamatch {:?}",
@@ -1457,7 +1483,15 @@ impl vm::Vm for MshvVm {
                 self.fd
                     .register_ioevent(fd, addr, NoDatamatch)
                     .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
-            }
+            } */
+            
+            let dup_fd = fd.try_clone().unwrap();
+
+            self.ioeventfds
+                .write()
+                .unwrap()
+                .insert(*addr, (datamatch, dup_fd));
+            Ok(()) 
         }
         #[cfg(feature = "snp")]
         Ok(())
@@ -1466,12 +1500,18 @@ impl vm::Vm for MshvVm {
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
         #[cfg(not(feature = "snp"))]
         {
+            /*
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
             self.fd
                 .unregister_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into())) 
+            */
+            
+            self.ioeventfds.write().unwrap().remove(addr).unwrap();
+            Ok(()) 
+            
         }
         #[cfg(feature = "snp")]
         Ok(())
