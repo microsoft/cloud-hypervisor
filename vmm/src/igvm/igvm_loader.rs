@@ -140,6 +140,8 @@ pub fn load_igvm(
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
+    #[cfg(feature = "snp")]
+    mut host_data_file: &std::fs::File,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::new());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
