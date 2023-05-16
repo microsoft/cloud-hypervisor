@@ -768,7 +768,8 @@ impl cpu::Vcpu for MshvVcpu {
                         assert!(ghcb_data == 0);
 
                         let mut write_msr: u64 = GHCB_INFO_HYP_FEATURE_RESPONSE as u64;
-                        write_msr = write_msr | ((0x1 << GHCB_INFO_BIT_WIDTH) as u64);
+                        // Add support for AP creation
+                        write_msr = write_msr | ((0x3 << GHCB_INFO_BIT_WIDTH) as u64);
                         println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value =
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];

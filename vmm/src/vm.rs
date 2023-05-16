@@ -987,7 +987,7 @@ impl Vm {
             r_type: RegionType::Ram,
         });
         let res =
-            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 1, "", #[cfg(feature = "snp")] &host_data_file)
+            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 2, "", #[cfg(feature = "snp")] &host_data_file)
                 .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
