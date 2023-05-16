@@ -154,6 +154,16 @@ pub fn load_igvm(
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
+    let mut host_data_file_contents = Vec::new();
+    #[cfg(feature = "snp")]
+    {
+        host_data_file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
+        host_data_file.read_to_end(&mut host_data_file_contents).map_err(Error::Igvm)?;
+        if host_data_file_contents.len() > 32 ||  host_data_file_contents.len() == 0 {
+            panic!("Host data is not valid, invalid length {}", host_data_file_contents.len());
+        }
+    }
+
     let igvm_file = IgvmFile::new_from_binary(
         &file_contents,
         Some(igvm_parser::importer::IsolationType::Vbs),
@@ -619,7 +629,7 @@ pub fn load_igvm(
             .lock()
             .unwrap()
             .vm
-            .complete_isolated_import(loaded_info.snp_id_block)
+            .complete_isolated_import(loaded_info.snp_id_block, &host_data_file_contents)
             .map_err(Error::CompleteIsolatedImport)?;
     }
     println!("loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);

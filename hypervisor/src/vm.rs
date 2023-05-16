@@ -403,7 +403,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> Result<()> {
+    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock, host_data: &[u8]) -> Result<()> {
         unimplemented!()
     }
 }
