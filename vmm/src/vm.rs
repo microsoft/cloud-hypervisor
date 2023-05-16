@@ -966,6 +966,8 @@ impl Vm {
         igvm: File,
         memory_manager: Arc<Mutex<MemoryManager>>,
         cpu_manager: Arc<Mutex<CpuManager>>,
+        #[cfg(feature = "snp")]
+        host_data_file: File,
     ) -> Result<EntryPoint> {
         /*
         BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
@@ -985,7 +987,7 @@ impl Vm {
             r_type: RegionType::Ram,
         });
         let res =
-            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 1, "")
+            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 1, "", #[cfg(feature = "snp")] &host_data_file)
                 .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
@@ -1049,6 +1051,8 @@ impl Vm {
         let igvm: Option<std::path::PathBuf> = None;
         #[cfg(feature = "igvm")]
         let igvm = &payload.igvm;
+        #[cfg(feature = "snp")]
+        let host_data = &payload.host_data;
 
         if firmware.is_some() {
             let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
@@ -1061,6 +1065,13 @@ impl Vm {
             #[cfg(feature = "igvm")]
             {
                 let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
+                #[cfg(feature = "snp")] {
+                    if host_data.is_some() {
+                        let host_data_file = File::open(host_data.as_ref().unwrap()).map_err(Error::IgvmFile)?;
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_file);
+                    }
+                }
+                #[cfg(not(feature = "snp"))]
                 return Self::load_igvm(igvm, memory_manager, cpu_manager);
             }
         }

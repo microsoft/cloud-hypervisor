@@ -2077,6 +2077,8 @@ impl VmConfig {
                 firmware: vm_params.firmware.map(PathBuf::from),
                 #[cfg(feature = "igvm")]
                 igvm: vm_params.igvm.map(PathBuf::from),
+                #[cfg(feature = "igvm")]
+                host_data: vm_params.host_data.map(PathBuf::from),
             })
         } else {
             None
