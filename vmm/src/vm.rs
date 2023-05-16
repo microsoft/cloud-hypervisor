@@ -993,7 +993,9 @@ impl Vm {
 
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
+            #[cfg(feature = "igvm")]
             vmsa: Some(res.vmsa),
+            #[cfg(feature = "snp")]
             vmsa_pfn: res.vmsa_gpa / 4096,
         })
     }

@@ -154,7 +154,7 @@ pub fn load_igvm(
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
-    let mut host_data_file_contents = Vec::new();
+    let mut host_data_file_contents: Vec<u8> = Vec::new();
     #[cfg(feature = "snp")]
     {
         host_data_file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;

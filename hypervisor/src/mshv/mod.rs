@@ -14,6 +14,7 @@ use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
 use byteorder::BigEndian;
+#[cfg(feature = "snp")]
 use igvm_parser::importer::HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd};
@@ -625,6 +626,7 @@ impl cpu::Vcpu for MshvVcpu {
                         "Unhandled VCPU exit: Unaccepted GPA"
                     )))
                 }
+                #[cfg(feature = "snp")]
                 hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
                     let info = x.to_gpa_attribute_info().unwrap();
                     let vp_index = info.vp_index;
@@ -665,6 +667,7 @@ impl cpu::Vcpu for MshvVcpu {
                     //     Ok(cpu::VmExit::Ignore)
                     // }
                 }
+                #[cfg(feature = "snp")]
                 hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
                     let info = x.to_vmg_intercept_info().unwrap();
                     //let ghcb_msr: u64 = info.ghcb_msr;
@@ -1767,7 +1770,7 @@ fn _modify_gpa_host_access(
         .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
 }
 
-#[cfg(feature="snp")]
+#[cfg(feature = "snp")]
 fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Result<()> {
     let req = mshv_issue_psp_guest_request {
         req_gpa,
