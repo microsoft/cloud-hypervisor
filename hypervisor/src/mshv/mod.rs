@@ -1703,7 +1703,7 @@ impl vm::Vm for MshvVm {
     }
 
     #[cfg(feature = "snp")]
-    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock) -> vm::Result<()> {
+    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock, host_data: &[u8]) -> vm::Result<()> {
         let data = mshv_complete_isolated_import {
             import_data: hv_partition_complete_isolated_import_data {
                 psp_parameters: hv_psp_launch_finish_data {
@@ -1713,7 +1713,7 @@ impl vm::Vm for MshvVm {
                     id_auth_info: hv_snp_id_auth_info {
                         ..Default::default()
                     },
-                    host_data: [0u8; 32],
+                    host_data: host_data[0..32].try_into().unwrap(),
                     id_block_enabled: false,
                     author_key_enabled: false,
                 },
