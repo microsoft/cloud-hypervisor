@@ -893,6 +893,17 @@ impl cpu::Vcpu for MshvVcpu {
                                 arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                 self.fd.gpa_write(&mut arg_exit1).unwrap();
                             }
+                            SVM_EXITCODE_SNP_AP_CREATION => {
+                                println!("VMSA GPA for CPU1 is {:0x}", exit_info2);
+                                println!("APIC ID GPA for CPU1 is {:0x}", exit_info1);
+                                let mut arg_exit1: mshv_read_write_gpa =
+                                mshv_read_write_gpa::default();
+                                let value1 = 0_u64;
+                                arg_exit1.base_gpa = gpa + 0x398;
+                                arg_exit1.byte_count = 8;
+                                arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
+                                self.fd.gpa_write(&mut arg_exit1).unwrap();
+                            }
                             0x7b => {
                                 let addr = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
                                 let port_into = hv_sev_vmgexit_port_info {
