@@ -922,6 +922,8 @@ impl CpuManager {
                         }
                     }
 
+                    info!("Part 1 Starting vCPU: cpu_id = {}", vcpu_id);
+
                     // Apply seccomp filter for vcpu thread.
                     if !vcpu_seccomp_filter.is_empty() {
                         if let Err(e) =
@@ -931,12 +933,14 @@ impl CpuManager {
                             return;
                         }
                     }
+                    info!("Part 2 Starting vCPU: cpu_id = {}", vcpu_id);
                     extern "C" fn handle_signal(_: i32, _: *mut siginfo_t, _: *mut c_void) {}
                     // This uses an async signal safe handler to kill the vcpu handles.
                     register_signal_handler(SIGRTMIN(), handle_signal)
                         .expect("Failed to register vcpu signal handler");
                     // Block until all CPUs are ready.
                     vcpu_thread_barrier.wait();
+                    info!("Part 3 Starting vCPU: cpu_id = {}", vcpu_id);
 
                     std::panic::catch_unwind(move || {
                         loop {
@@ -951,7 +955,7 @@ impl CpuManager {
                             // Need to use Ordering::SeqCst as we have multiple
                             // loads and stores to different atomics and we need
                             // to see them in a consistent order in all threads
-
+                            // info!("Part 31 Starting vCPU: cpu_id = {}", vcpu_id);
                             if vcpu_pause_signalled.load(Ordering::SeqCst) {
                                 // As a pause can be caused by PIO & MMIO exits then we need to ensure they are
                                 // completed by returning to KVM_RUN. From the kernel docs:
@@ -967,7 +971,7 @@ impl CpuManager {
                                 // guest with an unmasked signal pending or with the immediate_exit field set
                                 // to complete pending operations without allowing any further instructions
                                 // to be executed.
-
+                                info!("Part 4 Starting vCPU: cpu_id = {}", vcpu_id);
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
                                     vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(true);
@@ -977,20 +981,27 @@ impl CpuManager {
                                     }
                                     vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(false);
                                 }
-
+                                info!("Part 5 Starting vCPU: cpu_id = {}", vcpu_id);
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                 while vcpu_pause_signalled.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
+                                info!("Part 6 Starting vCPU: cpu_id = {}", vcpu_id);
                                 vcpu_run_interrupted.store(false, Ordering::SeqCst);
+                                info!("Part 7 Starting vCPU: cpu_id = {}", vcpu_id);
                             }
-
+                            if vcpu_id == 1 {
+                                info!("Part 31 Starting vCPU: cpu_id = {}", vcpu_id);
+                            }
                             // We've been told to terminate
                             if vcpu_kill_signalled.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
                             {
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                 break;
+                            }
+                            if vcpu_id == 1 {
+                                info!("Part 32 Starting vCPU: cpu_id = {}", vcpu_id);
                             }
 
                             #[cfg(feature = "tdx")]
@@ -1084,7 +1095,7 @@ impl CpuManager {
                                     break;
                                 }
                             }
-
+                            // info!("Part 8 Starting vCPU: cpu_id");
                             // We've been told to terminate
                             if vcpu_kill_signalled.load(Ordering::SeqCst)
                                 || vcpu_kill.load(Ordering::SeqCst)
