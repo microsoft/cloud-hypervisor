@@ -141,7 +141,7 @@ pub fn load_igvm(
     proc_count: u32,
     cmdline: &str,
     #[cfg(feature = "snp")]
-    mut host_data_file: &std::fs::File,
+    host_data: &str,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::new());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
@@ -154,14 +154,11 @@ pub fn load_igvm(
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
-    let mut host_data_file_contents: Vec<u8> = Vec::new();
+    let mut host_data_contents = [0; 32];
     #[cfg(feature = "snp")]
     {
-        host_data_file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
-        host_data_file.read_to_end(&mut host_data_file_contents).map_err(Error::Igvm)?;
-        if host_data_file_contents.len() > 32 ||  host_data_file_contents.len() == 0 {
-            panic!("Host data is not valid, invalid length {}", host_data_file_contents.len());
-        }
+        assert_eq!(64, host_data.len());
+        hex::decode_to_slice(host_data, &mut host_data_contents as &mut [u8]).expect("Failed to decode host data");
     }
 
     let igvm_file = IgvmFile::new_from_binary(
@@ -629,7 +626,7 @@ pub fn load_igvm(
             .lock()
             .unwrap()
             .vm
-            .complete_isolated_import(loaded_info.snp_id_block, &host_data_file_contents)
+            .complete_isolated_import(loaded_info.snp_id_block, &host_data_contents)
             .map_err(Error::CompleteIsolatedImport)?;
     }
     println!("loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);

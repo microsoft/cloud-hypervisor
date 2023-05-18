@@ -159,7 +159,7 @@ pub struct TopLevel {
 
     #[cfg(feature = "snp")]
     #[argh(option, long = "host-data")]
-    /// path to IGVM file
+    /// host data as hex string
     host_data: Option<String>,
 
     #[argh(option, long = "firmware")]
