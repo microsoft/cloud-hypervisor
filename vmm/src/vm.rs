@@ -975,6 +975,7 @@ impl Vm {
         BIOS-e820: [mem 0x0000000000100000-0x00000000001fffff] ACPI data
         BIOS-e820: [mem 0x0000000001a00000-0x0000000003c79fff] usable
          */
+        let num_cpus = cpu_manager.lock().unwrap().vcpus().len() as u32;
         let mut arch_mem_regions: Vec<ArchMemRegion> = Vec::new();
         arch_mem_regions.push(ArchMemRegion {
             base: 0x00000000e8000000,
@@ -987,7 +988,7 @@ impl Vm {
             r_type: RegionType::Ram,
         });
         let res =
-            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, 2, "", #[cfg(feature = "snp")] &host_data_file)
+            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, num_cpus, "", #[cfg(feature = "snp")] &host_data_file)
                 .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
