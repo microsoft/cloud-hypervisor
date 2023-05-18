@@ -963,6 +963,7 @@ dependencies = [
  "arch",
  "bitflags 2.3.2",
  "block_util",
+ "cfg-if",
  "devices",
  "epoll",
  "event_monitor",

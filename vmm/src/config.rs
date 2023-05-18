@@ -2078,7 +2078,7 @@ impl VmConfig {
                 #[cfg(feature = "igvm")]
                 igvm: vm_params.igvm.map(PathBuf::from),
                 #[cfg(feature = "snp")]
-                host_data: vm_params.host_data.map(PathBuf::from),
+                host_data: vm_params.host_data.map(|s| s.to_string()),
             })
         } else {
             None

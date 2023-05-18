@@ -967,7 +967,7 @@ impl Vm {
         memory_manager: Arc<Mutex<MemoryManager>>,
         cpu_manager: Arc<Mutex<CpuManager>>,
         #[cfg(feature = "snp")]
-        host_data_file: File,
+        host_data: &str,
     ) -> Result<EntryPoint> {
         /*
         BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
@@ -1069,9 +1069,8 @@ impl Vm {
             {
                 let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
                 #[cfg(feature = "snp")] {
-                    if host_data.is_some() {
-                        let host_data_file = File::open(host_data.as_ref().unwrap()).map_err(Error::IgvmFile)?;
-                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_file);
+                    if let Some(host_data_str) =  host_data {
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
                     }
                 }
                 #[cfg(not(feature = "snp"))]

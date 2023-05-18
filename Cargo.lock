@@ -2376,6 +2376,7 @@ dependencies = [
  "futures",
  "gdbstub",
  "gdbstub_arch",
+ "hex",
  "hypervisor",
  "igvm-parser",
  "libc",
