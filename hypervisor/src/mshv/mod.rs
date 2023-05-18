@@ -789,8 +789,13 @@ impl cpu::Vcpu for MshvVcpu {
                         // println!("GHCB_INFO_NORMAL");
                         // SAFETY: access_info is valid, otherwise we won't be here
                         let _exit_code =
-                            unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
+                            unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u64;
                         let exit_info1 =
+                            info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u64;
+
+                        let _exit_code_u32 =
+                            unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
+                        let exit_info1_u32 =
                             info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
                         let exit_info2 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info2;
                         let sw_scratch = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
@@ -802,8 +807,8 @@ impl cpu::Vcpu for MshvVcpu {
                         // println!("Software exit exit_info2 {:0x}", exit_info2);
                         // println!("Software exit sw_scratch {:0x}",sw_scratch);
                         // println!("Software exit pfn {:0x}", gpa);
-                        match _exit_code {
-                            SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1 {
+                        match _exit_code_u32 {
+                            SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1_u32 {
                                 SVM_NAE_HV_DOORBELL_PAGE_GET_PREFERRED => {
                                     let mut arg: mshv_read_write_gpa =
                                         mshv_read_write_gpa::default();
@@ -896,6 +901,7 @@ impl cpu::Vcpu for MshvVcpu {
                             SVM_EXITCODE_SNP_AP_CREATION => {
                                 println!("VMSA GPA for CPU1 is {:0x}", exit_info2);
                                 println!("APIC ID GPA for CPU1 is {:0x}", exit_info1);
+                                _snp_start_vcpu(self.vm_fd.clone(), exit_info1 >> 32, exit_info2).unwrap();
                                 let mut arg_exit1: mshv_read_write_gpa =
                                 mshv_read_write_gpa::default();
                                 let value1 = 0_u64;
@@ -1769,4 +1775,14 @@ fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Re
     };
 
     fd.psp_issue_guest_request(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
+}
+
+#[cfg(feature="snp")]
+fn _snp_start_vcpu(fd: Arc<VmFd>, apic_id: u64, vmsa_gpa: u64) -> vm::Result<()> {
+    let req = mshv_snp_ap_create {
+        apic_id,
+        vmsa_gpa,
+    };
+
+    fd.snp_ap_create(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }
