@@ -716,10 +716,6 @@ impl cpu::Vcpu for MshvVcpu {
 
                             set_registers_64!(self.fd, reg_name_value)
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                            println!(
-                                "GHCB_INFO_REGISTER_REQUEST: {:0x} Done",
-                                reg_name_value[0].1
-                            );
                         }
 
                         let mut resp_ghcb_msr = svm_ghcb_msr::default();
@@ -754,10 +750,6 @@ impl cpu::Vcpu for MshvVcpu {
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                        println!(
-                            "GHCB_INFO_SEV_INFO_REQUEST EBX: {:0x}, bit: {:0x} Done",
-                            ebx, pbit_encryption
-                        );
                     } else if op == GHCB_INFO_HYP_FEATURE_REQUEST as u64 {
                         // println!("GHCB_INFO_HYP_FEATURE_REQUEST: data: {:0x}", ghcb_data);
                         // GHCB data must be zero
@@ -766,15 +758,12 @@ impl cpu::Vcpu for MshvVcpu {
                         let mut write_msr: u64 = GHCB_INFO_HYP_FEATURE_RESPONSE as u64;
                         // Add support for AP creation
                         write_msr = write_msr | ((0x3 << GHCB_INFO_BIT_WIDTH) as u64);
-                        println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
+                        //println!("GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x}", write_msr);
                         let arr_reg_name_value =
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-                        println!(
-                            "GHCB_INFO_HYP_FEATURE_REQUEST: write msr: {:0x} done",
-                            write_msr
-                        );
+
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
                         let data = unsafe { ghcb_msr.as_uint64 } >> 16;
                         let bytes = data.to_le_bytes();
