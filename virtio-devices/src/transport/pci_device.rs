@@ -1136,6 +1136,8 @@ impl PciDevice for VirtioPciDevice {
                 .contains(&o) =>
             {
                 // Handled with ioeventfds.
+                #[cfg(feature = "snp")]
+                error!("Unexpected read to notification BAR: Base = 0x{:x} ,  offset = 0x{:x}", _base, o);
             }
             o if (MSIX_TABLE_BAR_OFFSET..MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE).contains(&o) => {
                 if let Some(msix_config) = &self.msix_config {
@@ -1181,6 +1183,11 @@ impl PciDevice for VirtioPciDevice {
                 .contains(&o) =>
             {
                 // Handled with ioeventfds.
+                #[cfg(feature = "snp")]
+                for (_event, _addr) in self.ioeventfds(_base) {
+                    _event.write(1).unwrap();
+                }
+                #[cfg(not(feature = "snp"))]
                 error!("Unexpected write to notification BAR: offset = 0x{:x}", o);
             }
             o if (MSIX_TABLE_BAR_OFFSET..MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE).contains(&o) => {

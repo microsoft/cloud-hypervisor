@@ -5,7 +5,7 @@ use super::Error as DeviceError;
 use super::{
     ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, VirtioCommon, VirtioDevice,
     VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_IOMMU_PLATFORM,
-    VIRTIO_F_VERSION_1,
+    VIRTIO_F_VERSION_1, VIRTIO_F_ACCESS_PLATFORM,
 };
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
@@ -640,6 +640,8 @@ impl Console {
             )
         } else {
             let mut avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_CONSOLE_F_SIZE;
+
+            //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
@@ -663,7 +665,6 @@ impl Console {
         });
 
         resizer.update_console_size();
-
         Ok((
             Console {
                 common: VirtioCommon {

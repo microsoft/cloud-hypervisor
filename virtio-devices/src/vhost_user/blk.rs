@@ -243,6 +243,8 @@ impl VirtioDevice for Blk {
 
     fn features(&self) -> u64 {
         let mut features = self.common.avail_features;
+        //#[cfg(feature = "snp")]
+        features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
         if self.iommu {
             features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
         }
