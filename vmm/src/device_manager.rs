@@ -974,7 +974,6 @@ impl DeviceManager {
         dynamic: bool,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         trace_scoped!("DeviceManager::new");
-
         let (device_tree, device_id_cnt) = if let Some(snapshot) = snapshot.as_ref() {
             let state: DeviceManagerState = snapshot.to_state().unwrap();
             (

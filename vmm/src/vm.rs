@@ -496,7 +496,9 @@ impl Vm {
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
-        #[cfg(not(feature = "tdx"))]
+        #[cfg(feature= "snp")]
+        let force_iommu = true;
+        #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
         let force_iommu = false;
 
         #[cfg(feature = "guest_debug")]
@@ -988,7 +990,7 @@ impl Vm {
             r_type: RegionType::Ram,
         });
         let res =
-            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, num_cpus, "", #[cfg(feature = "snp")] &host_data_file)
+            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, num_cpus, "", #[cfg(feature = "snp")] host_data)
                 .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {

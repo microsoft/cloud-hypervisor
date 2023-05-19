@@ -206,7 +206,6 @@ impl PciConfigIo {
     pub fn config_space_read(&self) -> u32 {
         let enabled = (self.config_address & 0x8000_0000) != 0;
         if !enabled {
-            //println!("MUISLAM: config_space_read: line: {}", line!());
             return 0xffff_ffff;
         }
 
@@ -215,13 +214,12 @@ impl PciConfigIo {
 
         // Only support one bus.
         if bus != 0 {
-            //println!("MUISLAM: config_space_read: line: {}", line!());
             return 0xffff_ffff;
         }
 
         // Don't support multi-function devices.
         if function > 0 {
-            //println!("MUISLAM: config_space_read: line: {}", line!());
+
             return 0xffff_ffff;
         }
 

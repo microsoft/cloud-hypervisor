@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 default = []
+snp = []
 
 [dependencies]
 anyhow = "1.0.71"
