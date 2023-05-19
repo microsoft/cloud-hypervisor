@@ -980,6 +980,70 @@ impl cpu::Vcpu for MshvVcpu {
                                 self.fd.gpa_write(&mut arg_exit1).unwrap();
                                 //println!("$$$$$$$: Port handle done is_write( {:?}): GPA: {:0x}, Port: {:0x}, ", is_write, gpa, port);
                             }
+                            0x8000_0001 => { // MMIO READ
+                                let src_gpa = exit_info1 as u64;
+                                let dst_gpa = sw_scratch as u64;
+                                let data_len = exit_info2 as usize;
+                                // According to SPEC
+                                assert!(data_len <= 0x8);
+                                println!("MMIO Read exit data length: {}", data_len);
+                                let mut data: Vec<u8> = vec![0; data_len];
+
+                                if let Some(vm_ops) = &self.vm_ops {
+                                    vm_ops.mmio_read(src_gpa, &mut data[0..data_len]).map_err(
+                                        |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
+                                    )?;
+                                }
+                                let mut arg: mshv_read_write_gpa =
+                                        mshv_read_write_gpa::default();
+                                arg.base_gpa = dst_gpa;
+                                arg.byte_count = data_len as u32;
+                                arg.data[0..data_len].copy_from_slice(&data);
+                                // Limitation of gpa_read/write
+                                assert!(data_len <= 16);
+                                self.fd.gpa_write(&mut arg).unwrap();
+                                // Not sure about this that's why `if false`
+                                if false {
+                                    let mut arg_exit1: mshv_read_write_gpa =
+                                    mshv_read_write_gpa::default();
+                                    let value1 = 0_u64;
+                                    arg_exit1.base_gpa = gpa + 0x398;
+                                    arg_exit1.byte_count = 8;
+                                    arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
+                                    self.fd.gpa_write(&mut arg_exit1).unwrap();
+                                }
+
+                            }
+                            0x8000_0002 => { // MMIO WRITE
+                                let dst_gpa = exit_info1 as u64;
+                                let src_gpa = sw_scratch as u64;
+                                let data_len = exit_info2 as usize;
+                                // According to SPEC
+                                assert!(data_len <= 0x8);
+                                println!("MMIO Write exit data length: {}", data_len);
+                                let mut arg: mshv_read_write_gpa =
+                                        mshv_read_write_gpa::default();
+                                arg.base_gpa = src_gpa;
+                                arg.byte_count = data_len as u32;
+                                // Limitation of gpa_read/write
+                                assert!(data_len <= 16);
+                                self.fd.gpa_read(&mut arg).unwrap();
+                                if let Some(vm_ops) = &self.vm_ops {
+                                    vm_ops.mmio_write(dst_gpa, &mut arg.data[0..data_len]).map_err(
+                                        |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
+                                    )?;
+                                }
+                                // Not sure about this that's why `if false`
+                                if false {
+                                    let mut arg_exit1: mshv_read_write_gpa =
+                                    mshv_read_write_gpa::default();
+                                    let value1 = 0_u64;
+                                    arg_exit1.base_gpa = gpa + 0x398;
+                                    arg_exit1.byte_count = 8;
+                                    arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
+                                    self.fd.gpa_write(&mut arg_exit1).unwrap();
+                                }
+                            }
                             _ => {
                                 panic!("Unhandled exit code: {:0x}", _exit_code);
                             }
