@@ -289,13 +289,14 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             msrs[pos].index = *index;
         }
         let vm_fd = Arc::new(fd);
+        #[cfg(feature = "snp")]
         let ioeventfds = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Arc::new(MshvVm {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
-            ioeventfds,
+            #[cfg(feature = "snp")]ioeventfds,
         }))
     }
 
@@ -330,6 +331,7 @@ pub struct MshvVcpu {
     msrs: Vec<MsrEntry>,
     vm_ops: Option<Arc<dyn vm::VmOps>>,
     vm_fd: Arc<VmFd>,
+    #[cfg(feature = "snp")]
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 
@@ -978,7 +980,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                println!("MMIO Read exit data length: {}", data_len);
+                                //println!("MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
                                 let mut data: Vec<u8> = vec![0; data_len];
 
                                 if let Some(vm_ops) = &self.vm_ops {
@@ -986,6 +988,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
                                     )?;
                                 }
+                                //println!(":MMIO READ: {:?}", data);
                                 let mut arg: mshv_read_write_gpa =
                                         mshv_read_write_gpa::default();
                                 arg.base_gpa = dst_gpa;
@@ -1012,7 +1015,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                println!("MMIO Write exit data length: {}", data_len);
+                                //println!("MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
                                 let mut arg: mshv_read_write_gpa =
                                         mshv_read_write_gpa::default();
                                 arg.base_gpa = src_gpa;
@@ -1335,6 +1338,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             gpa
         );
         
+        #[cfg(feature = "snp")]
         if let Some((datamatch, efd)) = self
             .vcpu
             .ioeventfds
@@ -1342,7 +1346,7 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             .unwrap()
             .get(&IoEventAddress::Mmio(gpa))
         {
-            debug!("ioevent {:x} {:x?} {}", gpa, datamatch, efd.as_raw_fd());
+            println!("------------------------------------------------------SNP ioevent {:x} {:x?} {}", gpa, datamatch, efd.as_raw_fd());
 
             /* TODO: use datamatch to provide the correct semantics */
             efd.write(1).unwrap();
@@ -1417,6 +1421,7 @@ pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
+    #[cfg(feature = "snp")]
     ioeventfds: Arc<RwLock<HashMap<IoEventAddress, (Option<DataMatch>, EventFd)>>>,
 }
 
@@ -1511,6 +1516,7 @@ impl vm::Vm for MshvVm {
             msrs: self.msrs.clone(),
             vm_ops,
             vm_fd: self.fd.clone(),
+            #[cfg(feature = "snp")]
             ioeventfds: self.ioeventfds.clone(),
         };
         Ok(Arc::new(vcpu))
@@ -1556,6 +1562,10 @@ impl vm::Vm for MshvVm {
                     .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
             } */
             
+
+        }
+        #[cfg(feature = "snp")]
+        {
             let dup_fd = fd.try_clone().unwrap();
 
             self.ioeventfds
@@ -1564,28 +1574,28 @@ impl vm::Vm for MshvVm {
                 .insert(*addr, (datamatch, dup_fd));
             Ok(()) 
         }
-        #[cfg(feature = "snp")]
-        Ok(())
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
         #[cfg(not(feature = "snp"))]
         {
-            /*
+            
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
             self.fd
                 .unregister_ioevent(fd, addr, NoDatamatch)
                 .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into())) 
-            */
             
-            self.ioeventfds.write().unwrap().remove(addr).unwrap();
-            Ok(()) 
+            
+
             
         }
         #[cfg(feature = "snp")]
-        Ok(())
+        {
+            self.ioeventfds.write().unwrap().remove(addr).unwrap();
+            Ok(()) 
+        }
     }
 
     /// Creates a guest physical memory region.

@@ -472,7 +472,8 @@ impl Net {
                 if iommu {
                     avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
                 }
-
+                //#[cfg(feature = "snp")]
+                avail_features |= 1u64 << VIRTIO_F_ACCESS_PLATFORM;
                 // Configure TSO/UFO features when hardware checksum offload is enabled.
                 if offload_csum {
                     avail_features |= 1 << VIRTIO_NET_F_CSUM

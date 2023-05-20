@@ -2082,6 +2082,7 @@ impl DeviceManager {
     }
 
     fn make_virtio_devices(&mut self) -> DeviceManagerResult<Vec<MetaVirtioDevice>> {
+        println!("MUISLAM: {:?}, {:?}", file!(), line!());
         let mut devices: Vec<MetaVirtioDevice> = Vec::new();
 
         // Create "standard" virtio devices (net/block/rng)
@@ -2291,6 +2292,7 @@ impl DeviceManager {
         let mut block_devices = self.config.lock().unwrap().disks.clone();
         if let Some(disk_list_cfg) = &mut block_devices {
             for disk_cfg in disk_list_cfg.iter_mut() {
+                println!("MUISLAM: {:?}", disk_cfg);
                 devices.push(self.make_virtio_block_device(disk_cfg)?);
             }
         }
