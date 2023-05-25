@@ -8,6 +8,7 @@ edition = "2021"
 default = []
 
 [dependencies]
+hypervisor = { path = "../hypervisor" }
 io-uring = "0.5.13"
 libc = "0.2.139"
 log = "0.4.17"

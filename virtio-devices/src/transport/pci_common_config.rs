@@ -31,6 +31,37 @@ pub struct VirtioPciCommonConfigState {
 
 impl VersionMapped for VirtioPciCommonConfigState {}
 
+#[cfg(feature = "snp")]
+#[derive(Clone, Debug, Default)]
+struct QueueAdresses {
+    pub desc_table_address: u64,
+    pub avail_ring_address: u64,
+    pub used_ring_address: u64,
+}
+#[cfg(feature = "snp")]
+impl QueueAdresses {
+    pub fn new() -> QueueAdresses{
+        QueueAdresses::default()
+    }
+    fn set_desc_table_address(&mut self, low: Option<u32>, high: Option<u32>) {
+        let low = low.unwrap_or(self.desc_table_address as u32) as u64;
+        let high = high.unwrap_or((self.desc_table_address >> 32) as u32) as u64;
+
+        self.desc_table_address = (high << 32) | low;
+    }
+    fn set_avail_ring_address(&mut self, low: Option<u32>, high: Option<u32>) {
+        let low = low.unwrap_or(self.avail_ring_address as u32) as u64;
+        let high = high.unwrap_or((self.avail_ring_address >> 32) as u32) as u64;
+
+        self.avail_ring_address = (high << 32) | low;
+    }
+    fn set_used_ring_address(&mut self, low: Option<u32>, high: Option<u32>) {
+        let low = low.unwrap_or(self.used_ring_address as u32) as u64;
+        let high = high.unwrap_or((self.used_ring_address >> 32) as u32) as u64;
+
+        self.used_ring_address = (high << 32) | low;
+    }
+}
 /// Contains the data for reading and writing the common configuration structure of a virtio PCI
 /// device.
 ///
@@ -62,12 +93,17 @@ pub struct VirtioPciCommonConfig {
     pub queue_select: u16,
     pub msix_config: Arc<AtomicU16>,
     pub msix_queues: Arc<Mutex<Vec<u16>>>,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
+    #[cfg(feature = "snp")]
+    queue_addresses: QueueAdresses,
 }
 
 impl VirtioPciCommonConfig {
     pub fn new(
         state: VirtioPciCommonConfigState,
         access_platform: Option<Arc<dyn AccessPlatform>>,
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Self {
         VirtioPciCommonConfig {
             access_platform,
@@ -78,6 +114,10 @@ impl VirtioPciCommonConfig {
             queue_select: state.queue_select,
             msix_config: Arc::new(AtomicU16::new(state.msix_config)),
             msix_queues: Arc::new(Mutex::new(state.msix_queues)),
+            #[cfg(feature = "snp")]
+            vm,
+            #[cfg(feature = "snp")]
+            queue_addresses: QueueAdresses::new(),
         }
     }
 
@@ -101,7 +141,7 @@ impl VirtioPciCommonConfig {
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
-
+        println!("Read VirtioPciCommonConfig: Data len {}", data.len());
         match data.len() {
             1 => {
                 let v = self.read_common_config_byte(offset);
@@ -131,7 +171,7 @@ impl VirtioPciCommonConfig {
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
-
+        println!("--------------- Write VirtioPciCommonConfig: Data len {}", data.len());
         match data.len() {
             1 => self.write_common_config_byte(offset, data[0]),
             2 => self.write_common_config_word(offset, LittleEndian::read_u16(data), queues),
@@ -184,7 +224,7 @@ impl VirtioPciCommonConfig {
     }
 
     fn write_common_config_word(&mut self, offset: u64, value: u16, queues: &mut [Queue]) {
-        debug!("write_common_config_word: offset 0x{:x}", offset);
+        println!("-------------------------------------------- write_common_config_word: offset 0x{:x}", offset);
         match offset {
             0x10 => self.msix_config.store(value, Ordering::Release),
             0x16 => self.queue_select = value,
@@ -249,7 +289,7 @@ impl VirtioPciCommonConfig {
         queues: &mut [Queue],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
-        debug!("write_common_config_dword: offset 0x{:x}", offset);
+        println!("write_common_config_dword: offset 0x{:x}", offset);
 
         match offset {
             0x00 => self.device_feature_select = value,
@@ -266,12 +306,46 @@ impl VirtioPciCommonConfig {
                     );
                 }
             }
-            0x20 => self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None)),
-            0x24 => self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value))),
-            0x28 => self.with_queue_mut(queues, |q| q.set_avail_ring_address(Some(value), None)),
-            0x2c => self.with_queue_mut(queues, |q| q.set_avail_ring_address(None, Some(value))),
-            0x30 => self.with_queue_mut(queues, |q| q.set_used_ring_address(Some(value), None)),
-            0x34 => self.with_queue_mut(queues, |q| q.set_used_ring_address(None, Some(value))),
+            0x20 => {
+                self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None));
+                #[cfg(feature = "snp")] {
+                    println!("write_common_config_dword: low: {:0x}", value);
+                    self.queue_addresses.set_desc_table_address(Some(value), None);
+                }
+            }
+            0x24 => {
+                self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
+                #[cfg(feature = "snp")] {
+                    println!("write_common_config_dword: high: {:0x}", value);
+                    self.queue_addresses.set_desc_table_address(None, Some(value));
+                    println!("write_common_config_dword: {:0x}", self.queue_addresses.desc_table_address);
+                    self.vm.gain_page_Access(self.queue_addresses.desc_table_address).unwrap()
+                }
+            }
+            0x28 => {
+                self.with_queue_mut(queues, |q| q.set_avail_ring_address(Some(value), None));
+                #[cfg(feature = "snp")]
+                self.queue_addresses.set_avail_ring_address(Some(value), None);
+            }
+            0x2c => {
+                self.with_queue_mut(queues, |q| q.set_avail_ring_address(None, Some(value)));
+                #[cfg(feature = "snp")] {
+                    self.queue_addresses.set_avail_ring_address(None, Some(value));
+                    self.vm.gain_page_Access(self.queue_addresses.avail_ring_address).unwrap()
+                }
+            }
+            0x30 => {
+                self.with_queue_mut(queues, |q| q.set_used_ring_address(Some(value), None));
+                #[cfg(feature = "snp")]
+                self.queue_addresses.set_used_ring_address(Some(value), None);
+            }
+            0x34 => {
+                self.with_queue_mut(queues, |q| q.set_used_ring_address(None, Some(value)));
+                #[cfg(feature = "snp")] {
+                    self.queue_addresses.set_used_ring_address(None, Some(value));
+                    self.vm.gain_page_Access(self.queue_addresses.used_ring_address).unwrap()
+                }
+            }
             _ => {
                 warn!("invalid virtio register dword write: 0x{:x}", offset);
             }
@@ -284,7 +358,7 @@ impl VirtioPciCommonConfig {
     }
 
     fn write_common_config_qword(&mut self, offset: u64, value: u64, queues: &mut [Queue]) {
-        debug!("write_common_config_qword: offset 0x{:x}", offset);
+        println!("write_common_config_qword: offset 0x{:x}", offset);
 
         let low = Some((value & 0xffff_ffff) as u32);
         let high = Some((value >> 32) as u32);
@@ -367,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "snp"))]
     fn write_base_regs() {
         let mut regs = VirtioPciCommonConfig {
             access_platform: None,

@@ -134,6 +134,8 @@ struct BlockEpollHandler {
     rate_limiter: Option<RateLimiter>,
     access_platform: Option<Arc<dyn AccessPlatform>>,
     read_only: bool,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl BlockEpollHandler {
@@ -143,7 +145,7 @@ impl BlockEpollHandler {
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
-            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref())
+            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref(), Some(&self.vm.clone()))
                 .map_err(Error::RequestParsing)?;
 
             // For virtio spec compliance
@@ -488,6 +490,8 @@ pub struct Block {
     rate_limiter_config: Option<RateLimiterConfig>,
     exit_evt: EventFd,
     read_only: bool,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -516,6 +520,8 @@ impl Block {
         rate_limiter_config: Option<RateLimiterConfig>,
         exit_evt: EventFd,
         state: Option<BlockState>,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Self> {
         let (disk_nsectors, avail_features, acked_features, config, paused) =
             if let Some(state) = state {
@@ -614,6 +620,8 @@ impl Block {
             rate_limiter_config,
             exit_evt,
             read_only,
+            #[cfg(feature = "snp")]
+            vm,
         })
     }
 
@@ -751,6 +759,8 @@ impl VirtioDevice for Block {
                 rate_limiter,
                 access_platform: self.common.access_platform.clone(),
                 read_only: self.read_only,
+                #[cfg(feature = "snp")]
+                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();

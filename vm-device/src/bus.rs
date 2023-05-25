@@ -231,6 +231,7 @@ impl Bus {
     /// Returns true on success, otherwise `data` is untouched.
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<Option<Arc<Barrier>>> {
         if let Some((base, offset, dev)) = self.resolve(addr) {
+            //println!("MUISLAM: Bus write");
             // OK to unwrap as lock() failing is a serious error condition and should panic.
             Ok(dev
                 .lock()

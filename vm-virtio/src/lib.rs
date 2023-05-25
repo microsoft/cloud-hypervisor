@@ -103,6 +103,8 @@ pub trait AccessPlatform: Send + Sync + Debug {
 pub trait Translatable {
     fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
+    //#[cfg(feature = "snp")]
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self;
 }
 
 impl Translatable for GuestAddress {
@@ -111,6 +113,10 @@ impl Translatable for GuestAddress {
     }
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
         GuestAddress(self.0.translate_gpa(access_platform, len))
+    }
+    //#[cfg(feature = "snp")]
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self {
+        GuestAddress(self.0.translate_gva_with_vmfd(access_platform, len, vm))
     }
 }
 
@@ -128,6 +134,11 @@ impl Translatable for u64 {
         } else {
             *self
         }
+    }
+    //#[cfg(feature = "snp")]
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self {
+        vm.gain_page_Access(*self).unwrap();
+        *self
     }
 }
 

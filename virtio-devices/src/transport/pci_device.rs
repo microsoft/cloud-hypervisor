@@ -375,6 +375,7 @@ pub struct VirtioPciDevice {
 
     // Pending activations
     pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl VirtioPciDevice {
@@ -393,6 +394,7 @@ impl VirtioPciDevice {
         dma_handler: Option<Arc<dyn ExternalDmaMapping>>,
         pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
         snapshot: Option<Snapshot>,
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         let mut locked_device = device.lock().unwrap();
         let mut queue_evts = Vec::new();
@@ -504,7 +506,7 @@ impl VirtioPciDevice {
             })?;
 
         let common_config = if let Some(common_config_state) = common_config_state {
-            VirtioPciCommonConfig::new(common_config_state, access_platform)
+            VirtioPciCommonConfig::new(common_config_state, access_platform, vm.clone())
         } else {
             VirtioPciCommonConfig::new(
                 VirtioPciCommonConfigState {
@@ -517,6 +519,7 @@ impl VirtioPciDevice {
                     msix_queues: vec![VIRTQ_MSI_NO_VECTOR; num_queues],
                 },
                 access_platform,
+                vm.clone(),
             )
         };
 
@@ -591,6 +594,7 @@ impl VirtioPciDevice {
             activate_evt,
             dma_handler,
             pending_activations,
+            vm,
         };
 
         if let Some(msix_config) = &virtio_pci_device.msix_config {
@@ -1113,6 +1117,7 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+        println!(" fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8])");
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => self.common_config.read(
                 o - COMMON_CONFIG_BAR_OFFSET,
@@ -1121,6 +1126,7 @@ impl PciDevice for VirtioPciDevice {
                 self.device.clone(),
             ),
             o if (ISR_CONFIG_BAR_OFFSET..ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE).contains(&o) => {
+                //println!("fn write_bar 2");
                 if let Some(v) = data.get_mut(0) {
                     // Reading this register resets it to 0.
                     *v = self.interrupt_status.swap(0, Ordering::AcqRel) as u8;
@@ -1129,17 +1135,20 @@ impl PciDevice for VirtioPciDevice {
             o if (DEVICE_CONFIG_BAR_OFFSET..DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE)
                 .contains(&o) =>
             {
+                //println!("fn write_bar 3");
                 let device = self.device.lock().unwrap();
                 device.read_config(o - DEVICE_CONFIG_BAR_OFFSET, data);
             }
             o if (NOTIFICATION_BAR_OFFSET..NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE)
                 .contains(&o) =>
             {
+                //println!("fn write_bar 4");
                 // Handled with ioeventfds.
                 #[cfg(feature = "snp")]
                 error!("Unexpected read to notification BAR: Base = 0x{:x} ,  offset = 0x{:x}", _base, o);
             }
             o if (MSIX_TABLE_BAR_OFFSET..MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE).contains(&o) => {
+                //println!("fn write_bar 5");
                 if let Some(msix_config) = &self.msix_config {
                     msix_config
                         .lock()
@@ -1148,6 +1157,7 @@ impl PciDevice for VirtioPciDevice {
                 }
             }
             o if (MSIX_PBA_BAR_OFFSET..MSIX_PBA_BAR_OFFSET + MSIX_PBA_SIZE).contains(&o) => {
+                println!("fn write_bar 6");
                 if let Some(msix_config) = &self.msix_config {
                     msix_config
                         .lock()
@@ -1155,11 +1165,14 @@ impl PciDevice for VirtioPciDevice {
                         .read_pba(o - MSIX_PBA_BAR_OFFSET, data);
                 }
             }
-            _ => (),
+            _ => {
+                println!("unhandled fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) ");
+            },
         }
     }
 
     fn write_bar(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        //println!("fn write_bar(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>>");
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => self.common_config.write(
                 o - COMMON_CONFIG_BAR_OFFSET,
@@ -1168,6 +1181,7 @@ impl PciDevice for VirtioPciDevice {
                 self.device.clone(),
             ),
             o if (ISR_CONFIG_BAR_OFFSET..ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE).contains(&o) => {
+                //println!("fn write_bar 1");
                 if let Some(v) = data.first() {
                     self.interrupt_status
                         .fetch_and(!(*v as usize), Ordering::AcqRel);
@@ -1176,21 +1190,26 @@ impl PciDevice for VirtioPciDevice {
             o if (DEVICE_CONFIG_BAR_OFFSET..DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE)
                 .contains(&o) =>
             {
+                //println!("fn write_bar 1.1");
                 let mut device = self.device.lock().unwrap();
                 device.write_config(o - DEVICE_CONFIG_BAR_OFFSET, data);
             }
             o if (NOTIFICATION_BAR_OFFSET..NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE)
                 .contains(&o) =>
             {
+                //println!("fn write_bar 2");
                 // Handled with ioeventfds.
                 #[cfg(feature = "snp")]
                 for (_event, _addr) in self.ioeventfds(_base) {
-                    _event.write(1).unwrap();
+                    if _addr == _base + offset {
+                        _event.write(1).unwrap();
+                    }
                 }
                 #[cfg(not(feature = "snp"))]
                 error!("Unexpected write to notification BAR: offset = 0x{:x}", o);
             }
             o if (MSIX_TABLE_BAR_OFFSET..MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE).contains(&o) => {
+                //println!("fn write_bar 3");
                 if let Some(msix_config) = &self.msix_config {
                     msix_config
                         .lock()
@@ -1199,6 +1218,7 @@ impl PciDevice for VirtioPciDevice {
                 }
             }
             o if (MSIX_PBA_BAR_OFFSET..MSIX_PBA_BAR_OFFSET + MSIX_PBA_SIZE).contains(&o) => {
+                //println!("fn write_bar 4");
                 if let Some(msix_config) = &self.msix_config {
                     msix_config
                         .lock()
@@ -1206,7 +1226,9 @@ impl PciDevice for VirtioPciDevice {
                         .write_pba(o - MSIX_PBA_BAR_OFFSET, data);
                 }
             }
-            _ => (),
+            _ => {
+                println!("unhandled fn write_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) ");
+            },
         };
 
         // Try and activate the device if the driver status has changed

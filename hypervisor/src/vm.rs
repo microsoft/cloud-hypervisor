@@ -395,6 +395,13 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
+    fn gain_page_Access(
+        &self,
+        gpa: u64,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "snp")]
     fn psp_issue_guest_request(
         &self,
         req_gpa: u64,

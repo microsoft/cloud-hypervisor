@@ -317,7 +317,7 @@ impl BusDevice for PciConfigIo {
         let start = offset as usize % 4;
 
         let end = start + data.len();
-        //println!("PciConfigIo: offset: {:?} start {:?} end {:?}", offset, start, end);
+        println!("PciConfigIo: offset: {:?} start {:?} end {:?}", offset, start, end);
         if end <= 4 {
             for i in start..end {
                 data[i - start] = (value >> (i * 8)) as u8;
@@ -331,7 +331,7 @@ impl BusDevice for PciConfigIo {
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        //println!("-----------------------------------------------------------PciConfigIo: write offset: {:?} ", offset);
+        println!("-----------------------------------------------------------PciConfigIo: write offset: {:?} ", offset);
         // `offset` is relative to 0xcf8
         match offset {
             o @ 0..=3 => {
@@ -417,7 +417,7 @@ impl BusDevice for PciConfigMmio {
         let start = offset as usize % 4;
         let end = start + data.len();
         if end > 4 || offset > u64::from(u32::max_value()) {
-            println!("impl BusDevice for PciConfigMmio ");
+            println!("impl BusDevice for PciConfigMmio read");
             for d in data {
                 *d = 0xff;
             }
@@ -431,6 +431,7 @@ impl BusDevice for PciConfigMmio {
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        println!("impl BusDevice for PciConfigMmio write ");
         if offset > u64::from(u32::max_value()) {
             return None;
         }

@@ -209,6 +209,7 @@ impl Request {
     pub fn parse(
         desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> result::Result<Request, Error> {
         let hdr_desc = desc_chain
             .next()
@@ -225,7 +226,7 @@ impl Request {
 
         let hdr_desc_addr = hdr_desc
             .addr()
-            .translate_gva(access_platform, hdr_desc.len() as usize);
+            .translate_gva_with_vmfd(access_platform, hdr_desc.len() as usize, vm.unwrap().clone());
 
         let mut req = Request {
             request_type: request_type(desc_chain.memory(), hdr_desc_addr)?,
@@ -268,7 +269,7 @@ impl Request {
 
                 req.data_descriptors.push((
                     desc.addr()
-                        .translate_gva(access_platform, desc.len() as usize),
+                        .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm.unwrap().clone()),
                     desc.len(),
                 ));
                 desc = desc_chain
@@ -293,7 +294,7 @@ impl Request {
 
         req.status_addr = status_desc
             .addr()
-            .translate_gva(access_platform, status_desc.len() as usize);
+            .translate_gva_with_vmfd(access_platform, status_desc.len() as usize, vm.unwrap().clone());
 
         Ok(req)
     }
