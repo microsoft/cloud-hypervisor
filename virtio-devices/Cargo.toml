@@ -15,6 +15,7 @@ block_util = { path = "../block_util" }
 byteorder = "1.4.3"
 epoll = "4.3.1"
 event_monitor = { path = "../event_monitor" }
+hypervisor = { path = "../hypervisor" }
 io-uring = "0.5.13"
 libc = "0.2.139"
 log = "0.4.17"

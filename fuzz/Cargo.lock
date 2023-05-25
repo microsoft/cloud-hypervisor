@@ -110,6 +110,7 @@ checksum = "6dbe3c979c178231552ecba20214a8272df4e09f232a87aef4320cf06539aded"
 name = "block_util"
 version = "0.1.0"
 dependencies = [
+ "hypervisor",
  "io-uring",
  "libc",
  "log",
@@ -856,6 +857,7 @@ dependencies = [
  "byteorder",
  "epoll",
  "event_monitor",
+ "hypervisor",
  "io-uring",
  "libc",
  "log",
@@ -948,6 +950,7 @@ dependencies = [
 name = "vm-virtio"
 version = "0.1.0"
 dependencies = [
+ "hypervisor",
  "log",
  "virtio-queue",
  "vm-memory",

@@ -618,7 +618,7 @@ impl cpu::Vcpu for MshvVcpu {
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
                     let GB = gpa / (1024 * 1024 * 1024);
-                    info!(
+                    println!(
                         "Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}",
                         gva, gpa, GB
                     );
@@ -975,7 +975,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                //println!("MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
+                                println!("----------------- MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
                                 let mut data: Vec<u8> = vec![0; data_len];
 
                                 if let Some(vm_ops) = &self.vm_ops {
@@ -983,7 +983,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
                                     )?;
                                 }
-                                //println!(":MMIO READ: {:?}", data);
+                                //println!(":MMIO READ:  after vm_ops");
                                 let mut arg: mshv_read_write_gpa =
                                         mshv_read_write_gpa::default();
                                 arg.base_gpa = dst_gpa;
@@ -1002,6 +1002,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                     self.fd.gpa_write(&mut arg_exit1).unwrap();
                                 }
+                                //println!(":MMIO READ:  done");
 
                             }
                             0x8000_0002 => { // MMIO WRITE
@@ -1010,7 +1011,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                //println!("MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
+                                //println!("MMIO Write exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
                                 let mut arg: mshv_read_write_gpa =
                                         mshv_read_write_gpa::default();
                                 arg.base_gpa = src_gpa;
@@ -1023,6 +1024,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
                                     )?;
                                 }
+                                //println!(":MMIO write:  after vm_ops");
                                 // Not sure about this that's why `if false`
                                 if false {
                                     let mut arg_exit1: mshv_read_write_gpa =
@@ -1033,6 +1035,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                     self.fd.gpa_write(&mut arg_exit1).unwrap();
                                 }
+                                //println!(":MMIO Write:  Done");
                             }
                             _ => {
                                 panic!("Unhandled exit code: {:0x}", _exit_code);
@@ -1803,6 +1806,19 @@ impl vm::Vm for MshvVm {
             .complete_isolated_import(&data)
             .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
+    #[cfg(feature = "snp")]
+    fn gain_page_Access(
+        &self,
+        gpa: u64,
+    ) -> vm::Result<()>{
+        let mut gpa_list = Vec::new();
+        //println!("gain_page_Access: {:0x}", gpa);
+        gpa_list.push(gpa);
+        _modify_gpa_host_access(self.fd.clone(), HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
+            0, 1, gpa_list.as_slice()).unwrap();
+        //println!("gain_page_Access: {:0x}", gpa);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "snp")]
@@ -1818,6 +1834,7 @@ fn _modify_gpa_host_access(
     gpa_list[0].host_access = host_access;
     gpa_list[0].acquire = acquire;
     gpa_list[0].flags = flags;
+    //println!("_modify_gpa_host_access: Len: {:?}, gpa: {:0x}", gpas.len(), gpas[0]);
     // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
     // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
     // everything from gpas.
@@ -1825,6 +1842,7 @@ fn _modify_gpa_host_access(
         let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
         gpas_slice.copy_from_slice(&gpas);
     }
+    //println!("_modify_gpa_host_access: Len: {:?}, gpa: {:0x}", gpas.len(), gpas[0]);
     fd.modify_gpa_host_access(&gpa_list[0])
         .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
 }

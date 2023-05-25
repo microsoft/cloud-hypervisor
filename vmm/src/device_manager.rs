@@ -1982,6 +1982,8 @@ impl DeviceManager {
                 .map_err(DeviceManagerError::EventFd)?,
             versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
                 .map_err(DeviceManagerError::RestoreGetState)?,
+                #[cfg(feature = "snp")]
+                        self.address_manager.vm.clone(),
         )
         .map_err(DeviceManagerError::CreateVirtioConsole)?;
         let virtio_console_device = Arc::new(Mutex::new(virtio_console_device));
@@ -2176,6 +2178,8 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
+                        #[cfg(feature = "snp")]
+                        self.address_manager.vm.clone()
                 ) {
                     Ok(vub_device) => vub_device,
                     Err(e) => {
@@ -2275,6 +2279,8 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
+                    #[cfg(feature = "snp")]
+                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioBlock)?,
             ));
@@ -2514,6 +2520,8 @@ impl DeviceManager {
                         .map_err(DeviceManagerError::EventFd)?,
                     versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
                         .map_err(DeviceManagerError::RestoreGetState)?,
+                        #[cfg(feature = "snp")]
+                        self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioRng)?,
             ));
@@ -3576,6 +3584,7 @@ impl DeviceManager {
                 dma_handler,
                 self.pending_activations.clone(),
                 vm_migration::snapshot_from_id(self.snapshot.as_ref(), id.as_str()),
+                self.address_manager.vm.clone(),
             )
             .map_err(DeviceManagerError::VirtioDevice)?,
         ));

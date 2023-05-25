@@ -63,6 +63,8 @@ pub struct Blk {
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
     iommu: bool,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl Blk {
@@ -74,6 +76,8 @@ impl Blk {
         exit_evt: EventFd,
         iommu: bool,
         state: Option<State>,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Blk> {
         let num_queues = vu_cfg.num_queues;
 
@@ -202,6 +206,8 @@ impl Blk {
             seccomp_action,
             exit_evt,
             iommu,
+            #[cfg(feature = "snp")]
+            vm,
         })
     }
 

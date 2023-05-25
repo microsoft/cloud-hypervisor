@@ -57,6 +57,8 @@ struct RngEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     access_platform: Option<Arc<dyn AccessPlatform>>,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl RngEpollHandler {
@@ -156,6 +158,8 @@ pub struct Rng {
     random_file: Option<File>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -175,6 +179,8 @@ impl Rng {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<RngState>,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Rng> {
         let random_file = File::open(path)?;
 
@@ -207,6 +213,8 @@ impl Rng {
             random_file: Some(random_file),
             seccomp_action,
             exit_evt,
+            #[cfg(feature = "snp")]
+            vm,
         })
     }
 
@@ -276,6 +284,8 @@ impl VirtioDevice for Rng {
                 kill_evt,
                 pause_evt,
                 access_platform: self.common.access_platform.clone(),
+                #[cfg(feature = "snp")]
+                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();

@@ -126,7 +126,7 @@ impl VhostUserBlkThread {
         {
             debug!("got an element in the queue");
             let len;
-            match Request::parse(&mut desc_chain, None) {
+            match Request::parse(&mut desc_chain, None, None) {
                 Ok(mut request) => {
                     debug!("element is a valid request");
                     request.set_writeback(self.writeback.load(Ordering::Acquire));
