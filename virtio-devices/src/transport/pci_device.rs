@@ -1117,7 +1117,7 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        println!(" fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8])");
+        //println!(" fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8])");
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => self.common_config.read(
                 o - COMMON_CONFIG_BAR_OFFSET,

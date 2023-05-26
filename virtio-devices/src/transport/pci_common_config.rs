@@ -141,7 +141,7 @@ impl VirtioPciCommonConfig {
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
-        println!("Read VirtioPciCommonConfig: Data len {}", data.len());
+        //println!("Read VirtioPciCommonConfig: Data len {}", data.len());
         match data.len() {
             1 => {
                 let v = self.read_common_config_byte(offset);
@@ -171,7 +171,7 @@ impl VirtioPciCommonConfig {
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
-        println!("--------------- Write VirtioPciCommonConfig: Data len {}", data.len());
+        //println!("--------------- Write VirtioPciCommonConfig: Data len {}", data.len());
         match data.len() {
             1 => self.write_common_config_byte(offset, data[0]),
             2 => self.write_common_config_word(offset, LittleEndian::read_u16(data), queues),
@@ -224,7 +224,7 @@ impl VirtioPciCommonConfig {
     }
 
     fn write_common_config_word(&mut self, offset: u64, value: u16, queues: &mut [Queue]) {
-        println!("-------------------------------------------- write_common_config_word: offset 0x{:x}", offset);
+        //println!("-------------------------------------------- write_common_config_word: offset 0x{:x}", offset);
         match offset {
             0x10 => self.msix_config.store(value, Ordering::Release),
             0x16 => self.queue_select = value,
@@ -289,7 +289,7 @@ impl VirtioPciCommonConfig {
         queues: &mut [Queue],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
-        println!("write_common_config_dword: offset 0x{:x}", offset);
+        //println!("write_common_config_dword: offset 0x{:x}", offset);
 
         match offset {
             0x00 => self.device_feature_select = value,
@@ -309,16 +309,16 @@ impl VirtioPciCommonConfig {
             0x20 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None));
                 #[cfg(feature = "snp")] {
-                    println!("write_common_config_dword: low: {:0x}", value);
+                    //println!("write_common_config_dword: low: {:0x}", value);
                     self.queue_addresses.set_desc_table_address(Some(value), None);
                 }
             }
             0x24 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
                 #[cfg(feature = "snp")] {
-                    println!("write_common_config_dword: high: {:0x}", value);
+                    //println!("write_common_config_dword: high: {:0x}", value);
                     self.queue_addresses.set_desc_table_address(None, Some(value));
-                    println!("write_common_config_dword: {:0x}", self.queue_addresses.desc_table_address);
+                    //println!("write_common_config_dword: {:0x}", self.queue_addresses.desc_table_address);
                     self.vm.gain_page_Access(self.queue_addresses.desc_table_address).unwrap()
                 }
             }
