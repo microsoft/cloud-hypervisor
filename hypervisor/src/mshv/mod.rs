@@ -774,9 +774,9 @@ impl cpu::Vcpu for MshvVcpu {
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
                         let data = unsafe { ghcb_msr.as_uint64 } >> 16;
                         let bytes = data.to_le_bytes();
-                        if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
-                            print!("{}", s);
-                        }
+                        // if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
+                        //     print!("{}", s);
+                        // }
                     } else if op == GHCB_INFO_NORMAL as u64 {
                         // println!("GHCB_INFO_NORMAL");
                         // SAFETY: access_info is valid, otherwise we won't be here
@@ -975,7 +975,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                println!("----------------- MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
+                                //println!("----------------- MMIO Read exit data length: {} src_gpa: {:0x}, dst_gpa: {:0x}", data_len, src_gpa, dst_gpa);
                                 let mut data: Vec<u8> = vec![0; data_len];
 
                                 if let Some(vm_ops) = &self.vm_ops {
