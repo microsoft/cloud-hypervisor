@@ -1275,6 +1275,7 @@ impl DeviceManager {
         let iommu_id = String::from(IOMMU_DEVICE_NAME);
 
         let iommu_device = if self.config.lock().unwrap().iommu {
+            println!("-----------------------------------------BUG");
             let (device, mapping) = virtio_devices::Iommu::new(
                 iommu_id.clone(),
                 self.seccomp_action.clone(),
@@ -2349,6 +2350,8 @@ impl DeviceManager {
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
+                    #[cfg(feature = "snp")]
+                    self.address_manager.vm.clone(),
                 ) {
                     Ok(vun_device) => vun_device,
                     Err(e) => {
@@ -2389,6 +2392,8 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
+                        #[cfg(feature = "snp")]
+                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2410,6 +2415,8 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
+                        #[cfg(feature = "snp")]
+                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2435,6 +2442,8 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
+                        #[cfg(feature = "snp")]
+                    self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))

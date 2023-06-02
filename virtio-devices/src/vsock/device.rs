@@ -165,7 +165,7 @@ where
     /// the backend for processing.
     ///
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
-        debug!("vsock: epoll_handler::process_tx()");
+        println!("-------------------------vsock: epoll_handler::process_tx()");
 
         let mut used_descs = false;
 

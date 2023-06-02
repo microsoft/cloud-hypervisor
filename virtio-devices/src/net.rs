@@ -63,6 +63,8 @@ pub struct NetCtrlEpollHandler {
     pub access_platform: Option<Arc<dyn AccessPlatform>>,
     pub interrupt_cb: Arc<dyn VirtioInterrupt>,
     pub queue_index: u16,
+    #[cfg(feature = "snp")]
+    pub vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl NetCtrlEpollHandler {
@@ -105,7 +107,7 @@ impl EpollHelperHandler for NetCtrlEpollHandler {
                     ))
                 })?;
                 self.ctrl_q
-                    .process(mem.deref(), &mut self.queue, self.access_platform.as_ref())
+                    .process(mem.deref(), &mut self.queue, self.access_platform.as_ref(), #[cfg(feature = "snp")] Some(&self.vm.clone()))
                     .map_err(|e| {
                         EpollHelperError::HandleEvent(anyhow!(
                             "Failed to process control queue: {:?}",
@@ -181,6 +183,8 @@ struct NetEpollHandler {
     // a restore as the vCPU thread isn't ready to handle the interrupt. This causes
     // issues when combined with VIRTIO_RING_F_EVENT_IDX interrupt suppression.
     driver_awake: bool,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl NetEpollHandler {
@@ -225,7 +229,7 @@ impl NetEpollHandler {
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
         if self
             .net
-            .process_tx(&self.mem.memory(), &mut self.queue_pair.1)
+            .process_tx(&self.mem.memory(), &mut self.queue_pair.1, Some(&self.vm))
             .map_err(DeviceError::NetQueuePair)?
             || !self.driver_awake
         {
@@ -254,7 +258,7 @@ impl NetEpollHandler {
     fn handle_rx_tap_event(&mut self) -> result::Result<(), DeviceError> {
         if self
             .net
-            .process_rx(&self.mem.memory(), &mut self.queue_pair.0)
+            .process_rx(&self.mem.memory(), &mut self.queue_pair.0, Some(&self.vm))
             .map_err(DeviceError::NetQueuePair)?
             || !self.driver_awake
         {
@@ -421,6 +425,8 @@ pub struct Net {
     seccomp_action: SeccompAction,
     rate_limiter_config: Option<RateLimiterConfig>,
     exit_evt: EventFd,
+    #[cfg(feature = "snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -450,6 +456,8 @@ impl Net {
         offload_tso: bool,
         offload_ufo: bool,
         offload_csum: bool,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         assert!(!taps.is_empty());
 
@@ -542,6 +550,8 @@ impl Net {
             seccomp_action,
             rate_limiter_config,
             exit_evt,
+            #[cfg(feature = "snp")]
+            vm,
         })
     }
 
@@ -566,6 +576,8 @@ impl Net {
         offload_tso: bool,
         offload_ufo: bool,
         offload_csum: bool,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         let taps = open_tap(
             if_name,
@@ -592,6 +604,8 @@ impl Net {
             offload_tso,
             offload_ufo,
             offload_csum,
+            #[cfg(feature = "snp")]
+            vm,
         )
     }
 
@@ -610,6 +624,8 @@ impl Net {
         offload_tso: bool,
         offload_ufo: bool,
         offload_csum: bool,
+        #[cfg(feature = "snp")]
+        vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         let mut taps: Vec<Tap> = Vec::new();
         let num_queue_pairs = fds.len();
@@ -645,6 +661,8 @@ impl Net {
             offload_tso,
             offload_ufo,
             offload_csum,
+            #[cfg(feature = "snp")]
+            vm,
         )
     }
 
@@ -727,6 +745,8 @@ impl VirtioDevice for Net {
                 access_platform: self.common.access_platform.clone(),
                 queue_index: ctrl_queue_index as u16,
                 interrupt_cb: interrupt_cb.clone(),
+                #[cfg(feature = "snp")]
+                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();
@@ -810,6 +830,8 @@ impl VirtioDevice for Net {
                 kill_evt,
                 pause_evt,
                 driver_awake: false,
+                #[cfg(feature = "snp")]
+                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();

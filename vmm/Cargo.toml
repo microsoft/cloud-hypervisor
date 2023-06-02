@@ -10,7 +10,7 @@ guest_debug = ["kvm", "gdbstub", "gdbstub_arch"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
 mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
-snp = ["arch/snp", "hypervisor/snp","virtio-devices/snp"]
+snp = ["arch/snp", "hypervisor/snp","virtio-devices/snp", "net_util/snp"]
 tracing = ["tracer/tracing"]
 igvm = ["hex", "igvm-parser", "arch/igvm", "mshv-bindings"]
 
