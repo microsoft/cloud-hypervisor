@@ -4,9 +4,14 @@ version = "0.1.0"
 authors = ["The Chromium OS Authors"]
 edition = "2021"
 
+[features]
+default = []
+snp = []
+
 [dependencies]
 epoll = "4.3.1"
 getrandom = "0.2.8"
+hypervisor = { path = "../hypervisor" }
 libc = "0.2.139"
 log = "0.4.17"
 net_gen = { path = "../net_gen" }

@@ -226,7 +226,7 @@ impl Request {
 
         let hdr_desc_addr = hdr_desc
             .addr()
-            .translate_gva_with_vmfd(access_platform, hdr_desc.len() as usize, vm.unwrap().clone());
+            .translate_gva_with_vmfd(access_platform, hdr_desc.len() as usize, vm);
 
         let mut req = Request {
             request_type: request_type(desc_chain.memory(), hdr_desc_addr)?,
@@ -269,7 +269,7 @@ impl Request {
 
                 req.data_descriptors.push((
                     desc.addr()
-                        .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm.unwrap().clone()),
+                        .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm),
                     desc.len(),
                 ));
                 desc = desc_chain
@@ -294,7 +294,7 @@ impl Request {
 
         req.status_addr = status_desc
             .addr()
-            .translate_gva_with_vmfd(access_platform, status_desc.len() as usize, vm.unwrap().clone());
+            .translate_gva_with_vmfd(access_platform, status_desc.len() as usize, vm);
 
         Ok(req)
     }

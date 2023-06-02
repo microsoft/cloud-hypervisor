@@ -42,6 +42,8 @@ impl TxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        #[cfg(feature = "snp")]
+        vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut retry_write = false;
         let mut rate_limit_reached = false;
@@ -58,7 +60,7 @@ impl TxVirtio {
             while let Some(desc) = next_desc {
                 let desc_addr = desc
                     .addr()
-                    .translate_gva(access_platform, desc.len() as usize);
+                    .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm);
                 if !desc.is_write_only() && desc.len() > 0 {
                     let buf = desc_chain
                         .memory()
@@ -168,6 +170,7 @@ impl RxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut exhausted_descs = true;
         let mut rate_limit_reached = false;
@@ -187,7 +190,7 @@ impl RxVirtio {
                 .memory()
                 .checked_offset(
                     desc.addr()
-                        .translate_gva(access_platform, desc.len() as usize),
+                        .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm),
                     10,
                 )
                 .ok_or(NetQueuePairError::DescriptorInvalidHeader)?;
@@ -197,7 +200,7 @@ impl RxVirtio {
             while let Some(desc) = next_desc {
                 let desc_addr = desc
                     .addr()
-                    .translate_gva(access_platform, desc.len() as usize);
+                    .translate_gva_with_vmfd(access_platform, desc.len() as usize, vm);
                 if desc.is_write_only() && desc.len() > 0 {
                     let buf = desc_chain
                         .memory()
@@ -354,6 +357,8 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
+        #[cfg(feature = "snp")]
+        vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let tx_tap_retry = self.tx.process_desc_chain(
             mem,
@@ -361,6 +366,8 @@ impl NetQueuePair {
             queue,
             &mut self.tx_rate_limiter,
             self.access_platform.as_ref(),
+            #[cfg(feature = "snp")]
+            vm,
         )?;
 
         // We got told to try again when writing to the tap. Wait for the TAP to be writable
@@ -404,6 +411,8 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
+        #[cfg(feature = "snp")]
+        vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         self.rx_desc_avail = !self.rx.process_desc_chain(
             mem,
@@ -411,6 +420,8 @@ impl NetQueuePair {
             queue,
             &mut self.rx_rate_limiter,
             self.access_platform.as_ref(),
+            #[cfg(feature = "snp")]
+            vm,
         )?;
         let rate_limit_reached = self
             .rx_rate_limiter

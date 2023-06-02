@@ -238,7 +238,7 @@ impl ConsoleEpollHandler {
                 .write_slice(
                     &source_slice[..],
                     desc.addr()
-                        .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize, self.vm.clone()),
+                        .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize, Some(&self.vm.clone())),
                 )
                 .map_err(Error::GuestMemoryWrite)?;
 
@@ -273,7 +273,7 @@ impl ConsoleEpollHandler {
                     .memory()
                     .write_to(
                         desc.addr()
-                            .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize, self.vm.clone()),
+                            .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize, Some(&self.vm.clone())),
                         out,
                         desc.len() as usize,
                     )

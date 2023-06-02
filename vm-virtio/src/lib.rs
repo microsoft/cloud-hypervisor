@@ -17,6 +17,8 @@ use vm_memory::GuestAddress;
 
 pub mod queue;
 pub use queue::*;
+#[macro_use]
+extern crate log;
 
 pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
@@ -104,7 +106,7 @@ pub trait Translatable {
     fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
     //#[cfg(feature = "snp")]
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self;
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self;
 }
 
 impl Translatable for GuestAddress {
@@ -115,13 +117,14 @@ impl Translatable for GuestAddress {
         GuestAddress(self.0.translate_gpa(access_platform, len))
     }
     //#[cfg(feature = "snp")]
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self {
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self {
         GuestAddress(self.0.translate_gva_with_vmfd(access_platform, len, vm))
     }
 }
 
 impl Translatable for u64 {
     fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
+        //debug!("MUISLAM translate_gva: normal");
         if let Some(access_platform) = access_platform {
             access_platform.translate_gva(*self, len as u64).unwrap()
         } else {
@@ -136,8 +139,14 @@ impl Translatable for u64 {
         }
     }
     //#[cfg(feature = "snp")]
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Arc<dyn hypervisor::Vm>) -> Self {
-        vm.gain_page_Access(*self).unwrap();
+    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self {
+        //debug!("MUISLAM translate_gva: with_vmfd");
+        if let Some(_vm) = vm {
+         _vm.gain_page_Access(*self).unwrap();
+        }
+        else {
+            debug!("MUISLAM translate_gva: with_vmfd not expected");
+        }
         *self
     }
 }
