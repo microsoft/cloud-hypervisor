@@ -533,12 +533,13 @@ impl VirtioPciDevice {
                     e
                 ))
             })?;
-
+        //info!("MUISLAM ------------------------- VirtioPciDevice");
         let (device_activated, interrupt_status) = if let Some(state) = state {
             // Update virtqueues indexes for both available and used rings.
             for (i, queue) in queues.iter_mut().enumerate() {
                 queue.set_size(state.queues[i].size);
                 queue.set_ready(state.queues[i].ready);
+                info!("MUISLAM ------------------------- VirtioPciDevice {:0x} {:0x} {:0x} ---------------------", state.queues[i].desc_table,state.queues[i].avail_ring, state.queues[i].used_ring);
                 queue
                     .try_set_desc_table_address(GuestAddress(state.queues[i].desc_table))
                     .unwrap();
@@ -799,7 +800,7 @@ impl VirtioPciDevice {
 
             queues.push((
                 queue_index,
-                vm_virtio::clone_queue(queue),
+                vm_virtio::clone_queue(queue, Some(&self.vm.clone())),
                 self.queue_evts[queue_index].try_clone().unwrap(),
             ));
         }

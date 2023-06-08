@@ -209,6 +209,8 @@ impl BlockEpollHandler {
                     self.disk_image.as_mut(),
                     &self.disk_image_id,
                     desc_chain.head_index() as u64,
+                    #[cfg(feature = "snp")]
+                    Some(&self.vm.clone()),
                 )
                 .map_err(Error::RequestExecuting)?
             {

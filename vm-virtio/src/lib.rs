@@ -142,7 +142,7 @@ impl Translatable for u64 {
     fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self {
         //debug!("MUISLAM translate_gva: with_vmfd");
         if let Some(_vm) = vm {
-         _vm.gain_page_Access(*self).unwrap();
+         _vm.gain_page_Access(*self, len  as u32).unwrap();
         }
         else {
             debug!("MUISLAM translate_gva: with_vmfd not expected");
@@ -152,7 +152,7 @@ impl Translatable for u64 {
 }
 
 /// Helper for cloning a Queue since QueueState doesn't derive Clone
-pub fn clone_queue(queue: &Queue) -> Queue {
+pub fn clone_queue(queue: &Queue, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Queue {
     let mut q = Queue::new(queue.max_size()).unwrap();
 
     q.set_next_avail(queue.next_avail());
@@ -160,6 +160,17 @@ pub fn clone_queue(queue: &Queue) -> Queue {
     q.set_event_idx(queue.event_idx_enabled());
     q.set_size(queue.size());
     q.set_ready(queue.ready());
+
+    let mut desc_a = GuestAddress(queue.desc_table());
+    let mut avail_a = GuestAddress(queue.avail_ring());
+    let mut ring_a = GuestAddress(queue.used_ring());
+
+    if let Some(_vm) = vm {
+        desc_a = desc_a.translate_gva_with_vmfd(None, 8, vm);
+        avail_a = avail_a.translate_gva_with_vmfd(None, 8, vm);
+        ring_a = ring_a.translate_gva_with_vmfd(None, 8, vm);
+        info!("MUISLAM: clone_queue {:0x}, {:0x}, {:0x}", desc_a.0, avail_a.0, ring_a.0);
+    }
     q.try_set_desc_table_address(GuestAddress(queue.desc_table()))
         .unwrap();
     q.try_set_avail_ring_address(GuestAddress(queue.avail_ring()))

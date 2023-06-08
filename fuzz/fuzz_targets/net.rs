@@ -167,7 +167,7 @@ fn setup_virt_queues(bytes: &[&[u8; QUEUE_DATA_SIZE]], base_addr: u64) -> Vec<Qu
     let mut queues = Vec::new();
     for (i, b) in bytes.iter().enumerate() {
         let mut q = Queue::new(QUEUE_SIZE).unwrap();
-
+        println!("------------------------- setup_virt_queues ---------------------");
         let desc_table_addr = base_addr + (QUEUE_BYTES_SIZE * i) as u64;
         let avail_ring_addr = desc_table_addr + DESC_TABLE_SIZE;
         let used_ring_addr = avail_ring_addr + PADDING_SIZE + AVAIL_RING_SIZE;
