@@ -398,6 +398,7 @@ pub trait Vm: Send + Sync + Any {
     fn gain_page_Access(
         &self,
         gpa: u64,
+        size: u32,
     ) -> Result<()> {
         unimplemented!()
     }

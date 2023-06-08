@@ -17,6 +17,9 @@ use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, VersionMa
 use vm_virtio::AccessPlatform;
 
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
+pub const MAX_QUEUE_SIZE: u32 = 32768;
+
+
 
 #[derive(Clone, Versionize)]
 pub struct VirtioPciCommonConfigState {
@@ -35,31 +38,52 @@ impl VersionMapped for VirtioPciCommonConfigState {}
 #[derive(Clone, Debug, Default)]
 struct QueueAdresses {
     pub desc_table_address: u64,
+    pub desc_size: u32,
     pub avail_ring_address: u64,
+    pub avail_size: u32,
     pub used_ring_address: u64,
+    pub used_size: u32
 }
 #[cfg(feature = "snp")]
 impl QueueAdresses {
     pub fn new() -> QueueAdresses{
         QueueAdresses::default()
     }
-    fn set_desc_table_address(&mut self, low: Option<u32>, high: Option<u32>) {
+    fn set_desc_table_address(&mut self, low: Option<u32>, high: Option<u32>, size: Option<u32>) {
         let low = low.unwrap_or(self.desc_table_address as u32) as u64;
         let high = high.unwrap_or((self.desc_table_address >> 32) as u32) as u64;
 
         self.desc_table_address = (high << 32) | low;
+        if size.is_some() {
+            self.desc_size = size.unwrap();
+        }
     }
-    fn set_avail_ring_address(&mut self, low: Option<u32>, high: Option<u32>) {
+    fn set_avail_ring_address(&mut self, low: Option<u32>, high: Option<u32>, size: Option<u32>) {
         let low = low.unwrap_or(self.avail_ring_address as u32) as u64;
         let high = high.unwrap_or((self.avail_ring_address >> 32) as u32) as u64;
 
         self.avail_ring_address = (high << 32) | low;
+        if size.is_some() {
+            self.avail_size = size.unwrap();
+        }
     }
-    fn set_used_ring_address(&mut self, low: Option<u32>, high: Option<u32>) {
+    fn set_used_ring_address(&mut self, low: Option<u32>, high: Option<u32>, size: Option<u32>) {
         let low = low.unwrap_or(self.used_ring_address as u32) as u64;
         let high = high.unwrap_or((self.used_ring_address >> 32) as u32) as u64;
 
         self.used_ring_address = (high << 32) | low;
+        if size.is_some() {
+            self.used_size = size.unwrap();
+        }
+    }
+    fn set_desc_size(&mut self, sz: u32) {
+        self.desc_size = sz;
+    }
+    fn set_avail_size(&mut self, sz: u32) {
+        self.avail_size = sz;
+    }
+    fn set_ring_size(&mut self, sz: u32) {
+        self.used_size = sz;
     }
 }
 /// Contains the data for reading and writing the common configuration structure of a virtio PCI
@@ -236,6 +260,7 @@ impl VirtioPciCommonConfig {
                 // Translate address of descriptor table and vrings.
                 if let Some(access_platform) = &self.access_platform {
                     if ready {
+                        println!("------------------------------------- write_common_config_word ");
                         let desc_table = access_platform.translate_gva(q.desc_table(), 0).unwrap();
                         let avail_ring = access_platform.translate_gva(q.avail_ring(), 0).unwrap();
                         let used_ring = access_platform.translate_gva(q.used_ring(), 0).unwrap();
@@ -310,40 +335,42 @@ impl VirtioPciCommonConfig {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None));
                 #[cfg(feature = "snp")] {
                     //println!("write_common_config_dword: low: {:0x}", value);
-                    self.queue_addresses.set_desc_table_address(Some(value), None);
+                    self.queue_addresses.set_desc_table_address(Some(value), None, None);
                 }
             }
             0x24 => {
+
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
                 #[cfg(feature = "snp")] {
                     //println!("write_common_config_dword: high: {:0x}", value);
-                    self.queue_addresses.set_desc_table_address(None, Some(value));
+                    self.queue_addresses.set_desc_table_address(None, Some(value), None);
+                    //self.queue_addresses.set_desc_size();
                     //println!("write_common_config_dword: {:0x}", self.queue_addresses.desc_table_address);
-                    self.vm.gain_page_Access(self.queue_addresses.desc_table_address).unwrap()
+                    self.vm.gain_page_Access(self.queue_addresses.desc_table_address, 4096).unwrap()
                 }
             }
             0x28 => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(Some(value), None));
                 #[cfg(feature = "snp")]
-                self.queue_addresses.set_avail_ring_address(Some(value), None);
+                self.queue_addresses.set_avail_ring_address(Some(value), None, None);
             }
             0x2c => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(None, Some(value)));
                 #[cfg(feature = "snp")] {
-                    self.queue_addresses.set_avail_ring_address(None, Some(value));
-                    self.vm.gain_page_Access(self.queue_addresses.avail_ring_address).unwrap()
+                    self.queue_addresses.set_avail_ring_address(None, Some(value), None);
+                    self.vm.gain_page_Access(self.queue_addresses.avail_ring_address, 4096).unwrap()
                 }
             }
             0x30 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(Some(value), None));
                 #[cfg(feature = "snp")]
-                self.queue_addresses.set_used_ring_address(Some(value), None);
+                self.queue_addresses.set_used_ring_address(Some(value), None, None);
             }
             0x34 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(None, Some(value)));
                 #[cfg(feature = "snp")] {
-                    self.queue_addresses.set_used_ring_address(None, Some(value));
-                    self.vm.gain_page_Access(self.queue_addresses.used_ring_address).unwrap()
+                    self.queue_addresses.set_used_ring_address(None, Some(value), None);
+                    self.vm.gain_page_Access(self.queue_addresses.used_ring_address, 4096).unwrap()
                 }
             }
             _ => {

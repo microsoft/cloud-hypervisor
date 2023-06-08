@@ -1757,8 +1757,8 @@ impl vm::Vm for MshvVm {
         if pages.len() == 0 {
             return Ok(());
         }
-        //debug!("MUISLAM: import_isolated_pages: type: {}", page_type);
-        //debug!("MUISLAM: Pages: {:0x?}", pages);
+        debug!("MUISLAM: import_isolated_pages: type: {}", page_type);
+        debug!("MUISLAM: Pages: {:0x?}", pages);
         let mut isolated_pages =
             vec_with_array_field::<mshv_import_isolated_pages, u64>(pages.len());
         isolated_pages[0].num_pages = pages.len() as u64;
@@ -1812,10 +1812,24 @@ impl vm::Vm for MshvVm {
     fn gain_page_Access(
         &self,
         gpa: u64,
+        size: u32,
     ) -> vm::Result<()>{
         let mut gpa_list = Vec::new();
-        //println!("gain_page_Access: {:0x}", gpa);
+        info!("MUISLAM: gain_page_Access: {:0x} size: {:0x}", gpa, size);
         gpa_list.push(gpa);
+        
+        let mut _size: i64 = size as i64;
+        _size = _size - HV_PAGE_SIZE as i64;
+        let mut i = 1;
+        while _size > 0 {
+
+            let _gpa = gpa + HV_PAGE_SIZE * i;
+            gpa_list.push(_gpa);
+            _size = _size - HV_PAGE_SIZE as i64;
+            i = i + 1;
+            info!("MUISLAM: gain_page_Access: {:0x} size: {:0x}", _gpa, _size);
+        }
+        
         _modify_gpa_host_access(self.fd.clone(), HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
             0, 1, gpa_list.as_slice()).unwrap();
         //println!("gain_page_Access: {:0x}", gpa);
