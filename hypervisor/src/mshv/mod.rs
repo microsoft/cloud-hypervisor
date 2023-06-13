@@ -53,6 +53,10 @@ use crate::arch::x86::{
 
 #[cfg(feature = "snp")]
 use igvm_parser::igvm::IgvmVhsSnpIdBlock;
+#[cfg(feature = "snp")]
+mod bitmap;
+#[cfg(feature = "snp")]
+use bitmap::SimpleAtomicBitmap;
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
@@ -231,7 +235,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         HypervisorType::Mshv
     }
 
-    fn create_vm_with_type(&self, vm_type: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
+    fn create_vm_with_type(&self, vm_type: u64, #[cfg(feature = "snp")] mem_size: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
             match self.mshv.create_vm_with_type(vm_type) {
@@ -294,6 +298,8 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "snp")]
+            host_access_pages: SimpleAtomicBitmap::new_with_bytes(mem_size as usize, HV_PAGE_SIZE as usize),
         }))
     }
 
@@ -308,9 +314,9 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// let hypervisor = MshvHypervisor::new().unwrap();
     /// let vm = hypervisor.create_vm().unwrap();
     /// ```
-    fn create_vm(&self) -> hypervisor::Result<Arc<dyn vm::Vm>> {
+    fn create_vm(&self, #[cfg(feature = "snp")] mem_size: u64) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
-        self.create_vm_with_type(vm_type)
+        self.create_vm_with_type(vm_type, mem_size)
     }
     ///
     /// Get the supported CpuID
@@ -635,6 +641,7 @@ impl cpu::Vcpu for MshvVcpu {
                     let ranges = info.ranges;
                     let (gpa_start, gpa_count) = snp::parse_gpa_range(ranges[0]).unwrap();
                     info!("gpa_start: {:?}, gpa_count: {:?}", gpa_start, gpa_count);
+                    /*
                     let mut gpa_list = Vec::new();
                     for i in 0..gpa_count {
                         let gpa = guest_memory
@@ -642,30 +649,13 @@ impl cpu::Vcpu for MshvVcpu {
                             .memory()
                             .get_host_address(GuestAddress(gpa_start + i * HV_PAGE_SIZE))
                             .unwrap() as u64;
-                        // let gpa = gpa_start + i * HV_PAGE_SIZE;
+                        self.vm_fd.remove_gpa_from_host_acess_cache(gpa);
                         gpa_list.push(gpa);
                     }
-                    // if host_vis != 3 {
-                    _modify_gpa_host_access(
-                        self.vm_fd.clone(),
-                        0,
-                        0,
-                        false as u8,
-                        gpa_list.as_slice(),
-                    )
-                    .unwrap();
-                    Ok(cpu::VmExit::Ignore)
-                    // } else {
-                    //     _modify_gpa_host_access(
-                    //         self.vm_fd.clone(),
-                    //         host_vis,
-                    //         0,
-                    //         true as u8,
-                    //         gpa_list.as_slice(),
-                    //     )
-                    //     .unwrap();
-                    //     Ok(cpu::VmExit::Ignore)
-                    // }
+                    Ok(cpu::VmExit::Ignore) */
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit: Attribute Intercept"
+                    )))
                 }
                 #[cfg(feature = "snp")]
                 hv_message_type_HVMSG_X64_SEV_VMG_EXIT_INTERCEPT => {
@@ -1411,6 +1401,8 @@ pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
+    #[cfg(feature = "snp")]
+    host_access_pages: SimpleAtomicBitmap,
 }
 
 impl MshvVm {
@@ -1815,24 +1807,39 @@ impl vm::Vm for MshvVm {
         size: u32,
     ) -> vm::Result<()>{
         let mut gpa_list = Vec::new();
-        info!("MUISLAM: gain_page_Access: {:0x} size: {:0x}", gpa, size);
-        gpa_list.push(gpa);
+        let mut _pfn = (gpa >> PAGE_SHIFT) as usize;
+
+        if !self.host_access_pages.is_bit_set(_pfn) {
+            gpa_list.push(gpa);
+        }
         
         let mut _size: i64 = size as i64;
         _size = _size - HV_PAGE_SIZE as i64;
         let mut i = 1;
         while _size > 0 {
-
             let _gpa = gpa + HV_PAGE_SIZE * i;
-            gpa_list.push(_gpa);
+            _pfn = _pfn + 1;
+            if !self.host_access_pages.is_bit_set(_pfn) {
+                gpa_list.push(_gpa);
+            }
             _size = _size - HV_PAGE_SIZE as i64;
             i = i + 1;
-            info!("MUISLAM: gain_page_Access: {:0x} size: {:0x}", _gpa, _size);
         }
         
-        _modify_gpa_host_access(self.fd.clone(), HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
-            0, 1, gpa_list.as_slice()).unwrap();
-        //println!("gain_page_Access: {:0x}", gpa);
+        if gpa_list.len() > 0 {
+            _modify_gpa_host_access(self.fd.clone(), HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
+                0, 1, gpa_list.as_slice()).unwrap();
+            for gpa in gpa_list {
+                self.host_access_pages.set_bit(gpa as usize >> PAGE_SHIFT);
+            }
+        }
+
+        Ok(())
+    }
+    #[cfg(feature = "snp")]
+    fn remove_gpa_from_host_acess_cache(&self, gpa: u64) -> vm::Result<()> {
+        let pfn = gpa >> PAGE_SHIFT;
+        self.host_access_pages.reset_bit(pfn as usize);
         Ok(())
     }
 }
@@ -1850,7 +1857,7 @@ fn _modify_gpa_host_access(
     gpa_list[0].host_access = host_access;
     gpa_list[0].acquire = acquire;
     gpa_list[0].flags = flags;
-    //println!("_modify_gpa_host_access: Len: {:?}, gpa: {:0x}", gpas.len(), gpas[0]);
+
     // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
     // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
     // everything from gpas.
@@ -1858,7 +1865,7 @@ fn _modify_gpa_host_access(
         let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
         gpas_slice.copy_from_slice(&gpas);
     }
-    //println!("_modify_gpa_host_access: Len: {:?}, gpa: {:0x}", gpas.len(), gpas[0]);
+
     fd.modify_gpa_host_access(&gpa_list[0])
         .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
 }
