@@ -414,6 +414,11 @@ pub trait Vm: Send + Sync + Any {
     fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock, host_data: &[u8]) -> Result<()> {
         unimplemented!()
     }
+    #[cfg(feature = "snp")]
+    /// Remove a gpa from ache of pages that host has access to
+    fn remove_gpa_from_host_acess_cache(&self, gpa: u64) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 pub trait VmOps: Send + Sync {
