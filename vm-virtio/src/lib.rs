@@ -169,7 +169,6 @@ pub fn clone_queue(queue: &Queue, vm: Option<&Arc<dyn hypervisor::Vm>>) -> Queue
         desc_a = desc_a.translate_gva_with_vmfd(None, 8, vm);
         avail_a = avail_a.translate_gva_with_vmfd(None, 8, vm);
         ring_a = ring_a.translate_gva_with_vmfd(None, 8, vm);
-        info!("MUISLAM: clone_queue {:0x}, {:0x}, {:0x}", desc_a.0, avail_a.0, ring_a.0);
     }
     q.try_set_desc_table_address(GuestAddress(queue.desc_table()))
         .unwrap();

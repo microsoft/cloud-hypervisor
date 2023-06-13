@@ -365,7 +365,6 @@ impl Request {
             SmallVec::with_capacity(self.data_descriptors.len());
         for (data_addr, data_len) in &self.data_descriptors {
             data_addr.translate_gva_with_vmfd(None, *data_len as usize, vm);
-            info!("MUISLAM: data_addr: {:0x}", data_addr.0);
             if *data_len == 0 {
                 continue;
             }
@@ -435,7 +434,6 @@ impl Request {
         match request_type {
             RequestType::In => {
                 for (data_addr, data_len) in &self.data_descriptors {
-                    info!("MUISLAM: data_addr: {:0x}", data_addr.0);
                     data_addr.translate_gva_with_vmfd(None, *data_len as usize, vm);
                     mem.get_slice(*data_addr, *data_len as usize)
                         .map_err(ExecuteError::GetHostAddress)?
