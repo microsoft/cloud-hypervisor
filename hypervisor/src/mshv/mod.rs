@@ -235,7 +235,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         HypervisorType::Mshv
     }
 
-    fn create_vm_with_type(&self, vm_type: u64, #[cfg(feature = "snp")] mem_size: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
+    fn create_vm_with_type(&self, vm_type: u64, #[cfg(feature = "snp")] _mem_size: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
             match self.mshv.create_vm_with_type(vm_type) {
@@ -299,7 +299,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "snp")]
-            host_access_pages: SimpleAtomicBitmap::new_with_bytes(mem_size as usize, HV_PAGE_SIZE as usize),
+            host_access_pages: SimpleAtomicBitmap::new_with_bytes(_mem_size as usize, HV_PAGE_SIZE as usize),
         }))
     }
 
@@ -316,7 +316,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// ```
     fn create_vm(&self, #[cfg(feature = "snp")] mem_size: u64) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
-        self.create_vm_with_type(vm_type, mem_size)
+        self.create_vm_with_type(vm_type, #[cfg(feature = "snp")] mem_size)
     }
     ///
     /// Get the supported CpuID
