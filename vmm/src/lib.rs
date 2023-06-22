@@ -1208,6 +1208,7 @@ impl Vmm {
             existing_memory_files,
             #[cfg(target_arch = "x86_64")]
             None,
+            #[cfg(feature = "snp")] config.lock().unwrap().is_snp_enabled(),
         )
         .map_err(|e| {
             MigratableError::MigrateReceive(anyhow!(

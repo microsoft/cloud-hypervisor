@@ -188,6 +188,8 @@ pub struct MemoryManager {
     pub acpi_address: Option<GuestAddress>,
     #[cfg(target_arch = "aarch64")]
     uefi_flash: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
+    #[cfg(feature = "snp")]
+    snp_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -441,6 +443,7 @@ impl MemoryManager {
         zones: &[MemoryZoneConfig],
         prefault: Option<bool>,
         thp: bool,
+        snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut zones = zones.to_owned();
         let mut mem_regions = Vec::new();
@@ -498,6 +501,8 @@ impl MemoryManager {
                     zone.host_numa_node,
                     None,
                     thp,
+                    #[cfg(feature = "snp")]
+                    snp_enabled,
                 )?;
 
                 // Add region to the list of regions associated with the
@@ -551,6 +556,7 @@ impl MemoryManager {
         prefault: Option<bool>,
         mut existing_memory_files: HashMap<u32, File>,
         thp: bool,
+        #[cfg(feature = "snp")] snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut memory_regions = Vec::new();
         let mut memory_zones = HashMap::new();
@@ -577,6 +583,8 @@ impl MemoryManager {
                         zone_config.host_numa_node,
                         existing_memory_files.remove(&guest_ram_mapping.slot),
                         thp,
+                        #[cfg(feature = "snp")]
+                        false,
                     )?;
                     memory_regions.push(Arc::clone(&region));
                     if let Some(memory_zone) = memory_zones.get_mut(&guest_ram_mapping.zone_id) {
@@ -878,6 +886,7 @@ impl MemoryManager {
         restore_data: Option<&MemoryManagerSnapshotData>,
         existing_memory_files: Option<HashMap<u32, File>>,
         #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
+        #[cfg(feature = "snp")] snp_enabled: bool,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         trace_scoped!("MemoryManager::new");
 
@@ -914,6 +923,7 @@ impl MemoryManager {
                 prefault,
                 existing_memory_files.unwrap_or_default(),
                 config.thp,
+                #[cfg(feature = "snp")] snp_enabled,
             )?;
             let guest_memory =
                 GuestMemoryMmap::from_arc_regions(regions).map_err(Error::GuestMemory)?;
@@ -951,7 +961,7 @@ impl MemoryManager {
                 .collect();
 
             let (mem_regions, mut memory_zones) =
-                Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault, config.thp)?;
+                Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault, config.thp, #[cfg(feature = "snp")] snp_enabled)?;
 
             let mut guest_memory =
                 GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
@@ -1001,6 +1011,8 @@ impl MemoryManager {
                                 zone.host_numa_node,
                                 None,
                                 config.thp,
+                                #[cfg(feature = "snp")]
+                                snp_enabled,
                             )?;
 
                             guest_memory = guest_memory
@@ -1130,6 +1142,8 @@ impl MemoryManager {
             #[cfg(target_arch = "aarch64")]
             uefi_flash: None,
             thp: config.thp,
+            #[cfg(feature = "snp")]
+            snp_enabled,
         };
 
         #[cfg(target_arch = "aarch64")]
@@ -1178,6 +1192,8 @@ impl MemoryManager {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 None,
+                #[cfg(feature = "snp")]
+                false,
             )?;
 
             mm.lock()
@@ -1295,6 +1311,8 @@ impl MemoryManager {
         host_numa_node: Option<u32>,
         existing_memory_file: Option<File>,
         thp: bool,
+        #[cfg(feature = "snp")]
+        snp_enabled: bool,
     ) -> Result<Arc<GuestRegionMmap>, Error> {
         let mut mmap_flags = libc::MAP_NORESERVE;
 
@@ -1437,6 +1455,8 @@ impl MemoryManager {
             None,
             None,
             self.thp,
+            #[cfg(feature = "snp")]
+            self.snp_enabled,
         )?;
 
         // Map it into the guest

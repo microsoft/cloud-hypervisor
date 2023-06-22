@@ -821,6 +821,7 @@ impl Vm {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc_config,
+                #[cfg(feature = "snp")] snp_enabled,
             )
             .map_err(Error::MemoryManager)?
         };
