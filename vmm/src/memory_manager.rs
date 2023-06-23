@@ -1316,6 +1316,18 @@ impl MemoryManager {
     ) -> Result<Arc<GuestRegionMmap>, Error> {
         let mut mmap_flags = libc::MAP_NORESERVE;
 
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "snp")] {
+                let snp = if snp_enabled {
+                        true
+                    } else {
+                        false
+                    };
+            } else {
+                let snp = false;
+            }
+        }
+
         // The duplication of mmap_flags ORing here is unfortunate but it also makes
         // the complexity of the handling clear.
         let fo = if let Some(f) = existing_memory_file {
@@ -1329,10 +1341,11 @@ impl MemoryManager {
                 mmap_flags |= libc::MAP_PRIVATE;
             }
             Some(Self::open_backing_file(backing_file, file_offset)?)
-        } else if shared || hugepages {
+        } else if shared || hugepages || snp {
             // For hugepages we must also MAP_SHARED otherwise we will trigger #4805
             // because the MAP_PRIVATE will trigger CoW against the backing file with
-            // the VFIO pinning
+            // the VFIO pinning. For Sev-Snp we do MAP_SHARED as pages are shared with
+            // hypervisor and VMM
             mmap_flags |= libc::MAP_SHARED;
             Some(Self::create_anonymous_file(size, hugepages, hugepage_size)?)
         } else {
