@@ -163,7 +163,7 @@ pub struct MemoryManager {
     allocator: Arc<Mutex<SystemAllocator>>,
     hotplug_method: HotplugMethod,
     boot_ram: u64,
-    current_ram: u64,
+    pub current_ram: u64,
     next_hotplug_slot: usize,
     shared: bool,
     hugepages: bool,

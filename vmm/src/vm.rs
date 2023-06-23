@@ -980,6 +980,8 @@ impl Vm {
         BIOS-e820: [mem 0x0000000000100000-0x00000000001fffff] ACPI data
         BIOS-e820: [mem 0x0000000001a00000-0x0000000003c79fff] usable
          */
+        let cur_ram_size = memory_manager.lock().unwrap().current_ram;
+        debug!("current ram size: {:?}", cur_ram_size);
         let num_cpus = cpu_manager.lock().unwrap().vcpus().len() as u32;
         let mut arch_mem_regions: Vec<ArchMemRegion> = Vec::new();
         arch_mem_regions.push(ArchMemRegion {
@@ -987,11 +989,24 @@ impl Vm {
             size: 0x10000000,
             r_type: RegionType::Reserved,
         });
-        arch_mem_regions.push(ArchMemRegion {
-            base: 0x200000,
-            size: 2 * 1024 * 1024 * 1024 - 0x200000,
-            r_type: RegionType::Ram,
-        });
+        if cur_ram_size <= 3 * 1024 * 1024 * 1024 {
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x200000,
+                size: (cur_ram_size - 0x200000) as usize,
+                r_type: RegionType::Ram,
+            });
+        } else {
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x200000,
+                size: 3 * 1024 * 1024 * 1024 - 0x200000,
+                r_type: RegionType::Ram,
+            });
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x0000000100000000,
+                size: (cur_ram_size - 3 * 1024 * 1024 * 1024) as usize,
+                r_type: RegionType::Ram,
+            });
+        }
         let res =
             igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, num_cpus, "", #[cfg(feature = "snp")] host_data)
                 .map_err(Error::IgvmLoad)?;
