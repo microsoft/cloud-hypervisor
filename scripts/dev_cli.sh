@@ -295,6 +295,7 @@ cmd_build() {
         --rm \
         --volume $exported_device \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        --volume /home/cloud/repos/igvm-parser:/igvm-parser \
         --env RUSTFLAGS="$rustflags" \
         --env TARGET_CC="$target_cc" \
         "$CTR_IMAGE" \
@@ -314,6 +315,7 @@ cmd_clean() {
         --workdir "$CTR_CLH_ROOT_DIR" \
         --rm \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+        --volume /home/cloud/repos/igvm-parser:/igvm-parser \
         "$CTR_IMAGE" \
         cargo clean \
         --target-dir "$CTR_CLH_CARGO_TARGET" \
@@ -423,6 +425,8 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --volume /home/cloud/repos/igvm-parser:/igvm-parser \
+            --volume /usr/share/cloud-hypervisor/cvm:/igvm_files \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             "$CTR_IMAGE" \
@@ -499,6 +503,8 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --volume /home/cloud/repos/igvm-parser:/igvm-parser \
+            --volume /usr/share/cloud-hypervisor/cvm:/igvm_files \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             "$CTR_IMAGE" \
@@ -537,6 +543,8 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --volume /home/cloud/repos/igvm-parser:/igvm-parser \
+            --volume /usr/share/cloud-hypervisor/cvm:/igvm_files \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             --env RUST_BACKTRACE="${RUST_BACKTRACE}" \

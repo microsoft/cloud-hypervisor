@@ -8,6 +8,7 @@
 use crate::{mean, PerformanceTestControl};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::string::String;
 use std::thread;
 use std::time::Duration;
@@ -63,13 +64,17 @@ const DIRECT_KERNEL_BOOT_CMDLINE: &str =
 // Creates the path for direct kernel boot and return the path.
 // For x86_64, this function returns the vmlinux kernel path.
 // For AArch64, this function returns the PE kernel path.
-fn direct_kernel_boot_path() -> PathBuf {
-    let mut workload_path = dirs::home_dir().unwrap();
-    workload_path.push("workloads");
+fn direct_kernel_boot_path(vcpus: String, console: String) -> PathBuf {
+    // let mut workload_path = dirs::home_dir().unwrap();
+    // workload_path.push("workloads");
+
+    let path_str = "/igvm_files";
+    let workload_path: PathBuf = PathBuf::from(path_str);
 
     let mut kernel_path = workload_path;
     #[cfg(target_arch = "x86_64")]
-    kernel_path.push("vmlinux");
+    // kernel_path.push("vmlinux");
+    kernel_path.push(format!("linux{}-{}.bin", vcpus, console));
     #[cfg(target_arch = "aarch64")]
     kernel_path.push("Image");
 
@@ -93,18 +98,21 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
     let mut child = GuestCommand::new(&guest)
         .args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+        .args(["--kernel", direct_kernel_boot_path(format!("{num_queues}").to_string(), "hvc0".to_string()).to_str().unwrap()])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .capture_output()
-        .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
+        .verbosity(VerbosityLevel::Debug)
+        .set_print_cmd(true)
         .spawn()
         .unwrap();
 
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
+        println!("========> Test: Guest interface config: {}", &guest.ssh_command("ip a").unwrap());
         measure_virtio_net_throughput(test_timeout, num_queues / 2, &guest, rx, bandwidth).unwrap()
     });
 
@@ -134,19 +142,25 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
     let mut child = GuestCommand::new(&guest)
         .args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--kernel", direct_kernel_boot_path(format!("{num_queues}").to_string(), "hvc0".to_string()).to_str().unwrap()])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .capture_output()
-        .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
+        // .verbosity(VerbosityLevel::Debug)
+        .set_print_cmd(true)
         .spawn()
         .unwrap();
 
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
-
+        println!("========> Test: Booting is done");
+        println!("========> Test: Guest interface config: {}", &guest.ssh_command("ip a").unwrap());
+        println!("========> Test: Guest check mountpoint: {}", &guest.ssh_command("df -kh").unwrap());
+        println!("========> Test: Guest lsblk: {}", &guest.ssh_command("lsblk").unwrap());
+        println!("========> Test: Guest mount: {}", &guest.ssh_command("mount").unwrap());
         // 'ethr' tool will measure the latency multiple times with provided test time
         let latency = measure_virtio_net_latency(&guest, control.test_timeout).unwrap();
         mean(&latency).unwrap()
@@ -246,8 +260,8 @@ fn parse_boot_time_output(output: &[u8]) -> Result<f64, Error> {
 fn measure_boot_time(cmd: &mut GuestCommand, test_timeout: u32) -> Result<f64, Error> {
     let mut child = cmd
         .capture_output()
-        .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
+        // .verbosity(VerbosityLevel::Warn)
+        // .set_print_cmd(true)
         .spawn()
         .unwrap();
 
@@ -281,10 +295,15 @@ pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
                 &format!("boot={}", control.num_boot_vcpus.unwrap_or(1)),
             ])
             .args(["--memory", "size=1G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path(format!("{}", control.num_boot_vcpus.unwrap_or(1)).to_string(), "ttyS0".to_string()).to_str().unwrap()])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--console", "off"])
-            .default_disks();
+            .args(["--serial", "tty"])
+            // .verbosity(VerbosityLevel::Debug)
+            .default_disks()
+            .set_print_cmd(true);
 
         measure_boot_time(c, control.test_timeout).unwrap()
     });
@@ -308,9 +327,13 @@ pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
                 &format!("boot={}", control.num_boot_vcpus.unwrap_or(1)),
             ])
             .args(["--memory", "size=1G,hugepages=on"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path(format!("{}", control.num_boot_vcpus.unwrap_or(1)).to_string(), "ttyS0".to_string()).to_str().unwrap()])
             .args(["--cmdline", "root=/dev/pmem0p1 console=ttyS0 quiet rw"])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--console", "off"])
+            .verbosity(VerbosityLevel::Debug)
+            .set_print_cmd(true)
             .args([
                 "--pmem",
                 format!(
@@ -349,8 +372,11 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
     let mut child = GuestCommand::new(&guest)
         .args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--kernel", direct_kernel_boot_path(format!("{num_queues}").to_string(), "hvc0".to_string()).to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .verbosity(VerbosityLevel::Debug)
         .args([
             "--disk",
             format!(
@@ -371,7 +397,7 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
         .args(["--api-socket", &api_socket])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
+        .set_print_cmd(true)
         .spawn()
         .unwrap();
 

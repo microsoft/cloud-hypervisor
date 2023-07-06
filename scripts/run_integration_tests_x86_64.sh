@@ -15,7 +15,7 @@ process_common_args "$@"
 test_features=""
 
 if [ "$hypervisor" = "mshv" ] ;  then
-    test_features="--no-default-features --features mshv"
+    test_features="--no-default-features --features mshv,igvm,snp"
 fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
@@ -156,7 +156,7 @@ cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
 
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 
-cargo build --no-default-features --features "kvm,mshv" --all  --release --target $BUILD_TARGET
+cargo build --no-default-features --features "kvm,mshv,igvm,snp" --all  --release --target $BUILD_TARGET
 
 # We always copy a fresh version of our binary for our L2 guest.
 cp target/$BUILD_TARGET/release/cloud-hypervisor $VFIO_DIR
@@ -177,14 +177,14 @@ sudo chmod a+rwX /dev/hugepages
 # Update max locked memory to 'unlimited' to avoid issues with vDPA
 ulimit -l unlimited
 
-export RUST_BACKTRACE=1
+export RUST_BACKTRACE=full
 time cargo test $test_features "common_parallel::$test_filter" -- ${test_binary_args[*]}
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
+    export RUST_BACKTRACE=full
     time cargo test $test_features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
     RES=$?
 fi

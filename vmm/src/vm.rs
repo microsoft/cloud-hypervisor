@@ -1086,20 +1086,41 @@ impl Vm {
         #[cfg(feature = "igvm")]
         let igvm = &payload.igvm;
         #[cfg(feature = "snp")]
-        let host_data = &payload.host_data;
+        // let host_data = &payload.host_data;
         #[cfg(feature = "igvm")] {
             if kernel.is_some() && igvm.is_some() {
                 // Providing both Kernel and IGVM is wrong
                 panic!("Invalid playload: Either igvm or kernel should be provided");
             }
         }
+        let host_data = Some("243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07");
+
         if firmware.is_some() {
-            let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
-            return Self::load_kernel(firmware, None, memory_manager);
+            // let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            // return Self::load_kernel(firmware, None, memory_manager);
+
+            let igvm = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            #[cfg(feature = "snp")] {
+                if let Some(host_data_str) =  host_data {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                }
+            }
+            #[cfg(not(feature = "snp"))]
+            return Self::load_igvm(igvm, memory_manager, cpu_manager);
+
         } else if kernel.is_some() {
-            let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
-            let cmdline = Self::generate_cmdline(payload)?;
-            return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+            // let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            // let cmdline = Self::generate_cmdline(payload)?;
+            // return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+
+            let igvm = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            #[cfg(feature = "snp")] {
+                if let Some(host_data_str) =  host_data {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                }
+            }
+            #[cfg(not(feature = "snp"))]
+            return Self::load_igvm(igvm, memory_manager, cpu_manager);
         } else if igvm.is_some() {
             #[cfg(feature = "igvm")]
             {
