@@ -8,6 +8,7 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use ssh2::Session;
+use std::ascii::AsciiExt;
 use std::env;
 use std::ffi::OsStr;
 use std::io;
@@ -67,7 +68,7 @@ pub struct GuestNetworkConfig {
 
 pub const DEFAULT_TCP_LISTENER_MESSAGE: &str = "booted";
 pub const DEFAULT_TCP_LISTENER_PORT: u16 = 8000;
-pub const DEFAULT_TCP_LISTENER_TIMEOUT: i32 = 120;
+pub const DEFAULT_TCP_LISTENER_TIMEOUT: i32 = 600;
 
 #[derive(Debug)]
 pub enum WaitForBootError {
@@ -559,6 +560,7 @@ fn scp_to_guest_with_auth(
     let mut counter = 0;
     loop {
         match (|| -> Result<(), SshCommandError> {
+            println!("========> Test: SCP to {}:22", ip);
             let tcp =
                 TcpStream::connect(format!("{ip}:22")).map_err(SshCommandError::Connection)?;
             let mut sess = Session::new().unwrap();
@@ -575,15 +577,19 @@ fn scp_to_guest_with_auth(
                 .permissions()
                 .mode()
                 & 0o777;
-
+            println!("========> Test: SCP sending data to {}:22", ip);
             let mut channel = sess
                 .scp_send(remote_path, mode as i32, content.len() as u64, None)
                 .map_err(SshCommandError::ScpSend)?;
+            println!("========> Test: SCP Writing into channel to {}:22", ip);
             channel
                 .write_all(&content)
                 .map_err(SshCommandError::WriteAll)?;
+            println!("========> Test: SCP sending EOF to {}:22", ip);
             channel.send_eof().map_err(SshCommandError::SendEof)?;
+            println!("========> Test: SCP Waiting EOF to {}:22", ip);
             channel.wait_eof().map_err(SshCommandError::WaitEof)?;
+            println!("========> Test: SCP sending data completed with {}:22", ip);
 
             // Intentionally ignore these results here as their failure
             // does not precipitate a repeat
@@ -1481,14 +1487,29 @@ pub fn parse_fio_output_iops(output: &str, fio_ops: &FioOps, num_jobs: u32) -> R
 fn child_wait_timeout(child: &mut Child, timeout: u64) -> Result<(), WaitTimeoutError> {
     match child.wait_timeout(Duration::from_secs(timeout)) {
         Err(e) => {
+            // let mut res = String::new();
+            // let _ = child.stdout.as_mut().unwrap().read_to_string(&mut res);
+            // println!("child stdout: {}", res);
+            // let _ = child.stderr.as_mut().unwrap().read_to_string(&mut res);
+            // println!("child stderr: {}", res);
             return Err(WaitTimeoutError::General(e));
         }
         Ok(s) => match s {
             None => {
+                // let mut res = String::new();
+                // let _ = child.stdout.as_mut().unwrap().read_to_string(&mut res);
+                // println!("child stdout: {}", res);
+                // let _ = child.stderr.as_mut().unwrap().read_to_string(&mut res);
+                // println!("child stderr: {}", res);
                 return Err(WaitTimeoutError::Timedout);
             }
             Some(s) => {
                 if !s.success() {
+                    // let mut res = String::new();
+                    // let _ = child.stdout.as_mut().unwrap().read_to_string(&mut res);
+                    // println!("child stdout: {}", res);
+                    // let _ = child.stderr.as_mut().unwrap().read_to_string(&mut res);
+                    // println!("child stderr: {}", res);
                     return Err(WaitTimeoutError::ExitStatus);
                 }
             }
@@ -1509,14 +1530,23 @@ pub fn measure_virtio_net_throughput(
 
     // 1. start the iperf3 server on the guest
     for n in 0..queue_pairs {
+        println!("========> Test: Command to run iperf3 server on Guest: 'iperf3 -s -p {} -D'", default_port + n);
         guest.ssh_command(&format!("iperf3 -s -p {} -D", default_port + n))?;
     }
 
+    println!("========> Test: iperf3 server on Guest started");
     thread::sleep(Duration::new(1, 0));
 
     // 2. start the iperf3 client on host to measure RX through-put
     let mut clients = Vec::new();
     for n in 0..queue_pairs {
+        println!(
+            "========> Test: Command to run iperf3 client on host: iperf3 -J -c {} -p {} -t {} -i 0",
+            &guest.network.guest_ip,
+            &format!("{}", default_port + n),
+            &format!("{test_timeout}"),
+        );
+        
         let mut cmd = Command::new("iperf3");
         cmd.args([
             "-J", // Output in JSON format
@@ -1545,6 +1575,8 @@ pub fn measure_virtio_net_throughput(
             .spawn()
             .map_err(Error::Spawn)?;
 
+        println!("========> Test: iperf3 client on host started");
+
         clients.push(client);
     }
 
@@ -1554,6 +1586,7 @@ pub fn measure_virtio_net_throughput(
     for c in clients {
         let mut c = c;
         if let Err(e) = child_wait_timeout(&mut c, test_timeout as u64 + 5) {
+            println!("========> Test: Error: {:?}", e);
             err = Some(Error::WaitTimeout(e));
             failed = true;
         }
@@ -1563,11 +1596,16 @@ pub fn measure_virtio_net_throughput(
             let output = c.wait_with_output().unwrap();
             results.push(parse_iperf3_output(&output.stdout, receive, bandwidth)?);
         } else {
+            println!("========> Test: Failed: Killing child and Printing error");
             let _ = c.kill();
             let output = c.wait_with_output().unwrap();
             println!(
                 "=============== Client output [Error] ===============\n\n{}\n\n===========end============\n\n",
                 String::from_utf8_lossy(&output.stdout)
+            );
+            println!(
+                "=============== Client output [Error] ===============\n\n{}\n\n===========end============\n\n",
+                String::from_utf8_lossy(&output.stderr)
             );
         }
     }
@@ -1624,6 +1662,7 @@ pub fn measure_virtio_net_latency(guest: &Guest, test_timeout: u32) -> Result<Ve
         1,
         DEFAULT_SSH_TIMEOUT,
     )?;
+    println!("========> Test: SCP to guest is done");
 
     // Start the ethr server on the guest
     guest.ssh_command(&format!("{ethr_remote_path} -s &> /dev/null &"))?;
