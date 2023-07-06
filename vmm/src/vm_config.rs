@@ -105,7 +105,7 @@ impl Default for PlatformConfig {
             #[cfg(feature = "tdx")]
             tdx: false,
             #[cfg(feature = "snp")]
-            snp: false,
+            snp: true,
         }
     }
 }

@@ -475,6 +475,8 @@ fn start_vmm(toplevel: TopLevel) -> Result<Option<String>, Error> {
         }
     };
 
+    //let seccomp_action = SeccompAction::Allow;
+
     if seccomp_action == SeccompAction::Trap {
         // SAFETY: We only using signal_hook for managing signals and only execute signal
         // handler safe functions (writing to stderr) and manipulating signals.
