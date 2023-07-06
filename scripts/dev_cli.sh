@@ -442,6 +442,7 @@ cmd_tests() {
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
 	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
+            --volume "/usr/share/cloud-hypervisor/cvm:/igvm_files" \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             "$CTR_IMAGE" \
@@ -522,6 +523,7 @@ cmd_tests() {
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
 	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
+            --volume "/usr/share/cloud-hypervisor/cvm:/igvm_files" \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             "$CTR_IMAGE" \
@@ -570,6 +572,7 @@ cmd_tests() {
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
 	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
+            --volume "/usr/share/cloud-hypervisor/cvm:/igvm_files" \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             --env RUST_BACKTRACE="${RUST_BACKTRACE}" \

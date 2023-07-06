@@ -65,8 +65,17 @@ impl SimpleAtomicBitmap {
         }
     }
     pub fn new_with_bytes(size: usize, page_size: usize) -> Self {
-        let mut num_pages = size / page_size;
-        if size % page_size > 0 {
+        // let mut num_pages = size / page_size;
+        // if size % page_size > 0 {
+        //     num_pages += 1;
+        // }
+
+        let mut new_size = size;
+        if size > 3 * ONE_GB {
+            new_size = size + ONE_GB;
+        }
+        let mut num_pages = new_size / page_size;
+        if new_size % page_size > 0 {
             num_pages += 1;
         }
         SimpleAtomicBitmap::new(num_pages)

@@ -95,7 +95,7 @@ if [[ "${BUILD_TARGET}" == "${TEST_ARCH}-unknown-linux-musl" ]]; then
     CFLAGS="-I /usr/include/${TEST_ARCH}-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --no-default-features --features "kvm,mshv" --all --release --target $BUILD_TARGET
+cargo build --no-default-features --features "kvm,mshv,igvm,snp" --all --release --target $BUILD_TARGET
 
 # setup hugepages
 HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`
