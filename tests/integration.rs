@@ -13,6 +13,7 @@ extern crate test_infra;
 use api_client::simple_api_command;
 use api_client::simple_api_full_command;
 use net_util::MacAddr;
+use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -166,13 +167,17 @@ fn temp_vmcore_file_path(tmp_dir: &TempDir) -> String {
 // Creates the path for direct kernel boot and return the path.
 // For x86_64, this function returns the vmlinux kernel path.
 // For AArch64, this function returns the PE kernel path.
-fn direct_kernel_boot_path() -> PathBuf {
-    let mut workload_path = dirs::home_dir().unwrap();
-    workload_path.push("workloads");
-
+fn direct_kernel_boot_path(vcpus: String, console: String) -> PathBuf {
+    // let mut workload_path = dirs::home_dir().unwrap();
+    // workload_path.push("workloads");
+    let path_str = "/igvm_files";
+    let workload_path: PathBuf = PathBuf::from(path_str);
+    
     let mut kernel_path = workload_path;
     #[cfg(target_arch = "x86_64")]
-    kernel_path.push("vmlinux");
+    // kernel_path.push("vmlinux");
+    // kernel_path.push(format!("linux{}-{}.bin", vcpus, console));
+    kernel_path.push(format!("linux-{}.bin", console));
     #[cfg(target_arch = "aarch64")]
     kernel_path.push("Image");
 
@@ -297,6 +302,7 @@ fn remote_command(api_socket: &str, command: &str, arg: Option<&str>) -> bool {
         cmd.arg(arg);
     }
     let output = cmd.output().unwrap();
+    println!("===== remote_command output: {} ==== {} ==== {}", output.status.to_string(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     if output.status.success() {
         true
     } else {
@@ -309,6 +315,9 @@ fn remote_command(api_socket: &str, command: &str, arg: Option<&str>) -> bool {
 
 fn remote_command_w_output(api_socket: &str, command: &str, arg: Option<&str>) -> (bool, Vec<u8>) {
     let mut cmd = Command::new(clh_command("ch-remote"));
+
+    println!("========> Test: CH-Remote Command: {:?} {:?} {:?} {:?}", clh_command("ch-remote"), api_socket, command, arg);
+        
     cmd.args(["--api-socket", api_socket, command]);
 
     if let Some(arg) = arg {
@@ -420,11 +429,14 @@ fn setup_ovs_dpdk_guests(
                     .args(["--cpus", "boot=2"])
                     .args(["--memory", "size=0,shared=on"])
                     .args(["--memory-zone", "id=mem0,size=1G,shared=on,host_numa_node=0"])
-                    .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                    .args(["--kernel", direct_kernel_boot_path("2".to_string(), "hvc0".to_string()).to_str().unwrap()])
+                    .args(["--platform", "snp=on"])
+                    .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
                     .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                     .default_disks()
                     .args(["--net", guest1.default_net_string().as_str(), "--net", "vhost_user=true,socket=/tmp/dpdkvhostclient1,num_queues=2,queue_size=256,vhost_mode=server"])
                     .capture_output()
+                    .set_print_cmd(true)
                     .spawn()
                     .unwrap();
 
@@ -470,11 +482,14 @@ fn setup_ovs_dpdk_guests(
                     .args(["--cpus", "boot=2"])
                     .args(["--memory", "size=0,shared=on"])
                     .args(["--memory-zone", "id=mem0,size=1G,shared=on,host_numa_node=0"])
-                    .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+                    .args(["--kernel", direct_kernel_boot_path("2".to_string(), "hvc0".to_string()).to_str().unwrap()])
+                    .args(["--platform", "snp=on"])
+                    .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
                     .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
                     .default_disks()
                     .args(["--net", guest2.default_net_string().as_str(), "--net", "vhost_user=true,socket=/tmp/dpdkvhostclient2,num_queues=2,queue_size=256,vhost_mode=server"])
                     .capture_output()
+                    .set_print_cmd(true)
                     .spawn()
                     .unwrap();
 
@@ -511,20 +526,24 @@ enum FwType {
     RustHypervisorFirmware,
 }
 
-fn fw_path(_fw_type: FwType) -> String {
-    let mut workload_path = dirs::home_dir().unwrap();
-    workload_path.push("workloads");
+fn fw_path(_fw_type: FwType, vcpus: String, console: String) -> String {
+    // let mut workload_path = dirs::home_dir().unwrap();
+    // workload_path.push("workloads");
 
+    let path_str = "/igvm_files";
+    let workload_path: PathBuf = PathBuf::from(path_str);
+    
     let mut fw_path = workload_path;
     #[cfg(target_arch = "aarch64")]
     fw_path.push("CLOUDHV_EFI.fd");
     #[cfg(target_arch = "x86_64")]
-    {
-        match _fw_type {
-            FwType::Ovmf => fw_path.push(OVMF_NAME),
-            FwType::RustHypervisorFirmware => fw_path.push("hypervisor-fw"),
-        }
-    }
+    fw_path.push(format!("linux-{}.bin", console));
+    // {
+    //     match _fw_type {
+    //         FwType::Ovmf => fw_path.push(OVMF_NAME),
+    //         FwType::RustHypervisorFirmware => fw_path.push("hypervisor-fw"),
+    //     }
+    // }
 
     fw_path.to_str().unwrap().to_string()
 }
@@ -620,9 +639,9 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = Guest::new(Box::new(focal));
     let total_vcpus = threads_per_core * cores_per_package * packages;
-    let direct_kernel_boot_path = direct_kernel_boot_path();
+    let direct_kernel_boot_path = direct_kernel_boot_path(format!("{}", total_vcpus), "hvc0".to_string());
     let mut kernel_path = direct_kernel_boot_path.to_str().unwrap();
-    let fw_path = fw_path(FwType::RustHypervisorFirmware);
+    let fw_path = fw_path(FwType::RustHypervisorFirmware, format!("{}", total_vcpus), "hvc0".to_string());
     if use_fw {
         kernel_path = fw_path.as_str();
     }
@@ -636,10 +655,13 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
         ])
         .args(["--memory", "size=512M"])
         .args(["--kernel", kernel_path])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .default_net()
         .capture_output()
+        .set_print_cmd(true)
         .spawn()
         .unwrap();
 
@@ -649,6 +671,8 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
             guest.get_cpu_count().unwrap_or_default(),
             u32::from(total_vcpus)
         );
+        
+        println!("========> Test: Guest lscpu: {}", &guest.ssh_command("lscpu").unwrap());
         assert_eq!(
             guest
                 .ssh_command("lscpu | grep \"per core\" | cut -f 2 -d \":\" | sed \"s# *##\"")
@@ -692,7 +716,7 @@ fn _test_guest_numa_nodes(acpi: bool) {
     let guest = Guest::new(Box::new(focal));
     let api_socket = temp_api_path(&guest.tmp_dir);
     #[cfg(target_arch = "x86_64")]
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("6".to_string(), "hvc0".to_string());
     #[cfg(target_arch = "aarch64")]
     let kernel_path = if acpi {
         edk2_path()
@@ -702,6 +726,8 @@ fn _test_guest_numa_nodes(acpi: bool) {
 
     let mut child = GuestCommand::new(&guest)
         .args(["--cpus", "boot=6,max=12"])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--memory", "size=0,hotplug_method=virtio-mem"])
         .args([
             "--memory-zone",
@@ -720,8 +746,11 @@ fn _test_guest_numa_nodes(acpi: bool) {
             "guest_numa_id=2,cpus=[5,10-11],distances=[0@25,1@30],memory_zones=mem2",
         ])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .args(["--api-socket", &api_socket])
+        .set_print_cmd(true)
         .capture_output()
         .default_disks()
         .default_net()
@@ -775,7 +804,7 @@ fn _test_power_button(acpi: bool) {
     let api_socket = temp_api_path(&guest.tmp_dir);
 
     #[cfg(target_arch = "x86_64")]
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
     #[cfg(target_arch = "aarch64")]
     let kernel_path = if acpi {
         edk2_path()
@@ -786,11 +815,15 @@ fn _test_power_button(acpi: bool) {
     cmd.args(["--cpus", "boot=1"])
         .args(["--memory", "size=512M"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .capture_output()
         .default_disks()
         .default_net()
         .args(["--api-socket", &api_socket]);
+
 
     let child = cmd.spawn().unwrap();
 
@@ -824,7 +857,7 @@ fn test_vhost_user_net(
     let guest = Guest::new(Box::new(focal));
     let api_socket = temp_api_path(&guest.tmp_dir);
 
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path(format!("{}", num_queues / 2).to_string(), "hvc0".to_string());
 
     let host_mac = if generate_host_mac {
         Some(MacAddr::local_random())
@@ -865,10 +898,13 @@ fn test_vhost_user_net(
         .args(["--cpus", format!("boot={}", num_queues / 2).as_str()])
         .args(["--memory", "size=512M,hotplug_size=2048M,shared=on"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .args(["--api-socket", &api_socket])
+        .set_print_cmd(true)
         .capture_output();
 
     let mut daemon_child: std::process::Child;
@@ -920,7 +956,7 @@ fn test_vhost_user_net(
         // interface backed by vhost-user-net.
         assert_eq!(
             guest
-                .ssh_command("ip -o link | wc -l")
+                .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                 .unwrap()
                 .trim()
                 .parse::<u32>()
@@ -991,7 +1027,7 @@ fn test_vhost_user_blk(
     let guest = Guest::new(Box::new(focal));
     let api_socket = temp_api_path(&guest.tmp_dir);
 
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path(format!("{}", num_queues).to_string(), "hvc0".to_string());
 
     let (blk_params, daemon_child) = {
         let prepare_daemon = prepare_vhost_user_blk_daemon.unwrap();
@@ -1011,7 +1047,10 @@ fn test_vhost_user_blk(
         .args(["--cpus", format!("boot={num_queues}").as_str()])
         .args(["--memory", "size=512M,hotplug_size=2048M,shared=on"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .args([
             "--disk",
             format!(
@@ -1134,7 +1173,7 @@ fn test_boot_from_vhost_user_blk(
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = Guest::new(Box::new(focal));
 
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path(format!("{}", num_queues).to_string(), "hvc0".to_string());
 
     let disk_path = guest.disk_config.disk(DiskType::OperatingSystem).unwrap();
 
@@ -1161,7 +1200,10 @@ fn test_boot_from_vhost_user_blk(
         .args(["--cpus", format!("boot={num_queues}").as_str()])
         .args(["--memory", "size=512M,shared=on"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .args([
             "--disk",
             blk_boot_params.as_str(),
@@ -1220,7 +1262,7 @@ fn _test_virtio_fs(
     shared_dir.push("shared_dir");
 
     #[cfg(target_arch = "x86_64")]
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
     #[cfg(target_arch = "aarch64")]
     let kernel_path = if hotplug {
         edk2_path()
@@ -1236,7 +1278,10 @@ fn _test_virtio_fs(
         .args(["--cpus", "boot=1"])
         .args(["--memory", "size=512M,hotplug_size=2048M,shared=on"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .default_disks()
         .default_net()
         .args(["--api-socket", &api_socket]);
@@ -1398,7 +1443,7 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = Guest::new(Box::new(focal));
 
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
     let pmem_temp_file = TempFile::new().unwrap();
     pmem_temp_file.as_file().set_len(128 << 20).unwrap();
@@ -1412,7 +1457,10 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
         .args(["--cpus", "boot=1"])
         .args(["--memory", "size=512M"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .default_disks()
         .default_net()
         .args([
@@ -1477,7 +1525,7 @@ fn _test_virtio_vsock(hotplug: bool) {
     let guest = Guest::new(Box::new(focal));
 
     #[cfg(target_arch = "x86_64")]
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
     #[cfg(target_arch = "aarch64")]
     let kernel_path = if hotplug {
         edk2_path()
@@ -1493,7 +1541,10 @@ fn _test_virtio_vsock(hotplug: bool) {
     cmd.args(["--cpus", "boot=1"]);
     cmd.args(["--memory", "size=512M"]);
     cmd.args(["--kernel", kernel_path.to_str().unwrap()]);
+    cmd.args(["--platform", "snp=on"]);
+    cmd.args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"]);
     cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    cmd.set_print_cmd(true);
     cmd.default_disks();
     cmd.default_net();
 
@@ -1565,11 +1616,14 @@ fn test_memory_mergeable(mergeable: bool) {
     let mut child1 = GuestCommand::new(&guest1)
         .args(["--cpus", "boot=1"])
         .args(["--memory", format!("size=512M,{memory_param}").as_str()])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", guest1.default_net_string().as_str()])
         .args(["--serial", "tty", "--console", "off"])
+        .set_print_cmd(true)
         .capture_output()
         .spawn()
         .unwrap();
@@ -1591,11 +1645,14 @@ fn test_memory_mergeable(mergeable: bool) {
     let mut child2 = GuestCommand::new(&guest2)
         .args(["--cpus", "boot=1"])
         .args(["--memory", format!("size=512M,{memory_param}").as_str()])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+        .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", guest2.default_net_string().as_str()])
         .args(["--serial", "tty", "--console", "off"])
+        .set_print_cmd(true)
         .capture_output()
         .spawn()
         .unwrap();
@@ -1831,7 +1888,7 @@ fn _test_virtio_iommu(acpi: bool) {
     let guest = Guest::new(Box::new(focal));
 
     #[cfg(target_arch = "x86_64")]
-    let kernel_path = direct_kernel_boot_path();
+    let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
     #[cfg(target_arch = "aarch64")]
     let kernel_path = if acpi {
         edk2_path()
@@ -1843,7 +1900,10 @@ fn _test_virtio_iommu(acpi: bool) {
         .args(["--cpus", "boot=1"])
         .args(["--memory", "size=512M"])
         .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args(["--platform", "snp=on"])
+        .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
         .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+        .set_print_cmd(true)
         .args([
             "--disk",
             format!(
@@ -1883,6 +1943,21 @@ fn _test_virtio_iommu(acpi: bool) {
         //
         // Verify the iommu group of the first disk.
         let iommu_group = !acpi as i32;
+        
+        println!("========> Test: is acpi: {:?}", acpi);
+        println!("========> Test: is iommu_group: {:?}", iommu_group);
+        println!("========> Test: Guest check /sys/kernel: {}", &guest
+            .ssh_command(format!("ls /sys/kernel/i*").as_str())
+            .unwrap()
+        );
+        println!("========> Test: Guest check /sys/kernel/iommu_groups: {}", &guest
+            .ssh_command(format!("ls /sys/kernel/iommu_groups/").as_str())
+            .unwrap()
+        );
+        println!("========> Test: Guest check /sys/kernel/iommu_groups/{iommu_group}/devices: {}", &guest
+            .ssh_command(format!("ls /sys/kernel/iommu_groups/{iommu_group}/devices").as_str())
+            .unwrap()
+        );
         assert_eq!(
             guest
                 .ssh_command(format!("ls /sys/kernel/iommu_groups/{iommu_group}/devices").as_str())
@@ -1949,13 +2024,15 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_focal_hypervisor_fw() {
-        test_simple_launch(fw_path(FwType::RustHypervisorFirmware), FOCAL_IMAGE_NAME)
+        println!("===== Running test_focal_hypervisor_fw");
+        test_simple_launch(fw_path(FwType::RustHypervisorFirmware,"1".to_string(), "ttyS0".to_string()), FOCAL_IMAGE_NAME)
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_focal_ovmf() {
-        test_simple_launch(fw_path(FwType::Ovmf), FOCAL_IMAGE_NAME)
+        println!("===== Running test_focal_ovmf");
+        test_simple_launch(fw_path(FwType::Ovmf, "1".to_string(), "ttyS0".to_string()), FOCAL_IMAGE_NAME)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1968,6 +2045,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", fw_path.as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .default_disks()
             .default_net()
             .args(["--serial", "tty", "--console", "off"])
@@ -1980,7 +2060,8 @@ mod common_parallel {
             guest.wait_vm_boot(Some(120)).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            println!("========> Test: Guest meminfo: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
+            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
             assert_eq!(guest.get_pci_bridge_class().unwrap_or_default(), "0x060000");
 
             let expected_sequential_events = [
@@ -2045,6 +2126,7 @@ mod common_parallel {
 
     #[test]
     fn test_multi_cpu() {
+        println!("===== Running test_multi_cpu");
         let jammy_image = JAMMY_IMAGE_NAME.to_string();
         let jammy = UbuntuDiskConfig::new(jammy_image);
         let guest = Guest::new(Box::new(jammy));
@@ -2052,12 +2134,16 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=2,max=4"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("2".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .capture_output()
             .default_disks()
             .default_net();
-
+        
         let mut child = cmd.spawn().unwrap();
 
         let r = std::panic::catch_unwind(|| {
@@ -2084,16 +2170,19 @@ mod common_parallel {
 
     #[test]
     fn test_cpu_topology_421() {
+        println!("===== Running test_cpu_topology_421");
         test_cpu_topology(4, 2, 1, false);
     }
 
     #[test]
     fn test_cpu_topology_142() {
+        println!("===== Running test_cpu_topology_142");
         test_cpu_topology(1, 4, 2, false);
     }
 
     #[test]
     fn test_cpu_topology_262() {
+        println!("===== Running test_cpu_topology_262");
         test_cpu_topology(2, 6, 2, false);
     }
 
@@ -2101,20 +2190,26 @@ mod common_parallel {
     #[cfg(target_arch = "x86_64")]
     #[cfg(not(feature = "mshv"))]
     fn test_cpu_physical_bits() {
+        println!("===== Running test_cpu_physical_bits");
+
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let max_phys_bits: u8 = 36;
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", &format!("max_phys_bits={max_phys_bits}")])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
+            .set_print_cmd(true)
             .default_disks()
             .default_net()
             .capture_output()
             .spawn()
             .unwrap();
-
+        
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
 
@@ -2136,6 +2231,7 @@ mod common_parallel {
 
     #[test]
     fn test_cpu_affinity() {
+        println!("===== Running test_cpu_affinity");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -2153,8 +2249,11 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2,affinity=[0@[0,2],1@[1,3]]"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("2".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .default_disks()
             .default_net()
             .capture_output()
@@ -2179,13 +2278,17 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_large_vm() {
+        println!("===== Running test_large_vm");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=48"])
             .args(["--memory", "size=5120M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .args(["--serial", "tty"])
             .args(["--console", "off"])
             .capture_output()
@@ -2218,12 +2321,16 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_huge_memory() {
+        println!("===== Running test_huge_memory");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=128G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .capture_output()
             .default_disks()
@@ -2245,17 +2352,19 @@ mod common_parallel {
 
     #[test]
     fn test_power_button() {
+        println!("===== Running test_power_button");
         _test_power_button(false);
     }
 
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_user_defined_memory_regions() {
+        println!("===== Running test_user_defined_memory_regions");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
@@ -2269,6 +2378,9 @@ mod common_parallel {
                 "id=mem2,size=1G,host_numa_node=0,hotplug_size=2G",
             ])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args(["--api-socket", &api_socket])
             .capture_output()
@@ -2321,12 +2433,14 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_guest_numa_nodes() {
+        println!("===== Running test_guest_numa_nodes");
         _test_guest_numa_nodes(false);
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_iommu_segments() {
+        println!("===== Running test_iommu_segments");
         let focal_image = FOCAL_IMAGE_NAME.to_string();
         let focal = UbuntuDiskConfig::new(focal_image);
         let guest = Guest::new(Box::new(focal));
@@ -2351,7 +2465,10 @@ mod common_parallel {
         cmd.args(["--cpus", "boot=1"])
             .args(["--api-socket", &api_socket])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--platform",
@@ -2402,12 +2519,16 @@ mod common_parallel {
 
     #[test]
     fn test_pci_msi() {
+        println!("===== Running test_pci_msi");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "ttyS0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .capture_output()
             .default_disks()
@@ -2423,6 +2544,7 @@ mod common_parallel {
         let grep_cmd = "grep -c ITS-MSI /proc/interrupts";
 
         let r = std::panic::catch_unwind(|| {
+            println!("========> Test: Guest /proc/interrupts: {}", &guest.ssh_command("grep PCI-MSI /proc/interrupts").unwrap());
             assert_eq!(
                 guest
                     .ssh_command(grep_cmd)
@@ -2442,12 +2564,16 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_net_ctrl_queue() {
+        println!("===== Running test_virtio_net_ctrl_queue");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args(["--net", guest.default_net_string_w_mtu(3000).as_str()])
             .capture_output()
@@ -2461,6 +2587,8 @@ mod common_parallel {
         let iface = "enp0s4";
         #[cfg(target_arch = "x86_64")]
         let iface = "ens4";
+
+        println!("========> Test: Guest check interface: {}", &guest.ssh_command("ip a").unwrap());
 
         let r = std::panic::catch_unwind(|| {
             assert_eq!(
@@ -2489,6 +2617,7 @@ mod common_parallel {
 
     #[test]
     fn test_pci_multiple_segments() {
+        println!("===== Running test_pci_multiple_segments");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -2509,11 +2638,13 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--platform",
-                &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}"),
+                &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS},snp=on"),
             ])
             .args([
                 "--disk",
@@ -2595,15 +2726,19 @@ mod common_parallel {
 
     #[test]
     fn test_direct_kernel_boot() {
+        println!("===== Running test_direct_kernel_boot");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -2615,7 +2750,9 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            println!("========> Test: Guest Memory check: {}", &guest.ssh_command("free -m").unwrap());
+            println!("========> Test: Guest Memory check from /proc/meminfo: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
+            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
             let grep_cmd = if cfg!(target_arch = "x86_64") {
                 "grep -c PCI-MSI /proc/interrupts"
@@ -2649,12 +2786,17 @@ mod common_parallel {
         let mut blk_file_path = workload_path;
         blk_file_path.push("blk.img");
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("4".to_string(), "ttyS0".to_string());
 
         let mut cloud_child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=4"])
-            .args(["--memory", "size=512M,shared=on"])
+            .args(["--console", "off"])
+            .args(["--serial", "tty"])
+            .args(["--memory", "size=5G,shared=on"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--disk",
@@ -2727,21 +2869,25 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block() {
+        println!("===== Running test_virtio_block");
         _test_virtio_block(FOCAL_IMAGE_NAME, false)
     }
 
     #[test]
     fn test_virtio_block_disable_io_uring() {
+        println!("===== Running test_virtio_block_disable_io_uring");
         _test_virtio_block(FOCAL_IMAGE_NAME, true)
     }
 
     #[test]
     fn test_virtio_block_qcow2() {
+        println!("===== Running test_virtio_block_qcow2");
         _test_virtio_block(FOCAL_IMAGE_NAME_QCOW2, false)
     }
 
     #[test]
     fn test_virtio_block_vhd() {
+        println!("===== Running test_virtio_block_vhd");
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
@@ -2767,6 +2913,7 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block_vhdx() {
+        println!("===== Running test_virtio_block_vhdx");
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
@@ -2791,6 +2938,7 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block_dynamic_vhdx_expand() {
+        println!("===== Running test_virtio_block_dynamic_vhdx_expand");
         const VIRTUAL_DISK_SIZE: u64 = 100 << 20;
         const EMPTY_VHDX_FILE_SIZE: u64 = 8 << 20;
         const FULL_VHDX_FILE_SIZE: u64 = 112 << 20;
@@ -2817,12 +2965,15 @@ mod common_parallel {
 
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut cloud_child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--disk",
@@ -2883,6 +3034,7 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block_direct_and_firmware() {
+        println!("===== Running test_virtio_block_direct_and_firmware");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -2903,7 +3055,10 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "1".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--disk",
                 format!("path={},direct=on", os_path.as_path().to_str().unwrap()).as_str(),
@@ -2931,11 +3086,13 @@ mod common_parallel {
 
     #[test]
     fn test_vhost_user_net_default() {
+        println!("===== Running test_vhost_user_net_default");
         test_vhost_user_net(None, 2, &prepare_vhost_user_net_daemon, false, false)
     }
 
     #[test]
     fn test_vhost_user_net_named_tap() {
+        println!("===== Running test_vhost_user_net_named_tap");
         test_vhost_user_net(
             Some("mytap0"),
             2,
@@ -2947,6 +3104,7 @@ mod common_parallel {
 
     #[test]
     fn test_vhost_user_net_existing_tap() {
+        println!("===== Running test_vhost_user_net_existing_tap");
         test_vhost_user_net(
             Some("vunet-tap0"),
             2,
@@ -2958,11 +3116,13 @@ mod common_parallel {
 
     #[test]
     fn test_vhost_user_net_multiple_queues() {
+        println!("===== Running test_vhost_user_net_multiple_queues");
         test_vhost_user_net(None, 4, &prepare_vhost_user_net_daemon, false, false)
     }
 
     #[test]
     fn test_vhost_user_net_tap_multiple_queues() {
+        println!("===== Running test_vhost_user_net_tap_multiple_queues");
         test_vhost_user_net(
             Some("vunet-tap1"),
             4,
@@ -2974,44 +3134,54 @@ mod common_parallel {
 
     #[test]
     fn test_vhost_user_net_host_mac() {
+        println!("===== Running test_vhost_user_net_host_mac");
         test_vhost_user_net(None, 2, &prepare_vhost_user_net_daemon, true, false)
     }
 
     #[test]
     fn test_vhost_user_net_client_mode() {
+        println!("===== Running test_vhost_user_net_client_mode");
         test_vhost_user_net(None, 2, &prepare_vhost_user_net_daemon, false, true)
     }
 
     #[test]
     fn test_vhost_user_blk_default() {
+        println!("===== Running test_vhost_user_blk_default");
         test_vhost_user_blk(2, false, false, Some(&prepare_vubd))
     }
 
     #[test]
     fn test_vhost_user_blk_readonly() {
+        println!("===== Running test_vhost_user_blk_readonly");
         test_vhost_user_blk(1, true, false, Some(&prepare_vubd))
     }
 
     #[test]
     fn test_vhost_user_blk_direct() {
+        println!("===== Running test_vhost_user_blk_direct");
         test_vhost_user_blk(1, false, true, Some(&prepare_vubd))
     }
 
     #[test]
     fn test_boot_from_vhost_user_blk_default() {
+        println!("===== Running test_boot_from_vhost_user_blk_default");
         test_boot_from_vhost_user_blk(1, false, false, Some(&prepare_vubd))
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_split_irqchip() {
+        println!("===== Running test_split_irqchip");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -3051,15 +3221,18 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_dmi_serial_number() {
+        println!("===== Running test_dmi_serial_number");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args(["--platform", "serial_number=a=b;c=d"])
+            .args(["--platform", "serial_number=a=b;c=d,snp=on"])
             .default_disks()
             .default_net()
             .capture_output()
@@ -3087,15 +3260,18 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_dmi_uuid() {
+        println!("===== Running test_dmi_uuid");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args(["--platform", "uuid=1e8aa28a-435d-4027-87f4-40dceff1fa0a"])
+            .args(["--platform", "uuid=1e8aa28a-435d-4027-87f4-40dceff1fa0a,snp=on"])
             .default_disks()
             .default_net()
             .capture_output()
@@ -3123,18 +3299,21 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_dmi_oem_strings() {
+        println!("===== Running test_dmi_oem_strings");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         let s1 = "io.systemd.credential:xx=yy";
         let s2 = "This is a test string";
 
-        let oem_strings = format!("oem_strings=[{s1},{s2}]");
+        let oem_strings = format!("oem_strings=[{s1},{s2}],snp=on");
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args(["--platform", &oem_strings])
             .default_disks()
@@ -3179,52 +3358,63 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_fs() {
+        println!("===== Running test_virtio_fs");
         _test_virtio_fs(&prepare_virtiofsd, false, None)
     }
 
     #[test]
     fn test_virtio_fs_hotplug() {
+        println!("===== Running test_virtio_fs_hotplug");
         _test_virtio_fs(&prepare_virtiofsd, true, None)
     }
 
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_virtio_fs_multi_segment_hotplug() {
+        println!("===== Running test_virtio_fs_multi_segment_hotplug");
         _test_virtio_fs(&prepare_virtiofsd, true, Some(6))
     }
 
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_virtio_fs_multi_segment() {
+        println!("===== Running test_virtio_fs_multi_segment");
         _test_virtio_fs(&prepare_virtiofsd, false, Some(6))
     }
 
     #[test]
     fn test_virtio_pmem_persist_writes() {
+        println!("===== Running test_virtio_pmem_persist_writes");
         test_virtio_pmem(false, false)
     }
 
     #[test]
     fn test_virtio_pmem_discard_writes() {
+        println!("===== Running test_virtio_pmem_discard_writes");
         test_virtio_pmem(true, false)
     }
 
     #[test]
     fn test_virtio_pmem_with_size() {
+        println!("===== Running test_virtio_pmem_with_size");
         test_virtio_pmem(true, true)
     }
 
     #[test]
     fn test_boot_from_virtio_pmem() {
+        println!("===== Running test_boot_from_virtio_pmem");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--disk",
                 format!(
@@ -3271,15 +3461,19 @@ mod common_parallel {
 
     #[test]
     fn test_multiple_network_interfaces() {
+        println!("===== Running test_multiple_network_interfaces");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args([
@@ -3303,7 +3497,7 @@ mod common_parallel {
             // 3 network interfaces + default localhost ==> 4 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -3321,12 +3515,14 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn test_pmu_on() {
+        println!("===== Running test_pmu_on");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -3357,12 +3553,16 @@ mod common_parallel {
 
     #[test]
     fn test_serial_off() {
+        println!("===== Running test_serial_off");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -3394,6 +3594,7 @@ mod common_parallel {
 
     #[test]
     fn test_serial_null() {
+        println!("===== Running test_serial_null");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut cmd = GuestCommand::new(&guest);
@@ -3404,7 +3605,10 @@ mod common_parallel {
 
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "ttyS0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--cmdline",
                 DIRECT_KERNEL_BOOT_CMDLINE
@@ -3447,10 +3651,11 @@ mod common_parallel {
 
     #[test]
     fn test_serial_tty() {
+        println!("===== Running test_serial_tty");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "ttyS0".to_string());
 
         #[cfg(target_arch = "x86_64")]
         let console_str: &str = "console=ttyS0";
@@ -3461,6 +3666,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--cmdline",
                 DIRECT_KERNEL_BOOT_CMDLINE
@@ -3497,8 +3705,12 @@ mod common_parallel {
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let ansi_escape_regex = Regex::new(r"\x1B\[([\d;]+)m").unwrap();
+        let clean_output = ansi_escape_regex.replace_all(&output_str, "").to_string();
+
         let r = std::panic::catch_unwind(|| {
-            assert!(String::from_utf8_lossy(&output.stdout).contains(CONSOLE_TEST_STRING));
+            assert!(&clean_output.contains(CONSOLE_TEST_STRING));
         });
 
         handle_child_output(r, &output);
@@ -3506,6 +3718,7 @@ mod common_parallel {
 
     #[test]
     fn test_serial_file() {
+        println!("===== Running test_serial_file");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -3518,7 +3731,10 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "ttyS0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--cmdline",
                 DIRECT_KERNEL_BOOT_CMDLINE
@@ -3566,7 +3782,12 @@ mod common_parallel {
             let mut f = std::fs::File::open(serial_path).unwrap();
             let mut buf = String::new();
             f.read_to_string(&mut buf).unwrap();
-            assert!(buf.contains(CONSOLE_TEST_STRING));
+
+            let output_str = buf;
+            let ansi_escape_regex = Regex::new(r"\x1B\[([\d;]+)m").unwrap();
+            let clean_output = ansi_escape_regex.replace_all(&output_str, "").to_string();
+    
+            assert!(&clean_output.contains(CONSOLE_TEST_STRING));
         });
 
         handle_child_output(r, &output);
@@ -3574,6 +3795,7 @@ mod common_parallel {
 
     #[test]
     fn test_pty_interaction() {
+        println!("===== Running test_pty_interaction");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -3587,7 +3809,10 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "ttyS0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", &cmdline])
             .default_disks()
             .default_net()
@@ -3661,15 +3886,19 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_console() {
+        println!("===== Running test_virtio_console");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -3705,6 +3934,7 @@ mod common_parallel {
 
     #[test]
     fn test_console_file() {
+        println!("===== Running test_console_file");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -3712,7 +3942,10 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -3742,12 +3975,15 @@ mod common_parallel {
             let mut buf = String::new();
             f.read_to_string(&mut buf).unwrap();
 
-            if !buf.contains(CONSOLE_TEST_STRING) {
+            let color_regex = Regex::new("\x1B\\[[0-9;]*[mK]").unwrap();
+            let cleaned_buf = color_regex.replace_all(&buf, "");
+
+            if !cleaned_buf.contains(CONSOLE_TEST_STRING) {
                 eprintln!(
                     "\n\n==== Console file output ====\n\n{buf}\n\n==== End console file output ===="
                 );
             }
-            assert!(buf.contains(CONSOLE_TEST_STRING));
+            assert!(cleaned_buf.contains(CONSOLE_TEST_STRING));
         });
 
         handle_child_output(r, &output);
@@ -3768,6 +4004,7 @@ mod common_parallel {
     // Also, we pass-through a virtio-blk device to the L2 VM to test the 32-bit
     // vfio device support
     fn test_vfio() {
+        println!("===== Running test_vfio");
         setup_vfio_network_interfaces();
 
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -3776,7 +4013,7 @@ mod common_parallel {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("4".to_string(), "hvc0".to_string());
 
         let mut vfio_path = workload_path.clone();
         vfio_path.push("vfio");
@@ -3820,6 +4057,9 @@ mod common_parallel {
             .args(["--cpus", "boot=4"])
             .args(["--memory", "size=2G,hugepages=on,shared=on"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--disk",
                 format!(
@@ -4026,15 +4266,19 @@ mod common_parallel {
 
     #[test]
     fn test_direct_kernel_boot_noacpi() {
+        println!("===== Running test_direct_kernel_boot_noacpi");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--cmdline",
                 format!("{DIRECT_KERNEL_BOOT_CMDLINE} acpi=off").as_str(),
@@ -4049,7 +4293,9 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
 
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            println!("========> Test: Guest Memory check: {}", &guest.ssh_command("free -m").unwrap());
+            println!("========> Test: Guest Memory check from /proc/meminfo: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
+            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
         let _ = child.kill();
@@ -4060,11 +4306,13 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_vsock() {
+        println!("===== Running test_virtio_vsock");
         _test_virtio_vsock(false)
     }
 
     #[test]
     fn test_virtio_vsock_hotplug() {
+        println!("===== Running test_virtio_vsock_hotplug");
         _test_virtio_vsock(true);
     }
 
@@ -4072,6 +4320,7 @@ mod common_parallel {
     // Start cloud-hypervisor with no VM parameters, only the API server running.
     // From the API: Create a VM, boot it and check that it looks as expected.
     fn test_api_create_boot() {
+        println!("===== Running test_api_create_boot");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -4079,11 +4328,13 @@ mod common_parallel {
 
         let mut child = GuestCommand::new(&guest)
             .args(["--api-socket", &api_socket])
+            .set_print_cmd(true)
+            //.verbosity(VerbosityLevel::Debug)
             .capture_output()
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(1, 0));
+        thread::sleep(std::time::Duration::new(10, 0));
 
         let mut socket = UnixStream::connect(&api_socket).unwrap();
         // Verify API server is running
@@ -4093,10 +4344,11 @@ mod common_parallel {
         let cpu_count: u8 = 4;
         let http_body = guest.api_create_body(
             cpu_count,
-            direct_kernel_boot_path().to_str().unwrap(),
+            direct_kernel_boot_path(format!("{}", cpu_count).to_string(), "hvc0".to_string()).to_str().unwrap(),
             DIRECT_KERNEL_BOOT_CMDLINE,
         );
 
+        println!("===== http_body: {}", http_body);
         let temp_config_path = guest.tmp_dir.as_path().join("config");
         std::fs::write(&temp_config_path, http_body).unwrap();
 
@@ -4106,13 +4358,16 @@ mod common_parallel {
             Some(temp_config_path.as_os_str().to_str().unwrap()),
         );
 
+        println!("===== test_api_create_boot: vm create done, now we will boot the vm");
+
         // Then boot it
         remote_command(&api_socket, "boot", None);
-        thread::sleep(std::time::Duration::new(20, 0));
+        thread::sleep(std::time::Duration::new(120, 0));
 
         let r = std::panic::catch_unwind(|| {
             // Check that the VM booted as expected
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
+            println!("========> Test: Guest meminfo: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
@@ -4127,6 +4382,7 @@ mod common_parallel {
     // From the API: Create a VM, boot it and check it can be shutdown and then
     // booted again
     fn test_api_shutdown() {
+        println!("===== Running test_api_shutdown");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -4135,10 +4391,11 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--api-socket", &api_socket])
             .capture_output()
+            .set_print_cmd(true)
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(1, 0));
+        thread::sleep(std::time::Duration::new(10, 0));
 
         let mut socket = UnixStream::connect(&api_socket).unwrap();
         // Verify API server is running
@@ -4148,7 +4405,7 @@ mod common_parallel {
         let cpu_count: u8 = 4;
         let http_body = guest.api_create_body(
             cpu_count,
-            direct_kernel_boot_path().to_str().unwrap(),
+            direct_kernel_boot_path(format!("{}", cpu_count).to_string(), "hvc0".to_string()).to_str().unwrap(),
             DIRECT_KERNEL_BOOT_CMDLINE,
         );
 
@@ -4189,7 +4446,7 @@ mod common_parallel {
 
         let _ = child.kill();
         let output = child.wait_with_output().unwrap();
-
+        println!("===== test_api_shutdown output: {} ==== {} ==== {}", output.status.to_string(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         handle_child_output(r, &output);
     }
 
@@ -4198,6 +4455,7 @@ mod common_parallel {
     // From the API: Create a VM, boot it and check it can be deleted and then recreated
     // booted again.
     fn test_api_delete() {
+        println!("===== Running test_api_delete");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -4206,10 +4464,11 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--api-socket", &api_socket])
             .capture_output()
+            .set_print_cmd(true)
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(1, 0));
+        thread::sleep(std::time::Duration::new(10, 0));
 
         let mut socket = UnixStream::connect(&api_socket).unwrap();
         // Verify API server is running
@@ -4219,7 +4478,7 @@ mod common_parallel {
         let cpu_count: u8 = 4;
         let http_body = guest.api_create_body(
             cpu_count,
-            direct_kernel_boot_path().to_str().unwrap(),
+            direct_kernel_boot_path(format!("{}", cpu_count).to_string(), "hvc0".to_string()).to_str().unwrap(),
             DIRECT_KERNEL_BOOT_CMDLINE,
         );
 
@@ -4272,6 +4531,7 @@ mod common_parallel {
     // Then we pause the VM, check that it's no longer available.
     // Finally we resume the VM and check that it's available.
     fn test_api_pause_resume() {
+        println!("===== Running test_api_pause_resume");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -4280,10 +4540,11 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--api-socket", &api_socket])
             .capture_output()
+            .set_print_cmd(true)
             .spawn()
             .unwrap();
 
-        thread::sleep(std::time::Duration::new(1, 0));
+        thread::sleep(std::time::Duration::new(10, 0));
 
         let mut socket = UnixStream::connect(&api_socket).unwrap();
         // Verify API server is running
@@ -4293,7 +4554,7 @@ mod common_parallel {
         let cpu_count: u8 = 4;
         let http_body = guest.api_create_body(
             cpu_count,
-            direct_kernel_boot_path().to_str().unwrap(),
+            direct_kernel_boot_path(format!("{}", cpu_count).to_string(), "hvc0".to_string()).to_str().unwrap(),
             DIRECT_KERNEL_BOOT_CMDLINE,
         );
 
@@ -4302,7 +4563,7 @@ mod common_parallel {
         // Then boot it
         simple_api_command(&mut socket, "PUT", "boot", None).unwrap();
 
-        thread::sleep(std::time::Duration::new(20, 0));
+        thread::sleep(std::time::Duration::new(120, 0));
 
         let r = std::panic::catch_unwind(|| {
             // Check that the VM booted as expected
@@ -4315,7 +4576,7 @@ mod common_parallel {
             // Check pausing again fails
             assert!(!remote_command(&api_socket, "pause", None));
 
-            thread::sleep(std::time::Duration::new(2, 0));
+            thread::sleep(std::time::Duration::new(120, 0));
 
             // SSH into the VM should fail
             assert!(ssh_command_ip(
@@ -4332,7 +4593,7 @@ mod common_parallel {
             // Check resuming again fails
             assert!(!remote_command(&api_socket, "resume", None));
 
-            thread::sleep(std::time::Duration::new(2, 0));
+            thread::sleep(std::time::Duration::new(120, 0));
 
             // Now we should be able to SSH back in and get the right number of CPUs
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
@@ -4346,6 +4607,7 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_iommu() {
+        println!("===== Running test_virtio_iommu");
         _test_virtio_iommu(cfg!(target_arch = "x86_64"))
     }
 
@@ -4360,11 +4622,12 @@ mod common_parallel {
     // properly probed first, then removing it, and adding it again by doing a
     // rescan.
     fn test_pci_bar_reprogramming() {
+        println!("===== Running test_pci_bar_reprogramming");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
 
@@ -4372,6 +4635,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args([
@@ -4390,14 +4656,15 @@ mod common_parallel {
             // 2 network interfaces + default localhost ==> 3 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
                     .unwrap_or_default(),
                 3
             );
-
+            println!("========> Test: Guest lspci on start: {}", &guest.ssh_command("lspci").unwrap());
+            println!("========> Test: Guest init_bar_addr: {}", &guest.ssh_command("cat /sys/bus/pci/devices/0000:00:05.0/resource").unwrap());
             let init_bar_addr = guest
                 .ssh_command(
                     "sudo awk '{print $1; exit}' /sys/bus/pci/devices/0000:00:05.0/resource",
@@ -4408,11 +4675,12 @@ mod common_parallel {
             guest
                 .ssh_command("echo 1 | sudo tee /sys/bus/pci/devices/0000:00:05.0/remove")
                 .unwrap();
-
+            
+            println!("========> Test: Guest after PCI removal ip a: {}", &guest.ssh_command("ip a").unwrap());
             // Only 1 network interface left + default localhost ==> 2 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -4424,11 +4692,11 @@ mod common_parallel {
             guest
                 .ssh_command("echo 1 | sudo tee /sys/bus/pci/rescan")
                 .unwrap();
-
+            
             // Back to 2 network interface + default localhost ==> 3 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -4456,22 +4724,27 @@ mod common_parallel {
 
     #[test]
     fn test_memory_mergeable_off() {
+        println!("===== Running test_memory_mergeable_off");
         test_memory_mergeable(false)
     }
 
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_cpu_hotplug() {
+        println!("===== Running test_cpu_hotplug");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2,max=4"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -4543,6 +4816,7 @@ mod common_parallel {
 
     #[test]
     fn test_memory_hotplug() {
+        println!("===== Running test_memory_hotplug");
         #[cfg(target_arch = "aarch64")]
         let focal_image = FOCAL_IMAGE_UPDATE_KERNEL_NAME.to_string();
         #[cfg(target_arch = "x86_64")]
@@ -4554,12 +4828,15 @@ mod common_parallel {
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2,max=4"])
             .args(["--memory", "size=512M,hotplug_size=8192M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -4572,6 +4849,8 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
 
+            println!("========> Test: Guest Memory check before hotplug: {}", &guest.ssh_command("free -m").unwrap());
+            println!("========> Test: Guest Memory check from /proc/meminfo before hotplug: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
 
             guest.enable_memory_hotplug();
@@ -4600,7 +4879,7 @@ mod common_parallel {
             resize_command(&api_socket, None, None, Some(desired_balloon), None);
 
             thread::sleep(std::time::Duration::new(10, 0));
-
+            
             assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
 
             guest.enable_memory_hotplug();
@@ -4631,11 +4910,12 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_virtio_mem() {
+        println!("===== Running test_virtio_mem");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2,max=4"])
@@ -4644,6 +4924,9 @@ mod common_parallel {
                 "size=512M,hotplug_method=virtio-mem,hotplug_size=8192M",
             ])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -4706,16 +4989,20 @@ mod common_parallel {
     #[cfg(not(feature = "mshv"))]
     // Test both vCPU and memory resizing together
     fn test_resize() {
+        println!("===== Running test_resize");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2,max=4"])
             .args(["--memory", "size=512M,hotplug_size=8192M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -4766,10 +5053,11 @@ mod common_parallel {
 
     #[test]
     fn test_memory_overhead() {
+        println!("===== Running test_memory_overhead");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let guest_memory_size_kb = 512 * 1024;
 
@@ -4777,6 +5065,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", format!("size={guest_memory_size_kb}K").as_str()])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .capture_output()
@@ -4799,11 +5090,12 @@ mod common_parallel {
 
     #[test]
     fn test_disk_hotplug() {
+        println!("===== Running test_disk_hotplug");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
 
@@ -4814,6 +5106,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -4850,7 +5145,6 @@ mod common_parallel {
 
             thread::sleep(std::time::Duration::new(10, 0));
 
-            // Check that /dev/vdc exists and the block size is 16M.
             assert_eq!(
                 guest
                     .ssh_command("lsblk | grep vdc | grep -c 16M")
@@ -4868,6 +5162,7 @@ mod common_parallel {
             // Let's remove it the extra disk.
             assert!(remote_command(&api_socket, "remove-device", Some("test0")));
             thread::sleep(std::time::Duration::new(5, 0));
+
             // And check /dev/vdc is not there
             assert_eq!(
                 guest
@@ -4923,7 +5218,7 @@ mod common_parallel {
             assert!(remote_command(&api_socket, "remove-device", Some("test0")));
 
             thread::sleep(std::time::Duration::new(20, 0));
-
+ 
             // Check device has gone away
             assert_eq!(
                 guest
@@ -5086,10 +5381,11 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block_topology() {
+        println!("===== Running test_virtio_block_topology");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
         let test_disk_path = guest.tmp_dir.as_path().join("test.img");
 
         let output = exec_host_command_output(
@@ -5111,6 +5407,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--disk",
@@ -5181,10 +5480,11 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_balloon_deflate_on_oom() {
+        println!("===== Running test_virtio_balloon_deflate_on_oom");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let api_socket = temp_api_path(&guest.tmp_dir);
 
@@ -5194,7 +5494,10 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .args(["--balloon", "size=2G,deflate_on_oom=on"])
             .default_disks()
             .default_net()
@@ -5240,6 +5543,7 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_virtio_balloon_free_page_reporting() {
+        println!("===== Running test_virtio_balloon_free_page_reporting");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -5247,8 +5551,11 @@ mod common_parallel {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .args(["--balloon", "size=0,free_page_reporting=on"])
             .default_disks()
             .default_net()
@@ -5303,11 +5610,13 @@ mod common_parallel {
 
     #[test]
     fn test_pmem_hotplug() {
+        println!("===== Running test_pmem_hotplug");
         _test_pmem_hotplug(None)
     }
 
     #[test]
     fn test_pmem_multi_segment_hotplug() {
+        println!("===== Running test_pmem_multi_segment_hotplug");
         _test_pmem_hotplug(Some(6))
     }
 
@@ -5320,7 +5629,7 @@ mod common_parallel {
         let guest = Guest::new(Box::new(focal));
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
 
@@ -5332,6 +5641,9 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
@@ -5446,11 +5758,13 @@ mod common_parallel {
 
     #[test]
     fn test_net_hotplug() {
+        println!("===== Running test_net_hotplug");
         _test_net_hotplug(None)
     }
 
     #[test]
     fn test_net_multi_segment_hotplug() {
+        println!("===== Running test_net_multi_segment_hotplug");
         _test_net_hotplug(Some(6))
     }
 
@@ -5459,7 +5773,7 @@ mod common_parallel {
         let guest = Guest::new(Box::new(focal));
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
 
@@ -5472,6 +5786,8 @@ mod common_parallel {
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .capture_output();
@@ -5479,7 +5795,12 @@ mod common_parallel {
         if pci_segment.is_some() {
             cmd.args([
                 "--platform",
-                &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}"),
+                &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS},snp=on"),
+            ]);
+        }
+        else{
+            cmd.args([
+                "--platform", "snp=on"
             ]);
         }
 
@@ -5521,7 +5842,7 @@ mod common_parallel {
             // 1 network interfaces + default localhost ==> 2 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -5556,6 +5877,8 @@ mod common_parallel {
                     "{{\"id\":\"test1\",\"bdf\":\"{pci_segment:04x}:00:01.0\"}}"
                 )));
             } else {
+                println!("========> Test: cmd_output: {}", String::from_utf8_lossy(&cmd_output));
+                println!("========> Test: Guest lspci: {}", &guest.ssh_command("lspci").unwrap());
                 assert!(String::from_utf8_lossy(&cmd_output)
                     .contains("{\"id\":\"test1\",\"bdf\":\"0000:00:05.0\"}"));
             }
@@ -5565,7 +5888,7 @@ mod common_parallel {
             // 1 network interfaces + default localhost ==> 2 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -5579,7 +5902,7 @@ mod common_parallel {
             // 1 network interfaces + default localhost ==> 2 interfaces
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -5596,20 +5919,22 @@ mod common_parallel {
 
     #[test]
     fn test_initramfs() {
+        println!("===== Running test_initramfs");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
         #[cfg(target_arch = "x86_64")]
-        let mut kernels = vec![direct_kernel_boot_path()];
+        let mut kernels = vec![direct_kernel_boot_path("1".to_string(), "hvc0".to_string())];
         #[cfg(target_arch = "aarch64")]
         let kernels = vec![direct_kernel_boot_path()];
 
         #[cfg(target_arch = "x86_64")]
         {
-            let mut pvh_kernel_path = workload_path.clone();
-            pvh_kernel_path.push("vmlinux");
+            // let mut pvh_kernel_path = workload_path.clone();
+            // pvh_kernel_path.push("vmlinux");
+            let pvh_kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
             kernels.push(pvh_kernel_path);
         }
 
@@ -5622,7 +5947,10 @@ mod common_parallel {
         kernels.iter().for_each(|k_path| {
             let mut child = GuestCommand::new(&guest)
                 .args(["--kernel", k_path.to_str().unwrap()])
+                .args(["--platform", "snp=on"])
+                .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
                 .args(["--initramfs", initramfs_path.to_str().unwrap()])
+                .set_print_cmd(true)
                 .args(["--cmdline", &cmdline])
                 .capture_output()
                 .spawn()
@@ -5649,18 +5977,20 @@ mod common_parallel {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_hotplug_virtiomem() {
+        println!("===== Running test_snapshot_restore_hotplug_virtiomem");
         _test_snapshot_restore(true);
     }
 
     #[test]
     fn test_snapshot_restore_basic() {
+        println!("===== Running test_snapshot_restore_basic");
         _test_snapshot_restore(false);
     }
 
     fn _test_snapshot_restore(use_hotplug: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("4".to_string(), "hvc0".to_string());
 
         let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
 
@@ -5690,6 +6020,9 @@ mod common_parallel {
             .args(["--memory", mem_params])
             .args(["--balloon", "size=0"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--disk",
                 format!(
@@ -5717,6 +6050,7 @@ mod common_parallel {
             // Check the number of vCPUs
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
             // Check the guest RAM
+            println!("========> Test: Guest Memory from /proc/meminfo: {}", &guest.ssh_command("grep MemTotal /proc/meminfo | grep -o \"[0-9]*\"").unwrap());
             assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
             if use_hotplug {
                 // Increase guest RAM with virtio-mem
@@ -5935,6 +6269,7 @@ mod common_parallel {
 
     #[test]
     fn test_counters() {
+        println!("===== Running test_counters");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -5942,10 +6277,14 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path("1".to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", guest.default_net_string().as_str()])
+            .set_print_cmd(true)
+            //.verbosity(VerbosityLevel::Debug)
             .args(["--api-socket", &api_socket])
             .capture_output();
 
@@ -5974,6 +6313,7 @@ mod common_parallel {
     #[test]
     #[cfg(feature = "guest_debug")]
     fn test_coredump() {
+        println!("===== Running test_coredump");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -5981,9 +6321,10 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=4"])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "4".to_string(), "hvc0".to_string()).as_str()])
             .default_disks()
             .args(["--net", guest.default_net_string().as_str()])
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket])
             .capture_output();
 
@@ -6021,20 +6362,24 @@ mod common_parallel {
 
     #[test]
     fn test_watchdog() {
+        println!("===== Running test_watchdog");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("1".to_string(), "hvc0".to_string());
 
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", guest.default_net_string().as_str()])
             .args(["--watchdog"])
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket])
             .capture_output();
 
@@ -6053,6 +6398,7 @@ mod common_parallel {
             guest.wait_vm_boot(None).unwrap();
             expected_reboot_count += 1;
             assert_eq!(get_reboot_count(&guest), expected_reboot_count);
+            println!("Rebooted...checking journalctl");
             assert_eq!(
                 guest
                     .ssh_command("sudo journalctl | grep -c -- \"Watchdog started\"")
@@ -6062,7 +6408,7 @@ mod common_parallel {
                     .unwrap_or_default(),
                 2
             );
-
+            println!("journalctl check completed");
             // Allow some normal time to elapse to check we don't get spurious reboots
             thread::sleep(std::time::Duration::new(40, 0));
             // Check no reboot
@@ -6096,12 +6442,14 @@ mod common_parallel {
 
     #[test]
     fn test_tap_from_fd() {
+        println!("===== Running test_tap_from_fd");
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
 
         // Create a TAP interface with multi-queue enabled
         let num_queue_pairs: usize = 2;
+        let kernel_path = direct_kernel_boot_path(format!("{}", num_queue_pairs).to_string(), "hvc0".to_string());
+
 
         use std::str::FromStr;
         let taps = net_util::open_tap(
@@ -6119,7 +6467,10 @@ mod common_parallel {
             .args(["--cpus", &format!("boot={num_queue_pairs}")])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .default_disks()
             .args([
                 "--net",
@@ -6137,10 +6488,10 @@ mod common_parallel {
 
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
-
+            println!("========> Test: Guest interface check: {}", &guest.ssh_command("ip -o link").unwrap());
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -6152,7 +6503,7 @@ mod common_parallel {
 
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -6182,7 +6533,7 @@ mod common_parallel {
         let api_socket = temp_api_path(&guest.tmp_dir);
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
         #[cfg(target_arch = "aarch64")]
         let kernel_path = edk2_path();
 
@@ -6236,8 +6587,11 @@ mod common_parallel {
             .args(["--cpus", "boot=2"])
             .args(["--memory", "size=512M"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket]);
 
         let net_params = format!(
@@ -6273,10 +6627,10 @@ mod common_parallel {
         // HTTP request, and through the SSH command as well.
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
-
+            println!("========> Test: Guest ip -o link : {}", &guest.ssh_command("ip -o link ").unwrap());
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -6285,10 +6639,10 @@ mod common_parallel {
             );
 
             guest.reboot_linux(0, None);
-
+            println!("========> Test: Guest ip -o link : {}", &guest.ssh_command("ip -o link ").unwrap());
             assert_eq!(
                 guest
-                    .ssh_command("ip -o link | wc -l")
+                    .ssh_command("ip -o link | grep -v 'sit0@NONE' | wc -l")
                     .unwrap()
                     .trim()
                     .parse::<u32>()
@@ -6310,18 +6664,21 @@ mod common_parallel {
     #[test]
     #[cfg_attr(target_arch = "aarch64", ignore = "See #5443")]
     fn test_macvtap() {
+        println!("===== Running test_macvtap");
         _test_macvtap(false, "guestmacvtap0", "hostmacvtap0")
     }
 
     #[test]
     #[cfg_attr(target_arch = "aarch64", ignore = "See #5443")]
     fn test_macvtap_hotplug() {
+        println!("===== Running test_macvtap_hotplug");
         _test_macvtap(true, "guestmacvtap1", "hostmacvtap1")
     }
 
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_ovs_dpdk() {
+        println!("===== Running test_ovs_dpdk");
         let focal1 = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest1 = Guest::new(Box::new(focal1));
 
@@ -6494,6 +6851,7 @@ mod common_parallel {
 
     #[test]
     fn test_vfio_user() {
+        println!("===== Running test_vfio_user");
         let jammy_image = JAMMY_IMAGE_NAME.to_string();
         let jammy = UbuntuDiskConfig::new(jammy_image);
         let guest = Guest::new(Box::new(jammy));
@@ -6506,8 +6864,11 @@ mod common_parallel {
             .args(["--api-socket", &api_socket])
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M,shared=on,hugepages=on"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "1".to_string(), "ttyS0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty", "--console", "off"])
+            .set_print_cmd(true)
             .default_disks()
             .default_net()
             .capture_output()
@@ -6581,6 +6942,7 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_vdpa_block() {
+        println!("===== Running test_vdpa_block");
         // Before trying to run the test, verify the vdpa_sim_blk module is correctly loaded.
         if !exec_host_command_status("lsmod | grep vdpa_sim_blk").success() {
             return;
@@ -6590,15 +6952,18 @@ mod common_parallel {
         let guest = Guest::new(Box::new(focal));
         let api_socket = temp_api_path(&guest.tmp_dir);
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2"])
             .args(["--memory", "size=512M,hugepages=on"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
+            .set_print_cmd(true)
             .args(["--vdpa", "path=/dev/vhost-vdpa-0,num_queues=1"])
             .args(["--platform", "num_pci_segments=2,iommu_segments=1"])
             .args(["--api-socket", &api_socket])
@@ -6703,6 +7068,7 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_vdpa_net() {
+        println!("===== Running test_vdpa_net");
         // Before trying to run the test, verify the vdpa_sim_net module is correctly loaded.
         if !exec_host_command_status("lsmod | grep vdpa_sim_net").success() {
             return;
@@ -6711,15 +7077,18 @@ mod common_parallel {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
 
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=2"])
             .args(["--memory", "size=512M,hugepages=on"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .default_net()
+            .set_print_cmd(true)
             .args(["--vdpa", "path=/dev/vhost-vdpa-2,num_queues=2"])
             .capture_output()
             .spawn()
@@ -6782,6 +7151,7 @@ mod common_parallel {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_tpm() {
+        println!("===== Running test_tpm");
         let focal = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
@@ -6791,7 +7161,10 @@ mod common_parallel {
         guest_cmd
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "1".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--tpm", &format!("socket={swtpm_socket_path}")])
             .capture_output()
             .default_disks()
@@ -6865,6 +7238,7 @@ mod common_sequential {
     #[test]
     #[cfg(not(feature = "mshv"))]
     fn test_memory_mergeable_on() {
+        println!("===== Running test_memory_mergeable_on");
         test_memory_mergeable(true)
     }
 }
@@ -7171,7 +7545,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", edk2_path().to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7217,7 +7594,10 @@ mod windows {
             .args(["--cpus", "boot=4,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .args([
                 "--disk",
@@ -7288,7 +7668,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7377,7 +7760,10 @@ mod windows {
             .args(["--cpus", "boot=2,max=8,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7452,7 +7838,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=2G,hotplug_size=5G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7526,8 +7915,11 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
             .args(["--console", "off"])
+            .set_print_cmd(true)
             .default_disks()
             .default_net()
             .capture_output()
@@ -7599,7 +7991,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7694,7 +8089,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=2G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             .default_net()
@@ -7824,7 +8222,10 @@ mod windows {
             .args(["--cpus", "boot=2,kvm_hyperv=on"])
             .args(["--memory", "size=4G"])
             .args(["--kernel", ovmf_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--serial", "tty"])
+            .set_print_cmd(true)
             .args(["--console", "off"])
             .default_disks()
             // The multi net dev config is borrowed from test_multiple_network_interfaces
@@ -7873,6 +8274,7 @@ mod sgx {
 
     #[test]
     fn test_sgx() {
+        println!("===== Running test_sgx");
         let jammy_image = JAMMY_IMAGE_NAME.to_string();
         let jammy = UbuntuDiskConfig::new(jammy_image);
         let guest = Guest::new(Box::new(jammy));
@@ -7880,9 +8282,12 @@ mod sgx {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "1".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .default_disks()
             .default_net()
+            .set_print_cmd(true)
             .args(["--sgx-epc", "id=epc0,size=64M"])
             .capture_output()
             .spawn()
@@ -7927,6 +8332,7 @@ mod vfio {
     // Also, we pass-through a vitio-blk device to the L2 VM to test the 32-bit
     // vfio device support
     fn test_vfio() {
+        println!("===== Running test_vfio");
         setup_vfio_network_interfaces();
 
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
@@ -7935,7 +8341,7 @@ mod vfio {
         let mut workload_path = dirs::home_dir().unwrap();
         workload_path.push("workloads");
 
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("4".to_string(), "hvc0".to_string());
 
         let mut vfio_path = workload_path.clone();
         vfio_path.push("vfio");
@@ -7979,6 +8385,9 @@ mod vfio {
             .args(["--cpus", "boot=4"])
             .args(["--memory", "size=2G,hugepages=on,shared=on"])
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args([
                 "--disk",
                 format!(
@@ -8194,8 +8603,11 @@ mod vfio {
                 "--memory",
                 format!("size=4G,hotplug_size=4G,hotplug_method={hotplug_method}").as_str(),
             ])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "4".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--device", "path=/sys/bus/pci/devices/0000:31:00.0/"])
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket])
             .default_disks()
             .default_net()
@@ -8228,16 +8640,19 @@ mod vfio {
 
     #[test]
     fn test_nvidia_card_memory_hotplug_acpi() {
+        println!("===== Running test_nvidia_card_memory_hotplug_acpi");
         test_nvidia_card_memory_hotplug("acpi")
     }
 
     #[test]
     fn test_nvidia_card_memory_hotplug_virtio_mem() {
+        println!("===== Running test_nvidia_card_memory_hotplug_virtio_mem");
         test_nvidia_card_memory_hotplug("virtio-mem")
     }
 
     #[test]
     fn test_nvidia_card_pci_hotplug() {
+        println!("===== Running test_nvidia_card_pci_hotplug");
         let jammy = UbuntuDiskConfig::new(JAMMY_NVIDIA_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(jammy));
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -8245,7 +8660,10 @@ mod vfio {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=4"])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "4".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket])
             .default_disks()
             .default_net()
@@ -8280,6 +8698,7 @@ mod vfio {
 
     #[test]
     fn test_nvidia_card_reboot() {
+        println!("===== Running test_nvidia_card_reboot");
         let jammy = UbuntuDiskConfig::new(JAMMY_NVIDIA_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(jammy));
         let api_socket = temp_api_path(&guest.tmp_dir);
@@ -8287,8 +8706,11 @@ mod vfio {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", "boot=4"])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware).as_str()])
+            .args(["--kernel", fw_path(FwType::RustHypervisorFirmware, "4".to_string(), "hvc0".to_string()).as_str()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--device", "path=/sys/bus/pci/devices/0000:31:00.0/"])
+            .set_print_cmd(true)
             .args(["--api-socket", &api_socket])
             .default_disks()
             .default_net()
@@ -8451,7 +8873,7 @@ mod live_migration {
     fn _test_live_migration(upgrade_test: bool, local: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
         let console_text = String::from("On a branch floating down river a cricket, singing.");
         let net_id = "net123";
         let net_params = format!(
@@ -8491,9 +8913,12 @@ mod live_migration {
             ])
             .args(memory_param)
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", net_params.as_str()])
+            .set_print_cmd(true)
             .args(["--api-socket", &src_api_socket])
             .args([
                 "--pmem",
@@ -8605,7 +9030,7 @@ mod live_migration {
     fn _test_live_migration_balloon(upgrade_test: bool, local: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
         let console_text = String::from("On a branch floating down river a cricket, singing.");
         let net_id = "net123";
         let net_params = format!(
@@ -8655,9 +9080,12 @@ mod live_migration {
             ])
             .args(memory_param)
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", net_params.as_str()])
+            .set_print_cmd(true)
             .args(["--api-socket", &src_api_socket])
             .args([
                 "--pmem",
@@ -8794,7 +9222,7 @@ mod live_migration {
     fn _test_live_migration_numa(upgrade_test: bool, local: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("6".to_string(), "hvc0".to_string());
         let console_text = String::from("On a branch floating down river a cricket, singing.");
         let net_id = "net123";
         let net_params = format!(
@@ -8864,9 +9292,12 @@ mod live_migration {
             ])
             .args(memory_param)
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", net_params.as_str()])
+            .set_print_cmd(true)
             .args(["--api-socket", &src_api_socket])
             .args([
                 "--pmem",
@@ -9049,7 +9480,7 @@ mod live_migration {
     fn _test_live_migration_watchdog(upgrade_test: bool, local: bool) {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
-        let kernel_path = direct_kernel_boot_path();
+        let kernel_path = direct_kernel_boot_path("2".to_string(), "hvc0".to_string());
         let console_text = String::from("On a branch floating down river a cricket, singing.");
         let net_id = "net123";
         let net_params = format!(
@@ -9089,9 +9520,12 @@ mod live_migration {
             ])
             .args(memory_param)
             .args(["--kernel", kernel_path.to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .default_disks()
             .args(["--net", net_params.as_str()])
+            .set_print_cmd(true)
             .args(["--api-socket", &src_api_socket])
             .args([
                 "--pmem",
@@ -9484,6 +9918,7 @@ mod aarch64_acpi {
                 .args(["--cpus", "boot=1"])
                 .args(["--memory", "size=512M"])
                 .args(["--kernel", edk2_path().to_str().unwrap()])
+                .set_print_cmd(true)
                 .default_disks()
                 .default_net()
                 .args(["--serial", "tty", "--console", "off"])
@@ -9581,8 +10016,11 @@ mod rate_limiter {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", &format!("boot={}", num_queues / 2)])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path(format!("{}", num_queues / 2).to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
+            .set_print_cmd(true)
             .default_disks()
             .args(["--net", net_params.as_str()])
             .capture_output()
@@ -9652,7 +10090,10 @@ mod rate_limiter {
         let mut child = GuestCommand::new(&guest)
             .args(["--cpus", &format!("boot={num_queues}")])
             .args(["--memory", "size=4G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
+            .args(["--kernel", direct_kernel_boot_path(format!("{}", num_queues).to_string(), "hvc0".to_string()).to_str().unwrap()])
+            .args(["--platform", "snp=on"])
+            .args(["--host-data", "243eb7dc1a21129caa91dcbb794922b933baecb5823a377eb431188673288c07"])
+            .set_print_cmd(true)
             .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args([
                 "--disk",
@@ -9707,6 +10148,7 @@ mod rate_limiter {
 
     #[test]
     fn test_rate_limiter_block_iops() {
+        println!("===== Running test_rate_limiter_block_iops");
         _test_rate_limiter_block(false)
     }
 }

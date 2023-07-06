@@ -1101,13 +1101,39 @@ impl Vm {
                 panic!("Invalid playload: Either igvm or kernel should be provided");
             }
         }
+
         if firmware.is_some() {
-            let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
-            return Self::load_kernel(firmware, None, memory_manager);
+            // let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            // return Self::load_kernel(firmware, None, memory_manager);
+
+            let igvm = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            #[cfg(feature = "snp")] {
+                if let Some(host_data_str) =  host_data {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                }
+                else {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
+                }
+            }
+            #[cfg(not(feature = "snp"))]
+            return Self::load_igvm(igvm, memory_manager, cpu_manager);
+
         } else if kernel.is_some() {
-            let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
-            let cmdline = Self::generate_cmdline(payload)?;
-            return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+            // let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            // let cmdline = Self::generate_cmdline(payload)?;
+            // return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+
+            let igvm = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            #[cfg(feature = "snp")] {
+                if let Some(host_data_str) =  host_data {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                }
+                else {
+                    return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
+                }
+            }
+            #[cfg(not(feature = "snp"))]
+            return Self::load_igvm(igvm, memory_manager, cpu_manager);
         } else if igvm.is_some() {
             #[cfg(feature = "igvm")]
             {

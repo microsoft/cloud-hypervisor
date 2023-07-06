@@ -15,7 +15,7 @@ process_common_args "$@"
 test_features=""
 
 if [ "$hypervisor" = "mshv" ] ;  then
-    test_features="--no-default-features --features mshv"
+    test_features="--no-default-features --features mshv,igvm,snp"
 fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
@@ -68,7 +68,7 @@ if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
     CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --no-default-features --features "kvm,mshv" --all --release --target $BUILD_TARGET
+cargo build --no-default-features --features "kvm,mshv,igvm,snp" --all --release --target $BUILD_TARGET
 
 # Test ovs-dpdk relies on hugepages
 HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`
@@ -76,14 +76,14 @@ PAGE_NUM=`echo $((12288 * 1024 / $HUGEPAGESIZE))`
 echo $PAGE_NUM | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
-export RUST_BACKTRACE=1
+export RUST_BACKTRACE=full
 time cargo test $test_features "live_migration_parallel::$test_filter" -- ${test_binary_args[*]}
 RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
 if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
+    export RUST_BACKTRACE=full
     time cargo test $test_features "live_migration_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
     RES=$?
 fi
