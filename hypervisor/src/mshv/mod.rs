@@ -17,7 +17,7 @@ use byteorder::BigEndian;
 #[cfg(feature = "snp")]
 use igvm_parser::importer::HV_PAGE_SIZE;
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd};
+use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -239,7 +239,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     fn create_vm_with_type(&self, vm_type: u64, #[cfg(feature = "snp")] _mem_size: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
-            match self.mshv.create_vm_with_type(vm_type) {
+            match self.mshv.create_vm_with_type(VmType::try_from(vm_type).unwrap()) {
                 Ok(res) => fd = res,
                 Err(e) => {
                     if e.errno() == libc::EINTR {
@@ -1798,8 +1798,8 @@ impl vm::Vm for MshvVm {
                         ..Default::default()
                     },
                     host_data: host_data[0..32].try_into().unwrap(),
-                    id_block_enabled: false,
-                    author_key_enabled: false,
+                    id_block_enabled: 0,
+                    author_key_enabled: 0,
                 },
             },
         };
@@ -1888,11 +1888,11 @@ fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Re
 }
 
 #[cfg(feature="snp")]
-fn _snp_start_vcpu(fd: Arc<VmFd>, apic_id: u64, vmsa_gpa: u64) -> vm::Result<()> {
-    let req = mshv_snp_ap_create {
-        apic_id,
+fn _snp_start_vcpu(fd: Arc<VmFd>, vp_id: u64, vmsa_gpa: u64) -> vm::Result<()> {
+    let req = mshv_sev_snp_ap_create {
+        vp_id,
         vmsa_gpa,
     };
 
-    fd.snp_ap_create(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
+    fd.sev_snp_ap_create(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }

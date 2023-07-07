@@ -245,14 +245,14 @@ pub fn load_igvm(
                             gpas.push(GpaPages {
                                 gpa: *gpa,
                                 page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED,
-                                page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                                page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                             });
                             BootPageAcceptance::ExclusiveUnmeasured
                         } else {
                             gpas.push(GpaPages {
                                 gpa: *gpa,
                                 page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
-                                page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                                page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                             });
                             BootPageAcceptance::Exclusive
                         }
@@ -261,7 +261,7 @@ pub fn load_igvm(
                         gpas.push(GpaPages {
                             gpa: *gpa,
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS,
-                            page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                            page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                         });
                         BootPageAcceptance::SecretsPage
                     }
@@ -292,7 +292,7 @@ pub fn load_igvm(
                         gpas.push(GpaPages {
                             gpa: *gpa,
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
-                            page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                            page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                         });
                         BootPageAcceptance::CpuidPage
                     }
@@ -418,7 +418,7 @@ pub fn load_igvm(
                 gpas.push(GpaPages {
                     gpa: *gpa,
                     page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA,
-                    page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                    page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 });
             }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpIdBlock {
@@ -493,7 +493,7 @@ pub fn load_igvm(
                 gpas.push(GpaPages {
                     gpa: *gpa,
                     page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
-                    page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                    page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 });
             }
             igvm_parser::igvm::IgvmDirectiveHeader::ErrorRange { .. } => {
@@ -522,7 +522,7 @@ pub fn load_igvm(
             .vm
             .import_isolated_pages(
                 hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 &gpas
                     .iter()
                     .filter(|x| {
@@ -540,7 +540,7 @@ pub fn load_igvm(
             .vm
             .import_isolated_pages(
                 hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 &gpas
                     .iter()
                     .filter(|x| {
@@ -558,7 +558,7 @@ pub fn load_igvm(
             .vm
             .import_isolated_pages(
                 hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 &gpas
                     .iter()
                     .filter(|x| {
@@ -576,7 +576,7 @@ pub fn load_igvm(
             .vm
             .import_isolated_pages(
                 hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 &gpas
                     .iter()
                     .filter(|x| {
@@ -610,7 +610,7 @@ pub fn load_igvm(
             .vm
             .import_isolated_pages(
                 hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE4_KB,
+                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 &gpas
                     .iter()
                     .filter(|x| {
