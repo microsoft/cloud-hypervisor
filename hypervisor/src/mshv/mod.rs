@@ -805,7 +805,7 @@ impl cpu::Vcpu for MshvVcpu {
                                     let value: u64 = 0xFFFFFFFFFFFFFFFF;
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
-                                    arg.data.copy_from_slice(&value.to_le_bytes());
+                                    arg.data[0..8].copy_from_slice(&value.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 SVM_NAE_HV_DOORBELL_PAGE_SET => {
@@ -855,7 +855,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         mshv_read_write_gpa::default();
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
-                                    arg.data.copy_from_slice(&value.to_le_bytes());
+                                    arg.data[0..8].copy_from_slice(&value.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 SVM_NAE_HV_DOORBELL_PAGE_CLEAR => {
@@ -864,7 +864,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         mshv_read_write_gpa::default();
                                     arg.base_gpa = gpa + 0x3a0;
                                     arg.byte_count = 8;
-                                    arg.data.copy_from_slice(&value.to_le_bytes());
+                                    arg.data[0..8].copy_from_slice(&value.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
                                 }
                                 _ => {
