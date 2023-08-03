@@ -1819,6 +1819,10 @@ impl CpuManager {
                     .get_cpuid_values(eax, ecx, xfem, xss).unwrap() };
         Ok(leaf_info)
     }
+
+    pub(crate) fn vcpus_kill_signalled(&self) -> &Arc<AtomicBool> {
+        &self.vcpus_kill_signalled
+    }
 }
 
 struct Cpu {
