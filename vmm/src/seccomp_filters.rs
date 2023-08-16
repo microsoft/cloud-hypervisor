@@ -177,6 +177,7 @@ mod mshv {
     pub const MSHV_READ_GPA: u64 = 0xc020_b832;
     pub const MSHV_WRITE_GPA: u64 = 0x4020_b833;
     pub const MSHV_SEV_SNP_AP_CREATE: u64 = 0x4010_b834;
+    pub const MSHV_ISSUE_PSP_GUEST_REQUEST: u64 = 0x4010_b831;
 }
 #[cfg(feature = "mshv")]
 use mshv::*;
@@ -219,8 +220,7 @@ fn create_vmm_ioctl_seccomp_rule_common_mshv() -> Result<Vec<SeccompRule>, Backe
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_READ_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_WRITE_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_SEV_SNP_AP_CREATE)?],
-
-        
+        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_ISSUE_PSP_GUEST_REQUEST)?],
     ])
 }
 
@@ -675,7 +675,7 @@ fn create_vcpu_ioctl_seccomp_rule_mshv() -> Result<Vec<SeccompRule>, BackendErro
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_READ_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_WRITE_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_SEV_SNP_AP_CREATE)?],
-
+        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_ISSUE_PSP_GUEST_REQUEST)?],
     ])
 }
 
