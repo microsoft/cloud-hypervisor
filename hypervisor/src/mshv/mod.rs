@@ -787,7 +787,6 @@ impl cpu::Vcpu for MshvVcpu {
                         let pfn: u64 =
                             unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
-                        debug!("GHCB infor normal: exit code: {:0x}, exit info1: {:0x}, exit info2: {:0x}, gpa: {:0x}", _exit_code, exit_info1, exit_info2, gpa);
                         match _exit_code_u32 {
                             SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1_u32 {
                                 SVM_NAE_HV_DOORBELL_PAGE_GET_PREFERRED => {
@@ -906,7 +905,6 @@ impl cpu::Vcpu for MshvVcpu {
                                         len = 1;
                                     }
                                 }
-                                debug!("GHCB IOPROT Handle: Address {:0x}, Port: {:?}", addr, port);
                                 let is_write =
                                     unsafe { port_into.__bindgen_anon_1.access_type() == 0 };
 
