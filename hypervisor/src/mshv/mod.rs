@@ -1730,7 +1730,7 @@ impl vm::Vm for MshvVm {
         if pages.len() == 0 {
             return Ok(());
         }
-
+        debug!("MUISLAM: VM: import_isolated_pages {:0x}", pages[0]);
         let mut isolated_pages =
             vec_with_array_field::<mshv_import_isolated_pages, u64>(pages.len());
         isolated_pages[0].num_pages = pages.len() as u64;
