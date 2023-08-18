@@ -35,6 +35,7 @@ use igvm_parser::map_range::RangeMap;
 use igvm_parser::memlayout::MemoryRange;
 use igvm_parser::page_table::CpuPagingState;
 use igvm_parser::snp::SEV_VMSA;
+pub use mshv_bindings::*;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::Read;
@@ -47,7 +48,6 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
-pub use mshv_bindings::*;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -140,8 +140,7 @@ pub fn load_igvm(
     mem_regions: Vec<ArchMemRegion>,
     proc_count: u32,
     cmdline: &str,
-    #[cfg(feature = "snp")]
-    host_data: &str,
+    #[cfg(feature = "snp")] host_data: &str,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::new(IgvmLoadedInfo::new());
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
@@ -158,7 +157,8 @@ pub fn load_igvm(
     #[cfg(feature = "snp")]
     {
         assert_eq!(64, host_data.len());
-        hex::decode_to_slice(host_data, &mut host_data_contents as &mut [u8]).expect("Failed to decode host data");
+        hex::decode_to_slice(host_data, &mut host_data_contents as &mut [u8])
+            .expect("Failed to decode host data");
     }
 
     let igvm_file = IgvmFile::new_from_binary(
@@ -267,13 +267,23 @@ pub fn load_igvm(
                     }
                     IgvmPageDataType::CPUID_DATA => {
                         unsafe {
-
-                            let cpuid_page_p: *mut hv_psp_cpuid_page = data.as_ptr() as *mut hv_psp_cpuid_page;// as *mut hv_psp_cpuid_page;
+                            let cpuid_page_p: *mut hv_psp_cpuid_page =
+                                data.as_ptr() as *mut hv_psp_cpuid_page; // as *mut hv_psp_cpuid_page;
                             let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
-                            let i: usize = 0; /* Type usize */;
+                            let i: usize = 0;                            /* Type usize */
                             for i in 0..cpuid_page.count {
                                 let leaf = cpuid_page.cpuid_leaf_info[i as usize];
-                                let mut in_leaf = cpu_manager.lock().unwrap().get_cpuid_leaf(0, leaf.eax_in, leaf.ecx_in, leaf.xfem_in, leaf.xss_in).unwrap();
+                                let mut in_leaf = cpu_manager
+                                    .lock()
+                                    .unwrap()
+                                    .get_cpuid_leaf(
+                                        0,
+                                        leaf.eax_in,
+                                        leaf.ecx_in,
+                                        leaf.xfem_in,
+                                        leaf.xss_in,
+                                    )
+                                    .unwrap();
                                 if leaf.eax_in == 1 {
                                     in_leaf[2] &= 0x7FFFFFFF;
                                 }
@@ -281,7 +291,6 @@ pub fn load_igvm(
                                 cpuid_page.cpuid_leaf_info[i as usize].ebx_out = in_leaf[1];
                                 cpuid_page.cpuid_leaf_info[i as usize].ecx_out = in_leaf[2];
                                 cpuid_page.cpuid_leaf_info[i as usize].edx_out = in_leaf[3];
-
                             }
                         }
                         gpas.push(GpaPages {
@@ -510,99 +519,106 @@ pub fn load_igvm(
             .allocate_address_space()
             .map_err(Error::MemoryManager)?;
 
+        gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
-        
-
-            debug!("MUISLAM: Importing normal pages!");
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
+        for gpa in gpas.iter() {
+            // println!("GPA is {:0x}", gpa.gpa);
+            memory_manager.lock().unwrap().vm.import_isolated_pages(
+                gpa.page_type,
                 hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u32
-                    })
-                    .map(|x| x.gpa / 4096)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
-        debug!("MUISLAM: Importing cpuid pages!");
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u32
-                    })
-                    .map(|x| x.gpa / 4096)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
-            debug!("MUISLAM: Importing zero pages!");
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO as u32
-                    })
-                    .map(|x| x.gpa / 4096)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
+                &vec![gpa.gpa / 4096],
+            ).map_err(Error::ImportIsolatedPages)?;
+        }
 
-        
+        //     debug!("MUISLAM: Importing normal pages!");
+        // memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .vm
+        //     .import_isolated_pages(
+        //         hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
+        //         hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+        //         &gpas
+        //             .iter()
+        //             .filter(|x| {
+        //                 x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u32
+        //             })
+        //             .map(|x| x.gpa / 4096)
+        //             .collect::<Vec<u64>>(),
+        //     )
+        //     .map_err(Error::ImportIsolatedPages)?;
+        // debug!("MUISLAM: Importing cpuid pages!");
+        // memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .vm
+        //     .import_isolated_pages(
+        //         hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
+        //         hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+        //         &gpas
+        //             .iter()
+        //             .filter(|x| {
+        //                 x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u32
+        //             })
+        //             .map(|x| x.gpa / 4096)
+        //             .collect::<Vec<u64>>(),
+        //     )
+        //     .map_err(Error::ImportIsolatedPages)?;
+        //     debug!("MUISLAM: Importing zero pages!");
+        // memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .vm
+        //     .import_isolated_pages(
+        //         hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO,
+        //         hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+        //         &gpas
+        //             .iter()
+        //             .filter(|x| {
+        //                 x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_ZERO as u32
+        //             })
+        //             .map(|x| x.gpa / 4096)
+        //             .collect::<Vec<u64>>(),
+        //     )
+        //     .map_err(Error::ImportIsolatedPages)?;
 
-            debug!("MUISLAM: Importing secret pages !");
+        //     debug!("MUISLAM: Importing secret pages !");
 
-        memory_manager
-            .lock()
-            .unwrap()
-            .vm
-            .import_isolated_pages(
-                hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS,
-                hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
-                &gpas
-                    .iter()
-                    .filter(|x| {
-                        x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u32
-                    })
-                    .map(|x| x.gpa / 4096)
-                    .collect::<Vec<u64>>(),
-            )
-            .map_err(Error::ImportIsolatedPages)?;
-        debug!("MUISLAM: Importing vmsa pages!");
-        memory_manager
-        .lock()
-        .unwrap()
-        .vm
-        .import_isolated_pages(
-            hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA,
-            hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
-            &gpas
-                .iter()
-                .filter(|x| {
-                    x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u32
-                })
-                .map(|x| x.gpa / 4096)
-                .collect::<Vec<u64>>(),
-        )
-        .map_err(Error::ImportIsolatedPages)?;
+        // memory_manager
+        //     .lock()
+        //     .unwrap()
+        //     .vm
+        //     .import_isolated_pages(
+        //         hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS,
+        //         hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+        //         &gpas
+        //             .iter()
+        //             .filter(|x| {
+        //                 x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u32
+        //             })
+        //             .map(|x| x.gpa / 4096)
+        //             .collect::<Vec<u64>>(),
+        //     )
+        //     .map_err(Error::ImportIsolatedPages)?;
+        // debug!("MUISLAM: Importing vmsa pages!");
+        // memory_manager
+        // .lock()
+        // .unwrap()
+        // .vm
+        // .import_isolated_pages(
+        //     hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA,
+        //     hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+        //     &gpas
+        //         .iter()
+        //         .filter(|x| {
+        //             x.page_type == hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u32
+        //         })
+        //         .map(|x| x.gpa / 4096)
+        //         .collect::<Vec<u64>>(),
+        // )
+        // .map_err(Error::ImportIsolatedPages)?;
         // Call Complete Isolated Import since we are done importing isolated pages
+        println!("SNP ID BLOCK: {:?}", loaded_info.snp_id_block.ld);
         memory_manager
             .lock()
             .unwrap()
