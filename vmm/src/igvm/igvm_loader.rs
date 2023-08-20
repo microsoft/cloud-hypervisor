@@ -49,6 +49,8 @@ use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
+use sha256::digest;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("command line is not a valid C string")]
@@ -303,6 +305,8 @@ pub fn load_igvm(
                     // TODO: other data types SNP / TDX only, unsupported
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
+
+                println!("{:x} {} {}", gpa, data_type, digest(data));
 
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
