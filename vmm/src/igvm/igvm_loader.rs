@@ -50,6 +50,8 @@ use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
 use sha2::{Sha256, Digest};
+use std::io::Write;
+use std::fs::File;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -219,6 +221,8 @@ pub fn load_igvm(
 
     let mut page_table_cpu_state: Option<CpuPagingState> = None;
 
+    let mut logfile = std::fs::File::create("/tmp/output").unwrap();
+
     for header in igvm_file.directives() {
         debug_assert!(header.compatibility_mask().unwrap_or(mask) & mask == mask);
 
@@ -309,7 +313,8 @@ pub fn load_igvm(
                 let mut hasher = Sha256::new();
                 hasher.update(data);
                 let result = hasher.finalize();
-                println!("{:x} {:x}", gpa, result);
+
+                logfile.write(format!("{:#0x} {:?} {:x}\n", gpa, data_type, result).as_bytes());
 
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
@@ -426,6 +431,13 @@ pub fn load_igvm(
                 }
                 loaded_info.vmsa_gpa = *gpa;
                 loaded_info.vmsa = **vmsa;
+
+                let mut hasher = Sha256::new();
+                hasher.update(data);
+                let result = hasher.finalize();
+
+                logfile.write(format!("{:#0x} VMSA {:x}\n", gpa, result).as_bytes());
+
                 gpas.push(GpaPages {
                     gpa: *gpa,
                     page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA,
