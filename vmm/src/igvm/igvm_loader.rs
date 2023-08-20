@@ -49,7 +49,7 @@ use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
-use sha256::digest;
+use sha2::{Sha256, Digest};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -306,7 +306,10 @@ pub fn load_igvm(
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
 
-                println!("{:x} {} {}", gpa, data_type, digest(data));
+                let mut hasher = Sha256::new();
+                hasher.update(data);
+                let result = hasher.finalize();
+                println!("{:x} {:x}", gpa, result);
 
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
