@@ -240,8 +240,16 @@ pub fn load_igvm(
                 }
                 debug_assert!(data.len() as u64 % HV_PAGE_SIZE == 0);
 
+                let zero_page = &[0; 4096].to_vec();
+
+                let mut data = data;
+
                 // TODO: only 4k or empty page datas supported right now
                 assert!(data.len() as u64 == HV_PAGE_SIZE || data.is_empty());
+
+                if data.is_empty() {
+                    data = zero_page;
+                }
 
                 let acceptance = match *data_type {
                     IgvmPageDataType::NORMAL => {
@@ -502,17 +510,26 @@ pub fn load_igvm(
                     .get_mut(parameter_area_index)
                     .expect("igvmfile should be valid");
                 match area {
-                    ParameterAreaState::Allocated { data, max_size } => loader
+                    ParameterAreaState::Allocated { data, max_size } => { loader
                         .import_pages(
                             gpa / HV_PAGE_SIZE,
                             *max_size / HV_PAGE_SIZE,
                             BootPageAcceptance::ExclusiveUnmeasured,
                             data,
                         )
-                        .map_err(Error::Loader)?,
+                        .map_err(Error::Loader)?;
+
+                        let mut hasher = Sha256::new();
+                        hasher.update(data);
+                        let result = hasher.finalize();
+
+                        logfile.write(format!("{:#0x} PARAM {:x}\n", gpa, result).as_bytes());
+                    }
+
                     ParameterAreaState::Inserted => panic!("igvmfile is invalid, multiple insert"),
                 }
                 *area = ParameterAreaState::Inserted;
+
                 gpas.push(GpaPages {
                     gpa: *gpa,
                     page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
@@ -539,6 +556,8 @@ pub fn load_igvm(
             .map_err(Error::MemoryManager)?;
 
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
+
+        println!("Number of GPAs {}", gpas.len());
 
         for gpa in gpas.iter() {
             // println!("GPA is {:0x}", gpa.gpa);
