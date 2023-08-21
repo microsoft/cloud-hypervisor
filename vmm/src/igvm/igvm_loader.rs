@@ -261,8 +261,21 @@ pub fn load_igvm(
                                 page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED,
                                 page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                             });
+                        let mut hasher = Sha256::new();
+                        hasher.update(data);
+                        let result = hasher.finalize();
+
+                        logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
                             BootPageAcceptance::ExclusiveUnmeasured
+
                         } else {
+
+                        let mut hasher = Sha256::new();
+                        hasher.update(data);
+                        let result = hasher.finalize();
+
+                        logfile.write(format!("{:#0x} 1 {:x}\n", gpa, result).as_bytes());
+
                             gpas.push(GpaPages {
                                 gpa: *gpa,
                                 page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
@@ -277,12 +290,25 @@ pub fn load_igvm(
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS,
                             page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                         });
+
+                        let mut hasher = Sha256::new();
+                        hasher.update(data);
+                        let result = hasher.finalize();
+
+                        logfile.write(format!("{:#0x} 5 {:x}\n", gpa, result).as_bytes());
+
                         BootPageAcceptance::SecretsPage
                     }
                     IgvmPageDataType::CPUID_DATA => {
                         unsafe {
                             let cpuid_page_p: *mut hv_psp_cpuid_page =
                                 data.as_ptr() as *mut hv_psp_cpuid_page; // as *mut hv_psp_cpuid_page;
+
+                        let mut hasher = Sha256::new();
+                        hasher.update(data);
+                        let result = hasher.finalize();
+                        logfile.write(format!("{:#0x} 6 {:x}\n", gpa, result).as_bytes());
+
                             let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
                             let i: usize = 0;                            /* Type usize */
                             for i in 0..cpuid_page.count {
@@ -307,6 +333,8 @@ pub fn load_igvm(
                                 cpuid_page.cpuid_leaf_info[i as usize].edx_out = in_leaf[3];
                             }
                         }
+
+
                         gpas.push(GpaPages {
                             gpa: *gpa,
                             page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID,
@@ -317,12 +345,6 @@ pub fn load_igvm(
                     // TODO: other data types SNP / TDX only, unsupported
                     _ => todo!("unsupported IgvmPageDataType"),
                 };
-
-                let mut hasher = Sha256::new();
-                hasher.update(data);
-                let result = hasher.finalize();
-
-                logfile.write(format!("{:#0x} {:?} {:x}\n", gpa, data_type, result).as_bytes());
 
                 loader
                     .import_pages(gpa / HV_PAGE_SIZE, 1, acceptance, data)
@@ -338,12 +360,22 @@ pub fn load_igvm(
                     initial_data.is_empty() || initial_data.len() as u64 == *number_of_bytes
                 );
 
+                let data = if initial_data.is_empty() {
+                        let zero_page = [1; 4096];
+                        println!("initial_data is empty");
+                        zero_page[..*number_of_bytes as usize].to_vec()
+                    } else {
+                        initial_data.clone()
+                    };
+                // let data = initial_data.clone();
+
+                println!("YYY {} {} {:?}", *number_of_bytes, data.len(), data);
                 // Allocate a new parameter area. It must not be already used.
                 if parameter_areas
                     .insert(
                         *parameter_area_index,
                         ParameterAreaState::Allocated {
-                            data: initial_data.clone(),
+                            data,
                             max_size: *number_of_bytes,
                         },
                     )
@@ -351,6 +383,7 @@ pub fn load_igvm(
                 {
                     panic!("IgvmFile is not valid, invalid invariant");
                 }
+
             }
             igvm_parser::igvm::IgvmDirectiveHeader::VpCount(info) => {
                 import_parameter(&mut parameter_areas, info, proc_count.as_bytes())?;
@@ -444,7 +477,7 @@ pub fn load_igvm(
                 hasher.update(data);
                 let result = hasher.finalize();
 
-                logfile.write(format!("{:#0x} VMSA {:x}\n", gpa, result).as_bytes());
+                logfile.write(format!("{:#0x} 2 {:x}\n", gpa, result).as_bytes());
 
                 gpas.push(GpaPages {
                     gpa: *gpa,
@@ -510,12 +543,24 @@ pub fn load_igvm(
                     .get_mut(parameter_area_index)
                     .expect("igvmfile should be valid");
                 match area {
-                    ParameterAreaState::Allocated { data, max_size } => { loader
+                    ParameterAreaState::Allocated { data, max_size } => { 
+                        let zero_page = &[0; 4096].to_vec();
+
+                        let data = if data.is_empty() {
+                            println!("XXXX data is empty");
+                            zero_page
+                        } else {
+                            data
+                        };
+
+                        println!("XXX {max_size} {} {:?}", data.len(), data);
+
+                        loader
                         .import_pages(
                             gpa / HV_PAGE_SIZE,
                             *max_size / HV_PAGE_SIZE,
                             BootPageAcceptance::ExclusiveUnmeasured,
-                            data,
+                            &data[..*max_size as usize],
                         )
                         .map_err(Error::Loader)?;
 
@@ -523,7 +568,8 @@ pub fn load_igvm(
                         hasher.update(data);
                         let result = hasher.finalize();
 
-                        logfile.write(format!("{:#0x} PARAM {:x}\n", gpa, result).as_bytes());
+                        // In the tool param page is unmeasured (4)
+                        logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
                     }
 
                     ParameterAreaState::Inserted => panic!("igvmfile is invalid, multiple insert"),
