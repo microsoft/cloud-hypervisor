@@ -362,14 +362,11 @@ pub fn load_igvm(
 
                 let data = if initial_data.is_empty() {
                         let zero_page = [1; 4096];
-                        println!("initial_data is empty");
                         zero_page[..*number_of_bytes as usize].to_vec()
                     } else {
                         initial_data.clone()
                     };
-                // let data = initial_data.clone();
 
-                println!("YYY {} {} {:?}", *number_of_bytes, data.len(), data);
                 // Allocate a new parameter area. It must not be already used.
                 if parameter_areas
                     .insert(
@@ -544,17 +541,6 @@ pub fn load_igvm(
                     .expect("igvmfile should be valid");
                 match area {
                     ParameterAreaState::Allocated { data, max_size } => { 
-                        let zero_page = &[0; 4096].to_vec();
-
-                        let data = if data.is_empty() {
-                            println!("XXXX data is empty");
-                            zero_page
-                        } else {
-                            data
-                        };
-
-                        println!("XXX {max_size} {} {:?}", data.len(), data);
-
                         loader
                         .import_pages(
                             gpa / HV_PAGE_SIZE,
