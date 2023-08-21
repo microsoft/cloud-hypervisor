@@ -1765,9 +1765,20 @@ impl vm::Vm for MshvVm {
             import_data: hv_partition_complete_isolated_import_data {
                 psp_parameters: hv_psp_launch_finish_data {
                     id_block: hv_snp_id_block {
+                        launch_digest: snp_id_block.ld,
+                        family_id: snp_id_block.family_id,
+                        image_id: snp_id_block.image_id,
+                        version: snp_id_block.version,
+                        guest_svn: snp_id_block.guest_svn,
                         ..Default::default()
                     },
                     id_auth_info: hv_snp_id_auth_info {
+                        // id_key_algorithm: snp_id_block.id_key_algorithm,
+                        // auth_key_algorithm: snp_id_block.author_key_algorithm,
+                        // id_block_signature: snp_id_block.id_key_signature,
+                        // id_key: snp_id_block.id_public_key,
+                        // id_key_signature: snp_id_block.id_key_signature,
+                        // author_key: snp_id_block.author_public_key,
                         ..Default::default()
                     },
                     host_data: host_data[0..32].try_into().unwrap(),
