@@ -688,7 +688,7 @@ pub fn load_igvm(
         // )
         // .map_err(Error::ImportIsolatedPages)?;
         // Call Complete Isolated Import since we are done importing isolated pages
-        println!("SNP ID BLOCK: {:?}", loaded_info.snp_id_block.ld);
+        println!("SNP ID BLOCK: {:x?}", loaded_info.snp_id_block.ld);
         memory_manager
             .lock()
             .unwrap()
