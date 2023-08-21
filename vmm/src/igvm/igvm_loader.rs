@@ -48,6 +48,7 @@ use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
+use ring::digest;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -251,7 +252,7 @@ pub fn load_igvm(
                         } else {
                             gpas.push(GpaPages {
                                 gpa: *gpa,
-                                page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
+                                page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED,
                                 page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                             });
                             BootPageAcceptance::Exclusive
@@ -417,6 +418,8 @@ pub fn load_igvm(
                         .import_pages(gpa / HV_PAGE_SIZE, 1, BootPageAcceptance::VpContext, &data)
                         .map_err(Error::Loader)?;
                 }
+                let one_shot = digest::digest(&digest::SHA384, &data);
+                println!("One shot ref is: {:?}", one_shot);
                 loaded_info.vmsa_gpa = *gpa;
                 loaded_info.vmsa = **vmsa;
                 gpas.push(GpaPages {
@@ -522,7 +525,8 @@ pub fn load_igvm(
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
         for gpa in gpas.iter() {
-            // println!("GPA is {:0x}", gpa.gpa);
+            // println!("GPA is {:0x} page_type is: {:?}", gpa.gpa, gpa.page_type);
+            println!("GPA is {:0x} page_type is: {:?}", gpa.gpa, gpa.page_type);
             memory_manager.lock().unwrap().vm.import_isolated_pages(
                 gpa.page_type,
                 hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
@@ -626,6 +630,5 @@ pub fn load_igvm(
             .complete_isolated_import(loaded_info.snp_id_block, &host_data_contents)
             .map_err(Error::CompleteIsolatedImport)?;
     }
-    debug!("Loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);
     Ok(loaded_info)
 }
