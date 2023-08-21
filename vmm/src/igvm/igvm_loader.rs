@@ -361,7 +361,7 @@ pub fn load_igvm(
                 );
 
                 let data = if initial_data.is_empty() {
-                        let zero_page = [1; 4096];
+                        let zero_page = [0; 4096];
                         zero_page[..*number_of_bytes as usize].to_vec()
                     } else {
                         initial_data.clone()
