@@ -16,6 +16,8 @@ igvm = ["hex", "igvm-parser", "arch/igvm", "mshv-bindings"]
 
 [dependencies]
 sha2 = "0.10.7"
+ring = "0.16.20"
+bincode = "1.0"
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main"  }
 anyhow = "1.0.70"
 cfg-if = "1.0.0"

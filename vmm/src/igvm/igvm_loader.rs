@@ -49,7 +49,9 @@ use vm_memory::GuestMemoryAtomic;
 use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
-use sha2::{Sha256, Digest};
+use ring::digest;
+use sha2::{Sha256, Digest, Sha384};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::fs::File;
 
@@ -132,6 +134,74 @@ struct GpaPages {
     pub page_type: u32,
     pub page_size: u32,
 }
+
+
+const PGSHIFT: usize = 12;
+const PGSIZE: usize = 1 << PGSHIFT;
+const SNP_PAGE_TYPE_NORMAL: u8 = 1;
+const SNP_PAGE_TYPE_VMSA: u8 = 2;
+
+
+
+#[derive(Default, Serialize)]
+struct SnpPageInfo {
+    DigestCurrent: Vec<u8>,
+    Contents: Vec<u8>,
+    Length: u16,
+    PageType: u8,
+    ImiPageBit: u8,
+    LowerVmplPermissions: u32,
+    Gpa: u64,
+}
+
+struct DigestTrack {
+    pub curr_digest: [u8; 48],
+}
+
+impl DigestTrack {
+    fn new () -> DigestTrack {
+        DigestTrack {
+            curr_digest: [0u8; 48],
+        } 
+    }
+    fn update_digest(&mut self, gpa: u64, page: &[u8], pagetype: u8)  {
+        let mut digest = [0u8; 48];
+        assert!(page.len() == PGSIZE);
+        let _MEASURED_PAGE_TYPES = vec![SNP_PAGE_TYPE_VMSA, SNP_PAGE_TYPE_NORMAL];
+        let zero_data: [u8; PGSIZE] = [0u8; PGSIZE];
+
+        let  _ZERO_DIGEST = digest::digest(&digest::SHA384, &zero_data).as_ref();
+        if _MEASURED_PAGE_TYPES.iter().any(|&x| x == pagetype) {
+            digest[..48].copy_from_slice(digest::digest(&digest::SHA384, &page).as_ref());
+        }
+        let info = SnpPageInfo::new(self.curr_digest.as_ref(), digest.as_ref(), pagetype, gpa);
+        self.curr_digest[..48].copy_from_slice(digest::digest(&digest::SHA384, &info.to_bytes()).as_ref());
+    }
+}
+impl SnpPageInfo {
+    fn to_bytes(&self) -> Vec<u8> {
+        let bytes = bincode::serialize(self).unwrap();
+        assert!(bytes.len() == 112);
+        bytes
+    }
+    fn new(dc: &[u8], cn: &[u8], ty: u8, _gpa: u64) -> SnpPageInfo {
+        let mut info = SnpPageInfo {
+            DigestCurrent: Vec::new(),
+            Contents: Vec::new(),
+            Length: 112,
+            PageType: ty,
+            ImiPageBit: 0,
+            LowerVmplPermissions: 0,
+            Gpa: _gpa,
+        };
+        info.DigestCurrent.extend_from_slice(dc);
+        info.Contents.extend_from_slice(cn);
+
+        info
+    }
+}
+
+
 /// Load the given IGVM file.
 ///
 /// `vtl2_base_address` specifies the absolute guest physical address to relocate the VTL2 region to.
@@ -156,7 +226,7 @@ pub fn load_igvm(
 
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
-
+    let mut digest_tracker = DigestTrack::new();
     let mut host_data_contents = [0; 32];
     #[cfg(feature = "snp")]
     {
@@ -264,7 +334,7 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED as u8);
                         logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
                             BootPageAcceptance::ExclusiveUnmeasured
 
@@ -273,7 +343,7 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u8);
                         logfile.write(format!("{:#0x} 1 {:x}\n", gpa, result).as_bytes());
 
                             gpas.push(GpaPages {
@@ -294,7 +364,7 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u8);
                         logfile.write(format!("{:#0x} 5 {:x}\n", gpa, result).as_bytes());
 
                         BootPageAcceptance::SecretsPage
@@ -307,6 +377,7 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u8);
                         logfile.write(format!("{:#0x} 6 {:x}\n", gpa, result).as_bytes());
 
                             let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
@@ -473,7 +544,7 @@ pub fn load_igvm(
                 let mut hasher = Sha256::new();
                 hasher.update(data);
                 let result = hasher.finalize();
-
+                digest_tracker.update_digest(*gpa, &data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u8);
                 logfile.write(format!("{:#0x} 2 {:x}\n", gpa, result).as_bytes());
 
                 gpas.push(GpaPages {
@@ -539,8 +610,12 @@ pub fn load_igvm(
                 let area = parameter_areas
                     .get_mut(parameter_area_index)
                     .expect("igvmfile should be valid");
+                let mut tmp_data: [u8; 4096] = [0; 4096];
+
+                
                 match area {
-                    ParameterAreaState::Allocated { data, max_size } => { 
+                    ParameterAreaState::Allocated { data, max_size } => {
+                        tmp_data[..4096].copy_from_slice(data);
                         loader
                         .import_pages(
                             gpa / HV_PAGE_SIZE,
@@ -553,7 +628,7 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-
+                        digest_tracker.update_digest(*gpa, &tmp_data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u8);
                         // In the tool param page is unmeasured (4)
                         logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
                     }
