@@ -141,12 +141,11 @@ const PGSIZE: usize = 1 << PGSHIFT;
 const SNP_PAGE_TYPE_NORMAL: u8 = 1;
 const SNP_PAGE_TYPE_VMSA: u8 = 2;
 
-
-
-#[derive(Default, Serialize)]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SnpPageInfo {
-    DigestCurrent: Vec<u8>,
-    Contents: Vec<u8>,
+    DigestCurrent: [u8; 48],
+    Contents: [u8; 48],
     Length: u16,
     PageType: u8,
     ImiPageBit: u8,
@@ -156,12 +155,23 @@ struct SnpPageInfo {
 
 struct DigestTrack {
     pub curr_digest: [u8; 48],
+    pub current_info: [u8; 112],
+}
+
+fn page_any(page: &[u8]) -> bool {
+    for val in page {
+        if *val > 0 {
+            return true;
+        }
+    }
+    return false;
 }
 
 impl DigestTrack {
     fn new () -> DigestTrack {
         DigestTrack {
             curr_digest: [0u8; 48],
+            current_info: [0u8; 112],
         } 
     }
     fn update_digest(&mut self, gpa: u64, page: &[u8], pagetype: u8)  {
@@ -170,32 +180,38 @@ impl DigestTrack {
         let _MEASURED_PAGE_TYPES = vec![SNP_PAGE_TYPE_VMSA, SNP_PAGE_TYPE_NORMAL];
         let zero_data: [u8; PGSIZE] = [0u8; PGSIZE];
 
-        let  _ZERO_DIGEST = digest::digest(&digest::SHA384, &zero_data).as_ref();
+        let  _ZERO_DIGEST = digest::digest(&digest::SHA384, &zero_data);
         if _MEASURED_PAGE_TYPES.iter().any(|&x| x == pagetype) {
-            digest[..48].copy_from_slice(digest::digest(&digest::SHA384, &page).as_ref());
+            if page_any(page){
+                digest[..48].copy_from_slice(digest::digest(&digest::SHA384, &page).as_ref());
+            } else {
+                digest[..48].copy_from_slice(_ZERO_DIGEST.as_ref());
+            }
+            
         }
         let info = SnpPageInfo::new(self.curr_digest.as_ref(), digest.as_ref(), pagetype, gpa);
         self.curr_digest[..48].copy_from_slice(digest::digest(&digest::SHA384, &info.to_bytes()).as_ref());
+        self.current_info[..112].copy_from_slice(&info.to_bytes());
     }
 }
 impl SnpPageInfo {
     fn to_bytes(&self) -> Vec<u8> {
-        let bytes = bincode::serialize(self).unwrap();
+        let bytes = bytemuck::bytes_of(self);
         assert!(bytes.len() == 112);
-        bytes
+        bytes.to_vec()
     }
     fn new(dc: &[u8], cn: &[u8], ty: u8, _gpa: u64) -> SnpPageInfo {
         let mut info = SnpPageInfo {
-            DigestCurrent: Vec::new(),
-            Contents: Vec::new(),
+            DigestCurrent: [0u8; 48],
+            Contents: [0u8; 48],
             Length: 112,
             PageType: ty,
             ImiPageBit: 0,
             LowerVmplPermissions: 0,
             Gpa: _gpa,
         };
-        info.DigestCurrent.extend_from_slice(dc);
-        info.Contents.extend_from_slice(cn);
+        info.DigestCurrent.clone_from_slice(dc);
+        info.Contents.clone_from_slice(cn);
 
         info
     }
@@ -334,8 +350,8 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED as u8);
-                        logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED as u8 + 1);
+                        logfile.write(format!("{:#0x}:4:{:x}:{}: {}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
                             BootPageAcceptance::ExclusiveUnmeasured
 
                         } else {
@@ -343,8 +359,8 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u8);
-                        logfile.write(format!("{:#0x} 1 {:x}\n", gpa, result).as_bytes());
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u8 + 1);
+                        logfile.write(format!("{:#0x}:1:{:x}:{}:{}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
 
                             gpas.push(GpaPages {
                                 gpa: *gpa,
@@ -364,8 +380,8 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u8);
-                        logfile.write(format!("{:#0x} 5 {:x}\n", gpa, result).as_bytes());
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_SECRETS as u8 + 1);
+                        logfile.write(format!("{:#0x}:5:{:x}:{}:{}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
 
                         BootPageAcceptance::SecretsPage
                     }
@@ -377,8 +393,8 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u8);
-                        logfile.write(format!("{:#0x} 6 {:x}\n", gpa, result).as_bytes());
+                        digest_tracker.update_digest(*gpa, data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_CPUID as u8 + 1);
+                        logfile.write(format!("{:#0x}:6:{:x}:{}:{}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
 
                             let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
                             let i: usize = 0;                            /* Type usize */
@@ -544,8 +560,8 @@ pub fn load_igvm(
                 let mut hasher = Sha256::new();
                 hasher.update(data);
                 let result = hasher.finalize();
-                digest_tracker.update_digest(*gpa, &data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u8);
-                logfile.write(format!("{:#0x} 2 {:x}\n", gpa, result).as_bytes());
+                digest_tracker.update_digest(*gpa, &data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_VMSA as u8 + 1);
+                logfile.write(format!("{:#0x}:2:{:x}:{}:{}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
 
                 gpas.push(GpaPages {
                     gpa: *gpa,
@@ -628,9 +644,9 @@ pub fn load_igvm(
                         let mut hasher = Sha256::new();
                         hasher.update(data);
                         let result = hasher.finalize();
-                        digest_tracker.update_digest(*gpa, &tmp_data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL as u8);
+                        digest_tracker.update_digest(*gpa, &tmp_data, hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED as u8 + 1);
                         // In the tool param page is unmeasured (4)
-                        logfile.write(format!("{:#0x} 4 {:x}\n", gpa, result).as_bytes());
+                        logfile.write(format!("{:#0x}:4:{:x}:{}:{}\n", gpa, result, hex::encode(digest_tracker.curr_digest), hex::encode(digest_tracker.current_info)).as_bytes());
                     }
 
                     ParameterAreaState::Inserted => panic!("igvmfile is invalid, multiple insert"),
@@ -639,7 +655,7 @@ pub fn load_igvm(
 
                 gpas.push(GpaPages {
                     gpa: *gpa,
-                    page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_NORMAL,
+                    page_type: hv_isolated_page_type_HV_ISOLATED_PAGE_TYPE_UNMEASURED,
                     page_size: hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
                 });
             }

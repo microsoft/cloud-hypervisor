@@ -15,6 +15,9 @@ tracing = ["tracer/tracing"]
 igvm = ["hex", "igvm-parser", "arch/igvm", "mshv-bindings"]
 
 [dependencies]
+bytemuck = { version = "1.13.1", features = ["derive", "bytemuck_derive"] }
+serde_bytes = "0.11.12"
+num-derive = "0.2.1"
 sha2 = "0.10.7"
 ring = "0.16.20"
 bincode = "1.0"
