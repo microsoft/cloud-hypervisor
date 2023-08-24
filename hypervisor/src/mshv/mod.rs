@@ -236,10 +236,17 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         HypervisorType::Mshv
     }
 
-    fn create_vm_with_type(&self, vm_type: u64, #[cfg(feature = "snp")] _mem_size: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
+    fn create_vm_with_type(
+        &self,
+        vm_type: u64,
+        #[cfg(feature = "snp")] _mem_size: u64,
+    ) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
-            match self.mshv.create_vm_with_type(VmType::try_from(vm_type).unwrap()) {
+            match self
+                .mshv
+                .create_vm_with_type(VmType::try_from(vm_type).unwrap())
+            {
                 Ok(res) => fd = res,
                 Err(e) => {
                     if e.errno() == libc::EINTR {
@@ -305,7 +312,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
 
         #[cfg(feature = "snp")]
         let mem_size_for_bitmap = if _mem_size as usize > 3 * ONE_GB {
-            _mem_size as usize  + ONE_GB
+            _mem_size as usize + ONE_GB
         } else {
             _mem_size as usize
         };
@@ -315,7 +322,10 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "snp")]
-            host_access_pages: Arc::new(SimpleAtomicBitmap::new_with_bytes(mem_size_for_bitmap as usize, HV_PAGE_SIZE as usize)),
+            host_access_pages: Arc::new(SimpleAtomicBitmap::new_with_bytes(
+                mem_size_for_bitmap as usize,
+                HV_PAGE_SIZE as usize,
+            )),
             snp_enabled,
         }))
     }
@@ -331,9 +341,16 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// let hypervisor = MshvHypervisor::new().unwrap();
     /// let vm = hypervisor.create_vm().unwrap();
     /// ```
-    fn create_vm(&self, #[cfg(feature = "snp")] mem_size: u64) -> hypervisor::Result<Arc<dyn vm::Vm>> {
+    fn create_vm(
+        &self,
+        #[cfg(feature = "snp")] mem_size: u64,
+    ) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
-        self.create_vm_with_type(vm_type, #[cfg(feature = "snp")] mem_size)
+        self.create_vm_with_type(
+            vm_type,
+            #[cfg(feature = "snp")]
+            mem_size,
+        )
     }
     ///
     /// Get the supported CpuID
@@ -473,8 +490,16 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
     }
 
-    fn get_cpuid_values(&self, function: u32, index: u32, xfem: u64, xss: u64) -> cpu::Result<[u32; 4]> {
-        self.fd.get_cpuid_values(function, index, xfem, xss).map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
+    fn get_cpuid_values(
+        &self,
+        function: u32,
+        index: u32,
+        xfem: u64,
+        xss: u64,
+    ) -> cpu::Result<[u32; 4]> {
+        self.fd
+            .get_cpuid_values(function, index, xfem, xss)
+            .map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -672,18 +697,33 @@ impl cpu::Vcpu for MshvVcpu {
                     let mut gpa_list = Vec::new();
                     let ranges = info.ranges;
                     let (gfn_start, gfn_count) = snp::parse_gpa_range(ranges[0]).unwrap();
-                    self.host_access_pages.reset_bits_range(gfn_start as usize, gfn_count as usize);
+                    self.host_access_pages
+                        .reset_bits_range(gfn_start as usize, gfn_count as usize);
 
-                    debug!("Releasing pages: gfn_start: {:x?}, gfn_count: {:?}", gfn_start, gfn_count);
+                    debug!(
+                        "Releasing pages: gfn_start: {:x?}, gfn_count: {:?}",
+                        gfn_start, gfn_count
+                    );
                     let gpa_start = gfn_start * HV_PAGE_SIZE;
                     for i in 0..gfn_count {
                         gpa_list.push(gpa_start + i * HV_PAGE_SIZE);
                     }
-                    if _modify_gpa_host_access(self.vm_fd.clone(), host_vis, 0, 0, gpa_list.as_slice()).is_err() {
-                        error!("Failed to release range: gfn_start: {:x?}, gfn_count: {:?}", gfn_start, gfn_count);
+                    if _modify_gpa_host_access(
+                        self.vm_fd.clone(),
+                        host_vis,
+                        0,
+                        0,
+                        gpa_list.as_slice(),
+                    )
+                    .is_err()
+                    {
+                        error!(
+                            "Failed to release range: gfn_start: {:x?}, gfn_count: {:?}",
+                            gfn_start, gfn_count
+                        );
                         return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                             "Unhandled VCPU exit: attribute intercept - couldn't modify host access"
-                        )))
+                        )));
                     }
                     Ok(cpu::VmExit::Ignore)
                 }
@@ -701,8 +741,6 @@ impl cpu::Vcpu for MshvVcpu {
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
                     // debug!("VMG Exit Intercept: op: {:0x}", op);
                     if op == GHCB_INFO_REGISTER_REQUEST as u64 {
-
-
                         let mut ghcb_gpa = hv_x64_register_sev_ghcb::default();
                         unsafe {
                             ghcb_gpa.__bindgen_anon_1.set_enabled(1);
@@ -737,7 +775,6 @@ impl cpu::Vcpu for MshvVcpu {
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                         }
                     } else if op == GHCB_INFO_SEV_INFO_REQUEST as u64 {
-
                         let function = 0x8000_001F;
                         let cpu_leaf = self.fd.get_cpuid_values(function, 0, 0, 0).unwrap();
                         let ebx = cpu_leaf[1];
@@ -763,7 +800,6 @@ impl cpu::Vcpu for MshvVcpu {
                             [(hv_register_name_HV_X64_REGISTER_GHCB, write_msr)];
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
-
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
                         let data = unsafe { ghcb_msr.as_uint64 } >> 16;
                         let bytes = data.to_le_bytes();
@@ -771,7 +807,6 @@ impl cpu::Vcpu for MshvVcpu {
                         //     print!("{}", s);
                         // }
                     } else if op == GHCB_INFO_NORMAL as u64 {
-
                         // SAFETY: access_info is valid, otherwise we won't be here
                         let _exit_code =
                             unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u64;
@@ -868,8 +903,12 @@ impl cpu::Vcpu for MshvVcpu {
                                 let req_gpa = exit_info1 as u64;
                                 let rsp_gpa = exit_info2 as u64;
 
-                                _psp_issue_guest_request(self.vm_fd.clone(), req_gpa, rsp_gpa).unwrap();
-                                debug!("SNP guest request: req_gpa {:0x} rsp_gpa {:0x}", req_gpa, rsp_gpa);
+                                _psp_issue_guest_request(self.vm_fd.clone(), req_gpa, rsp_gpa)
+                                    .unwrap();
+                                debug!(
+                                    "SNP guest request: req_gpa {:0x} rsp_gpa {:0x}",
+                                    req_gpa, rsp_gpa
+                                );
                                 let mut arg_exit1: mshv_read_write_gpa =
                                     mshv_read_write_gpa::default();
                                 let value1 = 0_u64;
@@ -879,10 +918,14 @@ impl cpu::Vcpu for MshvVcpu {
                                 self.fd.gpa_write(&mut arg_exit1).unwrap();
                             }
                             SVM_EXITCODE_SNP_AP_CREATION => {
-                                debug!("AP_CREATE_REQUEST with VMSA GPA {:0x}, abd APIC ID {:?}", exit_info2, exit_info1);
-                                _snp_start_vcpu(self.vm_fd.clone(), exit_info1 >> 32, exit_info2).unwrap();
+                                debug!(
+                                    "AP_CREATE_REQUEST with VMSA GPA {:0x}, abd APIC ID {:?}",
+                                    exit_info2, exit_info1
+                                );
+                                _snp_start_vcpu(self.vm_fd.clone(), exit_info1 >> 32, exit_info2)
+                                    .unwrap();
                                 let mut arg_exit1: mshv_read_write_gpa =
-                                mshv_read_write_gpa::default();
+                                    mshv_read_write_gpa::default();
                                 let value1 = 0_u64;
                                 arg_exit1.base_gpa = gpa + 0x398;
                                 arg_exit1.byte_count = 8;
@@ -918,7 +961,6 @@ impl cpu::Vcpu for MshvVcpu {
                                 let data = (rax as u32).to_le_bytes();
                                 if is_write {
                                     if let Some(vm_ops) = &self.vm_ops {
-
                                         vm_ops.pio_write(port.into(), &data[0..len]).map_err(
                                             |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
                                         )?;
@@ -949,7 +991,8 @@ impl cpu::Vcpu for MshvVcpu {
                                 arg_exit1.data[0..8].copy_from_slice(&value1.to_le_bytes());
                                 self.fd.gpa_write(&mut arg_exit1).unwrap();
                             }
-                            0x8000_0001 => { // MMIO READ
+                            0x8000_0001 => {
+                                // MMIO READ
                                 let src_gpa = exit_info1 as u64;
                                 let dst_gpa = sw_scratch as u64;
                                 let data_len = exit_info2 as usize;
@@ -958,12 +1001,11 @@ impl cpu::Vcpu for MshvVcpu {
                                 let mut data: Vec<u8> = vec![0; data_len];
 
                                 if let Some(vm_ops) = &self.vm_ops {
-                                    vm_ops.mmio_read(src_gpa, &mut data[0..data_len]).map_err(
-                                        |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
-                                    )?;
+                                    vm_ops
+                                        .mmio_read(src_gpa, &mut data[0..data_len])
+                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                                 }
-                                let mut arg: mshv_read_write_gpa =
-                                        mshv_read_write_gpa::default();
+                                let mut arg: mshv_read_write_gpa = mshv_read_write_gpa::default();
                                 arg.base_gpa = dst_gpa;
                                 arg.byte_count = data_len as u32;
                                 arg.data[0..data_len].copy_from_slice(&data);
@@ -973,7 +1015,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 // Not sure about this that's why `if false`
                                 if false {
                                     let mut arg_exit1: mshv_read_write_gpa =
-                                    mshv_read_write_gpa::default();
+                                        mshv_read_write_gpa::default();
                                     let value1 = 0_u64;
                                     arg_exit1.base_gpa = gpa + 0x398;
                                     arg_exit1.byte_count = 8;
@@ -981,29 +1023,29 @@ impl cpu::Vcpu for MshvVcpu {
                                     self.fd.gpa_write(&mut arg_exit1).unwrap();
                                 }
                             }
-                            0x8000_0002 => { // MMIO WRITE
+                            0x8000_0002 => {
+                                // MMIO WRITE
                                 let dst_gpa = exit_info1 as u64;
                                 let src_gpa = sw_scratch as u64;
                                 let data_len = exit_info2 as usize;
                                 // According to SPEC
                                 assert!(data_len <= 0x8);
-                                let mut arg: mshv_read_write_gpa =
-                                        mshv_read_write_gpa::default();
+                                let mut arg: mshv_read_write_gpa = mshv_read_write_gpa::default();
                                 arg.base_gpa = src_gpa;
                                 arg.byte_count = data_len as u32;
                                 // Limitation of gpa_read/write
                                 assert!(data_len <= 16);
                                 self.fd.gpa_read(&mut arg).unwrap();
                                 if let Some(vm_ops) = &self.vm_ops {
-                                    vm_ops.mmio_write(dst_gpa, &mut arg.data[0..data_len]).map_err(
-                                        |e| cpu::HypervisorCpuError::RunVcpu(e.into()),
-                                    )?;
+                                    vm_ops
+                                        .mmio_write(dst_gpa, &mut arg.data[0..data_len])
+                                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                                 }
 
                                 // Not sure about this that's why `if false`
                                 if false {
                                     let mut arg_exit1: mshv_read_write_gpa =
-                                    mshv_read_write_gpa::default();
+                                        mshv_read_write_gpa::default();
                                     let value1 = 0_u64;
                                     arg_exit1.base_gpa = gpa + 0x398;
                                     arg_exit1.byte_count = 8;
@@ -1525,21 +1567,20 @@ impl vm::Vm for MshvVm {
                     .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
             }
         } else {
-            Ok(()) 
+            Ok(())
         }
     }
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
         if !self.snp_enabled {
-            
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
             self.fd
                 .unregister_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into())) 
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
         } else {
-            Ok(()) 
+            Ok(())
         }
     }
 
@@ -1760,7 +1801,12 @@ impl vm::Vm for MshvVm {
     }
 
     #[cfg(feature = "snp")]
-    fn complete_isolated_import(&self, snp_id_block: IgvmVhsSnpIdBlock, host_data: &[u8], id_block_enabled: u8) -> vm::Result<()> {
+    fn complete_isolated_import(
+        &self,
+        snp_id_block: IgvmVhsSnpIdBlock,
+        host_data: &[u8],
+        id_block_enabled: u8,
+    ) -> vm::Result<()> {
         let mut auth_info = hv_snp_id_auth_info {
             id_key_algorithm: snp_id_block.id_key_algorithm,
             auth_key_algorithm: snp_id_block.author_key_algorithm,
@@ -1799,11 +1845,7 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
     #[cfg(feature = "snp")]
-    fn gain_page_access(
-        &self,
-        gpa: u64,
-        size: u32,
-    ) -> vm::Result<()> {
+    fn gain_page_access(&self, gpa: u64, size: u32) -> vm::Result<()> {
         if !self.snp_enabled {
             return Ok(());
         }
@@ -1813,7 +1855,7 @@ impl vm::Vm for MshvVm {
         if !self.host_access_pages.is_bit_set(_pfn) {
             gpa_list.push(gpa);
         }
-        
+
         let mut _size: i64 = size as i64;
         _size = _size - HV_PAGE_SIZE as i64;
         let mut i = 1;
@@ -1826,10 +1868,16 @@ impl vm::Vm for MshvVm {
             _size = _size - HV_PAGE_SIZE as i64;
             i = i + 1;
         }
-        
+
         if gpa_list.len() > 0 {
-            _modify_gpa_host_access(self.fd.clone(), HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
-                0, 1, gpa_list.as_slice()).unwrap();
+            _modify_gpa_host_access(
+                self.fd.clone(),
+                HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE,
+                0,
+                1,
+                gpa_list.as_slice(),
+            )
+            .unwrap();
             for gpa in gpa_list {
                 self.host_access_pages.set_bit(gpa as usize >> PAGE_SHIFT);
             }
@@ -1873,20 +1921,19 @@ fn _modify_gpa_host_access(
 
 #[cfg(feature = "snp")]
 fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Result<()> {
-    let req = mshv_issue_psp_guest_request {
-        req_gpa,
-        rsp_gpa,
-    };
+    let req = mshv_issue_psp_guest_request { req_gpa, rsp_gpa };
 
-    fd.psp_issue_guest_request(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
+    fd.psp_issue_guest_request(&req)
+        .map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }
 
-#[cfg(feature="snp")]
+#[cfg(feature = "snp")]
 fn _snp_start_vcpu(fd: Arc<VmFd>, apic_id: u64, vmsa_gpa: u64) -> vm::Result<()> {
     let req = mshv_sev_snp_ap_create {
         vp_id: apic_id,
         vmsa_gpa,
     };
 
-    fd.sev_snp_ap_create(&req).map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
+    fd.sev_snp_ap_create(&req)
+        .map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }
