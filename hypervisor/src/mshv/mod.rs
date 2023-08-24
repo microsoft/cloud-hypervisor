@@ -567,9 +567,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                             return Ok(cpu::VmExit::Ignore);
                         }
-                        _ => {
-                            warn!("Unhandled port exit: port {:0x}", { port });
-                        }
+                        _ => {}
                     }
 
                     assert!(
