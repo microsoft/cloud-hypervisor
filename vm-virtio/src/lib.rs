@@ -260,23 +260,23 @@ pub fn clone_queue(
     q.set_size(queue.size());
     q.set_ready(queue.ready());
 
-    let mut desc_a = GuestAddress(queue.desc_table());
-    let mut avail_a = GuestAddress(queue.avail_ring());
-    let mut ring_a = GuestAddress(queue.used_ring());
-
     #[cfg(all(feature = "mshv", feature = "snp"))]
     if let Some(_vm) = vm {
-        desc_a = desc_a.translate_gva_with_vmfd(
+        let desc_a = GuestAddress(queue.desc_table());
+        let avail_a = GuestAddress(queue.avail_ring());
+        let ring_a = GuestAddress(queue.used_ring());
+
+        let _ = desc_a.translate_gva_with_vmfd(
             None,
             get_vring_size(VringType::VRING_DESC, queue.size()) as usize,
             vm,
         );
-        avail_a = avail_a.translate_gva_with_vmfd(
+        let _ = avail_a.translate_gva_with_vmfd(
             None,
             get_vring_size(VringType::VRING_AVAIL, queue.size()) as usize,
             vm,
         );
-        ring_a = ring_a.translate_gva_with_vmfd(
+        let _ = ring_a.translate_gva_with_vmfd(
             None,
             get_vring_size(VringType::VRING_USED, queue.size()) as usize,
             vm,
