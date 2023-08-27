@@ -1087,8 +1087,6 @@ impl Vm {
         trace_scoped!("load_payload");
         let firmware = &payload.firmware;
         let kernel = &payload.kernel;
-        let initramfs = &payload.initramfs;
-        let cmdline = &payload.cmdline;
         let igvm: Option<std::path::PathBuf> = None;
         #[cfg(feature = "igvm")]
         let igvm = &payload.igvm;
