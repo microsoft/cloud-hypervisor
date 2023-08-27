@@ -1545,7 +1545,7 @@ impl cpu::Vcpu for KvmVcpu {
     ///
     fn run(
         &self,
-        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
+        _guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
     ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         match self.fd.run() {
             Ok(run) => match run {
