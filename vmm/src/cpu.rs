@@ -1812,14 +1812,12 @@ impl CpuManager {
         xfem: u64,
         xss: u64,
     ) -> Result<[u32; 4]> {
-        let leaf_info = unsafe {
-            self.vcpus[usize::from(cpu_id)]
-                .lock()
-                .unwrap()
-                .vcpu
-                .get_cpuid_values(eax, ecx, xfem, xss)
-                .unwrap()
-        };
+        let leaf_info = self.vcpus[usize::from(cpu_id)]
+            .lock()
+            .unwrap()
+            .vcpu
+            .get_cpuid_values(eax, ecx, xfem, xss)
+            .unwrap();
         Ok(leaf_info)
     }
 }
