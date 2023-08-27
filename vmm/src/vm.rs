@@ -35,6 +35,7 @@ use crate::migration::get_vm_snapshot;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
 use crate::migration::{url_to_path, SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE};
+#[cfg(feature = "snp")]
 use crate::ArchMemRegion;
 use crate::GuestMemoryMmap;
 use crate::{
@@ -49,6 +50,7 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
+#[cfg(feature = "snp")]
 use arch::RegionType;
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]

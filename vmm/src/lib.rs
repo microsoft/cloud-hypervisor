@@ -56,7 +56,6 @@ use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transport
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::unblock_signal;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
-use vmm_sys_util::terminal::Terminal;
 
 mod acpi;
 pub mod api;

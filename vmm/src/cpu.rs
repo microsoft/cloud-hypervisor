@@ -81,7 +81,9 @@ use vm_device::BusDevice;
 use vm_memory::ByteValued;
 #[cfg(feature = "guest_debug")]
 use vm_memory::{Bytes, GuestAddressSpace};
-use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
+use vm_memory::{GuestAddress, GuestMemoryAtomic};
+#[cfg(feature = "snp")]
+use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::{
     snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable,
     Transportable,
