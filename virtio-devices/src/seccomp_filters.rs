@@ -62,13 +62,7 @@ const TUNSETOFFLOAD: u64 = 0x4004_54d0;
 
 #[cfg(feature = "mshv")]
 fn mshv_ioctl_seccomp_rule() -> SeccompRule {
-    and![Cond::new(
-        1,
-        ArgLen::Dword,
-        Eq,
-        MSHV_MODIFY_GPA_HOST_ACCESS
-    )
-    .unwrap()]
+    and![Cond::new(1, ArgLen::Dword, Eq, MSHV_MODIFY_GPA_HOST_ACCESS).unwrap()]
 }
 
 #[cfg(feature = "mshv")]
@@ -169,9 +163,7 @@ fn virtio_net_ctl_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 }
 
 fn virtio_pmem_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![
-        (libc::SYS_fsync, vec![]),
-    ]
+    vec![(libc::SYS_fsync, vec![])]
 }
 
 fn virtio_rng_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {

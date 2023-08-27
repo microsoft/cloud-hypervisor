@@ -78,8 +78,12 @@ impl RngEpollHandler {
             let len = desc_chain
                 .memory()
                 .read_from(
-                    desc.addr()
-                        .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize, #[cfg(all(feature = "mshv", feature = "snp"))] Some(&self.vm.clone())),
+                    desc.addr().translate_gva_with_vmfd(
+                        self.access_platform.as_ref(),
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        Some(&self.vm.clone()),
+                    ),
                     &mut self.random_file,
                     desc.len() as usize,
                 )
@@ -179,8 +183,7 @@ impl Rng {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<RngState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Rng> {
         let random_file = File::open(path)?;
 
@@ -193,7 +196,7 @@ impl Rng {
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
-            
+
             //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             (avail_features, 0, false)
         };

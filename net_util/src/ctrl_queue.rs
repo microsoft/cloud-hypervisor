@@ -61,25 +61,28 @@ impl CtrlQueue {
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(feature = "snp")]
-        vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(feature = "snp")] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<()> {
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
             let ctrl_desc = desc_chain.next().ok_or(Error::NoControlHeaderDescriptor)?;
 
             let ctrl_hdr: ControlHeader = desc_chain
                 .memory()
-                .read_obj(
-                    ctrl_desc
-                        .addr()
-                        .translate_gva_with_vmfd(access_platform, ctrl_desc.len() as usize, #[cfg(all(feature = "mshv", feature = "snp"))] vm),
-                )
+                .read_obj(ctrl_desc.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    ctrl_desc.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    vm,
+                ))
                 .map_err(Error::GuestMemory)?;
             let data_desc = desc_chain.next().ok_or(Error::NoDataDescriptor)?;
 
-            let data_desc_addr = data_desc
-                .addr()
-                .translate_gva_with_vmfd(access_platform, data_desc.len() as usize, #[cfg(all(feature = "mshv", feature = "snp"))] vm);
+            let data_desc_addr = data_desc.addr().translate_gva_with_vmfd(
+                access_platform,
+                data_desc.len() as usize,
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                vm,
+            );
 
             let status_desc = desc_chain.next().ok_or(Error::NoStatusDescriptor)?;
 
@@ -134,9 +137,12 @@ impl CtrlQueue {
                 .memory()
                 .write_obj(
                     if ok { VIRTIO_NET_OK } else { VIRTIO_NET_ERR } as u8,
-                    status_desc
-                        .addr()
-                        .translate_gva_with_vmfd(access_platform, status_desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] vm),
+                    status_desc.addr().translate_gva_with_vmfd(
+                        access_platform,
+                        status_desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        vm,
+                    ),
                 )
                 .map_err(Error::GuestMemory)?;
             let len = ctrl_desc.len() + data_desc.len() + status_desc.len();

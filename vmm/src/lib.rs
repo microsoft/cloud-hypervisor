@@ -1230,8 +1230,8 @@ impl Vmm {
         })?;
 
         let phys_bits = vm::physical_bits(config.lock().unwrap().cpus.max_phys_bits);
-        let mut snp_enabled = false ;
-        #[cfg(feature= "snp")]
+        let mut snp_enabled = false;
+        #[cfg(feature = "snp")]
         {
             snp_enabled = config.lock().unwrap().is_snp_enabled();
         }

@@ -395,8 +395,7 @@ impl VirtioPciDevice {
         dma_handler: Option<Arc<dyn ExternalDmaMapping>>,
         pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
         snapshot: Option<Snapshot>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         let mut locked_device = device.lock().unwrap();
         let mut queue_evts = Vec::new();
@@ -508,7 +507,12 @@ impl VirtioPciDevice {
             })?;
 
         let common_config = if let Some(common_config_state) = common_config_state {
-            VirtioPciCommonConfig::new(common_config_state, access_platform,  #[cfg(all(feature = "mshv", feature = "snp"))] vm.clone())
+            VirtioPciCommonConfig::new(
+                common_config_state,
+                access_platform,
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                vm.clone(),
+            )
         } else {
             VirtioPciCommonConfig::new(
                 VirtioPciCommonConfigState {
@@ -803,7 +807,11 @@ impl VirtioPciDevice {
 
             queues.push((
                 queue_index,
-                vm_virtio::clone_queue(queue,  #[cfg(all(feature = "mshv", feature = "snp"))] Some(&self.vm.clone())),
+                vm_virtio::clone_queue(
+                    queue,
+                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    Some(&self.vm.clone()),
+                ),
                 self.queue_evts[queue_index].try_clone().unwrap(),
             ));
         }
@@ -1121,7 +1129,6 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-
         match offset {
             o if o < COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE => self.common_config.read(
                 o - COMMON_CONFIG_BAR_OFFSET,
@@ -1146,7 +1153,10 @@ impl PciDevice for VirtioPciDevice {
             {
                 // Handled with ioeventfds.
                 #[cfg(all(feature = "mshv", feature = "snp"))]
-                error!("Unexpected read to notification BAR: Base = 0x{:x} ,  offset = 0x{:x}", _base, o);
+                error!(
+                    "Unexpected read to notification BAR: Base = 0x{:x} ,  offset = 0x{:x}",
+                    _base, o
+                );
             }
             o if (MSIX_TABLE_BAR_OFFSET..MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE).contains(&o) => {
                 if let Some(msix_config) = &self.msix_config {
@@ -1165,8 +1175,10 @@ impl PciDevice for VirtioPciDevice {
                 }
             }
             _ => {
-                println!("unhandled fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) ");
-            },
+                println!(
+                    "unhandled fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) "
+                );
+            }
         }
     }
 
@@ -1220,8 +1232,10 @@ impl PciDevice for VirtioPciDevice {
                 }
             }
             _ => {
-                println!("unhandled fn write_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) ");
-            },
+                println!(
+                    "unhandled fn write_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) "
+                );
+            }
         };
 
         // Try and activate the device if the driver status has changed

@@ -497,12 +497,12 @@ impl Vm {
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
-        #[cfg(feature= "snp")]
+        #[cfg(feature = "snp")]
         let mut force_iommu = true;
         #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
         let force_iommu = false;
-        let mut snp_enabled = false ;
-        #[cfg(feature= "snp")]
+        let mut snp_enabled = false;
+        #[cfg(feature = "snp")]
         {
             snp_enabled = config.lock().unwrap().is_snp_enabled();
             force_iommu = snp_enabled;
@@ -779,7 +779,7 @@ impl Vm {
             vm_config.lock().unwrap().is_tdx_enabled()
         };
 
-        let mut snp_enabled  = false;
+        let mut snp_enabled = false;
         #[cfg(feature = "snp")]
         let snp_enabled = if snapshot.is_some() {
             false
@@ -855,7 +855,7 @@ impl Vm {
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         #[cfg(feature = "snp")] snp_enabled: bool,
-        #[cfg(feature = "snp")] mem_size: u64 ,
+        #[cfg(feature = "snp")] mem_size: u64,
     ) -> Result<Arc<dyn hypervisor::Vm>> {
         hypervisor.check_required_extensions().unwrap();
 
@@ -982,8 +982,7 @@ impl Vm {
         igvm: File,
         memory_manager: Arc<Mutex<MemoryManager>>,
         cpu_manager: Arc<Mutex<CpuManager>>,
-        #[cfg(feature = "snp")]
-        host_data: &str,
+        #[cfg(feature = "snp")] host_data: &str,
     ) -> Result<EntryPoint> {
         /*
         BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
@@ -1018,9 +1017,17 @@ impl Vm {
                 r_type: RegionType::Ram,
             });
         }
-        let res =
-            igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, arch_mem_regions, num_cpus, "", #[cfg(feature = "snp")] host_data)
-                .map_err(Error::IgvmLoad)?;
+        let res = igvm_loader::load_igvm(
+            &igvm,
+            memory_manager,
+            cpu_manager,
+            arch_mem_regions,
+            num_cpus,
+            "",
+            #[cfg(feature = "snp")]
+            host_data,
+        )
+        .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
@@ -1087,7 +1094,8 @@ impl Vm {
         let igvm = &payload.igvm;
         #[cfg(feature = "snp")]
         let host_data = &payload.host_data;
-        #[cfg(feature = "igvm")] {
+        #[cfg(feature = "igvm")]
+        {
             if kernel.is_some() && igvm.is_some() {
                 // Providing both Kernel and IGVM is wrong
                 panic!("Invalid playload: Either igvm or kernel should be provided");
@@ -1104,8 +1112,9 @@ impl Vm {
             #[cfg(feature = "igvm")]
             {
                 let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
-                #[cfg(feature = "snp")] {
-                    if let Some(host_data_str) =  host_data {
+                #[cfg(feature = "snp")]
+                {
+                    if let Some(host_data_str) = host_data {
                         return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
                     } else {
                         return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
@@ -2089,7 +2098,7 @@ impl Vm {
         // Do earlier to parallelise with loading kernel
         #[cfg(target_arch = "x86_64")]
         cfg_if::cfg_if! {
-            if #[cfg(feature = "snp")] { 
+            if #[cfg(feature = "snp")] {
                 let rsdp_addr =  if self.snp_enabled {
                     None
                 } else {
@@ -2110,7 +2119,7 @@ impl Vm {
             None
         };
         #[cfg(feature = "snp")]
-        let vmsa_pfn = if self.snp_enabled { 
+        let vmsa_pfn = if self.snp_enabled {
             entry_point.unwrap().vmsa_pfn
         } else {
             0
@@ -2158,7 +2167,6 @@ impl Vm {
         // available after they are configured
         #[cfg(target_arch = "aarch64")]
         let rsdp_addr = self.create_acpi_tables();
-
 
         if !self.snp_enabled {
             // Configure shared state based on loaded kernel

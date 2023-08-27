@@ -5,13 +5,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use hypervisor::HypervisorType;
-#[cfg(feature = "mshv")]
-use virtio_devices::seccomp_filters::MSHV_MODIFY_GPA_HOST_ACCESS;
 use seccompiler::{
     BackendError, BpfProgram, Error, SeccompAction, SeccompCmpArgLen as ArgLen, SeccompCmpOp::Eq,
     SeccompCondition as Cond, SeccompFilter, SeccompRule,
 };
 use std::convert::TryInto;
+#[cfg(feature = "mshv")]
+use virtio_devices::seccomp_filters::MSHV_MODIFY_GPA_HOST_ACCESS;
 
 pub enum Thread {
     Api,
@@ -214,13 +214,28 @@ fn create_vmm_ioctl_seccomp_rule_common_mshv() -> Result<Vec<SeccompRule>, Backe
             MSHV_VP_REGISTER_INTERCEPT_RESULT
         )?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_GET_VP_CPUID_VALUES)?],
-        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_MODIFY_GPA_HOST_ACCESS)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            MSHV_MODIFY_GPA_HOST_ACCESS
+        )?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_IMPORT_ISOLATED_PAGES)?],
-        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_COMPLETE_ISOLATED_IMPORT)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            MSHV_COMPLETE_ISOLATED_IMPORT
+        )?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_READ_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_WRITE_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_SEV_SNP_AP_CREATE)?],
-        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_ISSUE_PSP_GUEST_REQUEST)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            MSHV_ISSUE_PSP_GUEST_REQUEST
+        )?],
     ])
 }
 
@@ -671,11 +686,21 @@ fn create_vcpu_ioctl_seccomp_rule_mshv() -> Result<Vec<SeccompRule>, BackendErro
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_UNMAP_GUEST_MEMORY)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_VP_TRANSLATE_GVA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_GET_VP_CPUID_VALUES)?],
-        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_MODIFY_GPA_HOST_ACCESS)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            MSHV_MODIFY_GPA_HOST_ACCESS
+        )?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_READ_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_WRITE_GPA)?],
         and![Cond::new(1, ArgLen::Dword, Eq, MSHV_SEV_SNP_AP_CREATE)?],
-        and![Cond::new(1, ArgLen::Dword, Eq, MSHV_ISSUE_PSP_GUEST_REQUEST)?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            MSHV_ISSUE_PSP_GUEST_REQUEST
+        )?],
     ])
 }
 

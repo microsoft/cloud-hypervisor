@@ -226,7 +226,17 @@ impl<S: VhostUserMasterReqHandler> VhostUserEpollHandler<S> {
                 self.mem.memory().deref(),
                 self.queues
                     .iter()
-                    .map(|(i, q, e)| (*i, vm_virtio::clone_queue(q, #[cfg(all(feature = "mshv", feature = "snp"))] None), e.try_clone().unwrap()))
+                    .map(|(i, q, e)| {
+                        (
+                            *i,
+                            vm_virtio::clone_queue(
+                                q,
+                                #[cfg(all(feature = "mshv", feature = "snp"))]
+                                None,
+                            ),
+                            e.try_clone().unwrap(),
+                        )
+                    })
                     .collect(),
                 &self.virtio_interrupt,
                 self.acked_features,
@@ -333,7 +343,17 @@ impl VhostUserCommon {
                 &mem.memory(),
                 queues
                     .iter()
-                    .map(|(i, q, e)| (*i, vm_virtio::clone_queue(q, #[cfg(all(feature = "mshv", feature = "snp"))] None), e.try_clone().unwrap()))
+                    .map(|(i, q, e)| {
+                        (
+                            *i,
+                            vm_virtio::clone_queue(
+                                q,
+                                #[cfg(all(feature = "mshv", feature = "snp"))]
+                                None,
+                            ),
+                            e.try_clone().unwrap(),
+                        )
+                    })
                     .collect(),
                 &interrupt_cb,
                 acked_features,

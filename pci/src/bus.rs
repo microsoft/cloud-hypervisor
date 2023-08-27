@@ -219,7 +219,6 @@ impl PciConfigIo {
 
         // Don't support multi-function devices.
         if function > 0 {
-
             return 0xffff_ffff;
         }
 
@@ -281,7 +280,6 @@ impl PciConfigIo {
     }
 
     fn set_config_address(&mut self, offset: u64, data: &[u8]) {
-
         if offset as usize + data.len() > 4 {
             return;
         }

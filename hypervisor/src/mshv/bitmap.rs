@@ -1,9 +1,6 @@
 use core::{
     mem,
-    sync::atomic::{
-        AtomicU64,
-        Ordering,
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 pub trait AtomicBitmapOps {
     fn bit_size(&self) -> usize;
@@ -14,7 +11,7 @@ pub trait AtomicBitmapOps {
     fn capacity() -> usize;
 }
 
-const INDEX_MASK:usize = 63;
+const INDEX_MASK: usize = 63;
 
 impl AtomicBitmapOps for AtomicU64 {
     fn bit_size(&self) -> usize {
@@ -31,7 +28,11 @@ impl AtomicBitmapOps for AtomicU64 {
     }
     fn load_bit(&self, index: usize, order: Ordering) -> bool {
         if index >= self.bit_size() {
-            panic!("Index: {:?} is greater than size: {:?}", index, self.bit_size());
+            panic!(
+                "Index: {:?} is greater than size: {:?}",
+                index,
+                self.bit_size()
+            );
         }
         1 == 1 & (self.load(order) >> index)
     }
@@ -50,11 +51,12 @@ pub struct SimpleAtomicBitmap {
 #[allow(clippy::len_without_is_empty)]
 impl SimpleAtomicBitmap {
     pub fn new(size: usize) -> Self {
-        let map_size = size / AtomicU64::capacity() + if size % AtomicU64::capacity()  > 0 {
-            1
-        } else {
-            0
-        };
+        let map_size = size / AtomicU64::capacity()
+            + if size % AtomicU64::capacity() > 0 {
+                1
+            } else {
+                0
+            };
         let map: Vec<AtomicU64> = (0..map_size).map(|_| AtomicU64::new(0)).collect();
         SimpleAtomicBitmap {
             map,
@@ -73,7 +75,7 @@ impl SimpleAtomicBitmap {
         if index >= self.size {
             panic!("Index: {:?} is greater than size: {:?}", index, self.size);
         }
-        self.map[index >> 6].get_bit(index & INDEX_MASK )
+        self.map[index >> 6].get_bit(index & INDEX_MASK)
     }
 
     pub fn set_bits_range(&self, start_bit: usize, len: usize) {
@@ -131,4 +133,3 @@ impl Default for SimpleAtomicBitmap {
         SimpleAtomicBitmap::new(0)
     }
 }
-

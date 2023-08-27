@@ -625,7 +625,7 @@ impl CpuManager {
         vm_ops: Arc<dyn VmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         numa_nodes: &NumaNodes,
-        snp_enabled: bool
+        snp_enabled: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         if u32::from(config.max_vcpus) > hypervisor.get_max_vcpus() {
             return Err(Error::MaximumVcpusExceeded);
@@ -1214,7 +1214,7 @@ impl CpuManager {
 
         let ret = self.create_vcpus(self.boot_vcpus(), snapshot);
 
-        #[cfg(feature = "snp")] 
+        #[cfg(feature = "snp")]
         if self.snp_enabled {
             self.vm
                 .snp_init()
@@ -1812,11 +1812,14 @@ impl CpuManager {
         xfem: u64,
         xss: u64,
     ) -> Result<[u32; 4]> {
-        let leaf_info = unsafe { self.vcpus[usize::from(cpu_id)]
-                    .lock()
-                    .unwrap()
-                    .vcpu
-                    .get_cpuid_values(eax, ecx, xfem, xss).unwrap() };
+        let leaf_info = unsafe {
+            self.vcpus[usize::from(cpu_id)]
+                .lock()
+                .unwrap()
+                .vcpu
+                .get_cpuid_values(eax, ecx, xfem, xss)
+                .unwrap()
+        };
         Ok(leaf_info)
     }
 }

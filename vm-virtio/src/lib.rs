@@ -81,17 +81,17 @@ pub enum VirtioDeviceType {
  *	__virtio16 ring[];
  * };
  *
- * // u32 is used here for ids for padding reasons. 
+ * // u32 is used here for ids for padding reasons.
  * struct vring_used_elem {
  *	// Index of start of used descriptor chain.
  *	__virtio32 id;
  *	// Total length of the descriptor chain which was used (written to)
  *	__virtio32 len;
  * };
-* 
+*
  * Kernel header used for this reference: include/uapi/linux/virtio_ring.h
  * Virtio Spec: https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html
- * 
+ *
  */
 #[cfg(all(feature = "mshv", feature = "snp"))]
 const VRING_DESC_ELEMENT_SIZE: usize = 16;
@@ -108,9 +108,8 @@ enum VringType {
 
 #[cfg(all(feature = "mshv", feature = "snp"))]
 fn get_vring_size(t: VringType, queue_size: u16) -> usize {
-
-    let (length_except_ring, element_size) =   match t {
-        VringType::VRING_DESC  => (0, VRING_DESC_ELEMENT_SIZE),
+    let (length_except_ring, element_size) = match t {
+        VringType::VRING_DESC => (0, VRING_DESC_ELEMENT_SIZE),
         VringType::VRING_AVAIL => (6, VRING_AVAIL_ELEMENT_SIZE),
         VringType::VRING_USED => (6, VRING_USED_ELEMENT_SIZE),
     };
@@ -177,7 +176,12 @@ pub trait AccessPlatform: Send + Sync + Debug {
 pub trait Translatable {
     fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self;
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self;
 }
 
 impl Translatable for GuestAddress {
@@ -187,8 +191,18 @@ impl Translatable for GuestAddress {
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
         GuestAddress(self.0.translate_gpa(access_platform, len))
     }
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self {
-        GuestAddress(self.0.translate_gva_with_vmfd(access_platform, len, #[cfg(all(feature = "mshv", feature = "snp"))] vm))
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self {
+        GuestAddress(self.0.translate_gva_with_vmfd(
+            access_platform,
+            len,
+            #[cfg(all(feature = "mshv", feature = "snp"))]
+            vm,
+        ))
     }
 }
 
@@ -208,7 +222,12 @@ impl Translatable for u64 {
             *self
         }
     }
-    fn translate_gva_with_vmfd(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize, #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>) -> Self {
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self {
         cfg_if::cfg_if! {
             if #[cfg(all(feature = "mshv", feature = "snp"))] {
                 if let Some(_vm) = vm {
@@ -231,7 +250,10 @@ impl Translatable for u64 {
 }
 
 /// Helper for cloning a Queue since QueueState doesn't derive Clone
-pub fn clone_queue(queue: &Queue, #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>) -> Queue {
+pub fn clone_queue(
+    queue: &Queue,
+    #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+) -> Queue {
     let mut q = Queue::new(queue.max_size()).unwrap();
 
     q.set_next_avail(queue.next_avail());
@@ -246,9 +268,21 @@ pub fn clone_queue(queue: &Queue, #[cfg(all(feature = "mshv", feature = "snp"))]
 
     #[cfg(all(feature = "mshv", feature = "snp"))]
     if let Some(_vm) = vm {
-        desc_a = desc_a.translate_gva_with_vmfd(None, get_vring_size(VringType::VRING_DESC, queue.size()) as usize, vm);
-        avail_a = avail_a.translate_gva_with_vmfd(None, get_vring_size(VringType::VRING_AVAIL, queue.size()) as usize, vm);
-        ring_a = ring_a.translate_gva_with_vmfd(None, get_vring_size(VringType::VRING_USED, queue.size()) as usize, vm);
+        desc_a = desc_a.translate_gva_with_vmfd(
+            None,
+            get_vring_size(VringType::VRING_DESC, queue.size()) as usize,
+            vm,
+        );
+        avail_a = avail_a.translate_gva_with_vmfd(
+            None,
+            get_vring_size(VringType::VRING_AVAIL, queue.size()) as usize,
+            vm,
+        );
+        ring_a = ring_a.translate_gva_with_vmfd(
+            None,
+            get_vring_size(VringType::VRING_USED, queue.size()) as usize,
+            vm,
+        );
     }
     q.try_set_desc_table_address(GuestAddress(queue.desc_table()))
         .unwrap();

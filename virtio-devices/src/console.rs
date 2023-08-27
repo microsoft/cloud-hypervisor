@@ -4,8 +4,8 @@
 use super::Error as DeviceError;
 use super::{
     ActivateResult, EpollHelper, EpollHelperError, EpollHelperHandler, VirtioCommon, VirtioDevice,
-    VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_IOMMU_PLATFORM,
-    VIRTIO_F_VERSION_1, VIRTIO_F_ACCESS_PLATFORM,
+    VirtioDeviceType, VirtioInterruptType, EPOLL_HELPER_EVENT_LAST, VIRTIO_F_ACCESS_PLATFORM,
+    VIRTIO_F_IOMMU_PLATFORM, VIRTIO_F_VERSION_1,
 };
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
@@ -106,7 +106,7 @@ struct ConsoleEpollHandler {
     out: Option<Box<dyn Write + Send>>,
     write_out: Option<Arc<AtomicBool>>,
     file_event_registered: bool,
-    #[cfg(all(feature = "mshv", feature = "snp"))] 
+    #[cfg(all(feature = "mshv", feature = "snp"))]
     vm: Arc<dyn hypervisor::Vm>,
 }
 
@@ -173,8 +173,7 @@ impl ConsoleEpollHandler {
         kill_evt: EventFd,
         pause_evt: EventFd,
         access_platform: Option<Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Self {
         let out_file = endpoint.out_file();
         let (out, write_out) = if let Some(out_file) = out_file {
@@ -237,8 +236,12 @@ impl ConsoleEpollHandler {
                 .memory()
                 .write_slice(
                     &source_slice[..],
-                    desc.addr()
-                        .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] Some(&self.vm.clone())),
+                    desc.addr().translate_gva_with_vmfd(
+                        self.access_platform.as_ref(),
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        Some(&self.vm.clone()),
+                    ),
                 )
                 .map_err(Error::GuestMemoryWrite)?;
 
@@ -272,8 +275,12 @@ impl ConsoleEpollHandler {
                 desc_chain
                     .memory()
                     .write_to(
-                        desc.addr()
-                            .translate_gva_with_vmfd(self.access_platform.as_ref(), desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] Some(&self.vm.clone())),
+                        desc.addr().translate_gva_with_vmfd(
+                            self.access_platform.as_ref(),
+                            desc.len() as usize,
+                            #[cfg(all(feature = "mshv", feature = "snp"))]
+                            Some(&self.vm.clone()),
+                        ),
                         out,
                         desc.len() as usize,
                     )
@@ -634,8 +641,7 @@ impl Console {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<ConsoleState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<(Console, Arc<ConsoleResizer>)> {
         let (avail_features, acked_features, config, in_buffer, paused) = if let Some(state) = state
         {

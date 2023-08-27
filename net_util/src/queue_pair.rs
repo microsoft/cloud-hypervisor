@@ -42,8 +42,7 @@ impl TxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut retry_write = false;
         let mut rate_limit_reached = false;
@@ -58,9 +57,12 @@ impl TxVirtio {
 
             let mut iovecs = Vec::new();
             while let Some(desc) = next_desc {
-                let desc_addr = desc
-                    .addr()
-                    .translate_gva_with_vmfd(access_platform, desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] vm);
+                let desc_addr = desc.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    desc.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    vm,
+                );
                 if !desc.is_write_only() && desc.len() > 0 {
                     let buf = desc_chain
                         .memory()
@@ -170,8 +172,7 @@ impl RxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut exhausted_descs = true;
         let mut rate_limit_reached = false;
@@ -190,8 +191,12 @@ impl RxVirtio {
             let num_buffers_addr = desc_chain
                 .memory()
                 .checked_offset(
-                    desc.addr()
-                        .translate_gva_with_vmfd(access_platform, desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] vm),
+                    desc.addr().translate_gva_with_vmfd(
+                        access_platform,
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        vm,
+                    ),
                     10,
                 )
                 .ok_or(NetQueuePairError::DescriptorInvalidHeader)?;
@@ -199,9 +204,12 @@ impl RxVirtio {
 
             let mut iovecs = Vec::new();
             while let Some(desc) = next_desc {
-                let desc_addr = desc
-                    .addr()
-                    .translate_gva_with_vmfd(access_platform, desc.len() as usize,  #[cfg(all(feature = "mshv", feature = "snp"))] vm);
+                let desc_addr = desc.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    desc.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    vm,
+                );
                 if desc.is_write_only() && desc.len() > 0 {
                     let buf = desc_chain
                         .memory()
@@ -358,8 +366,7 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let tx_tap_retry = self.tx.process_desc_chain(
             mem,
@@ -412,8 +419,7 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         self.rx_desc_avail = !self.rx.process_desc_chain(
             mem,

@@ -353,8 +353,7 @@ where
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<VsockState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Vsock<B>> {
         let (avail_features, acked_features, paused) = if let Some(state) = state {
             info!("Restoring virtio-vsock {}", id);

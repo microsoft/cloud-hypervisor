@@ -222,7 +222,12 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
                 let mut vring = vrings[1].get_mut();
                 if thread
                     .net
-                    .process_tx(self.mem.memory().deref(), vring.get_queue_mut(), #[cfg(all(feature = "mshv", feature = "snp"))] None)
+                    .process_tx(
+                        self.mem.memory().deref(),
+                        vring.get_queue_mut(),
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        None,
+                    )
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
@@ -234,7 +239,12 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
                 let mut vring = vrings[0].get_mut();
                 if thread
                     .net
-                    .process_rx(self.mem.memory().deref(), vring.get_queue_mut(), #[cfg(all(feature = "mshv", feature = "snp"))] None)
+                    .process_rx(
+                        self.mem.memory().deref(),
+                        vring.get_queue_mut(),
+                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        None,
+                    )
                     .map_err(Error::NetQueuePair)?
                 {
                     vring

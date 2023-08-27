@@ -83,8 +83,7 @@ impl Net {
         offload_tso: bool,
         offload_ufo: bool,
         offload_csum: bool,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Net> {
         let mut num_queues = vu_cfg.num_queues;
 

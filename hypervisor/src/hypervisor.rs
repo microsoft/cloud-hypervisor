@@ -101,7 +101,11 @@ pub trait Hypervisor: Send + Sync {
     /// Create a Vm of a specific type using the underlying hypervisor
     /// Return a hypervisor-agnostic Vm trait object
     ///
-    fn create_vm_with_type(&self, _vm_type: u64, #[cfg(feature = "snp")] _mem_size: u64 ) -> Result<Arc<dyn Vm>> {
+    fn create_vm_with_type(
+        &self,
+        _vm_type: u64,
+        #[cfg(feature = "snp")] _mem_size: u64,
+    ) -> Result<Arc<dyn Vm>> {
         unreachable!()
     }
     #[cfg(target_arch = "x86_64")]

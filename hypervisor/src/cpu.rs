@@ -77,7 +77,7 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to get Lapic state: {0}")]
     GetlapicState(#[source] anyhow::Error),
-        ///
+    ///
     /// Setting MSR entries error
     ///
     #[error("Failed to set CPUID entries: {0}")]

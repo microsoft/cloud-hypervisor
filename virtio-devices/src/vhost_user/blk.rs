@@ -76,8 +76,7 @@ impl Blk {
         exit_evt: EventFd,
         iommu: bool,
         state: Option<State>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Blk> {
         let num_queues = vu_cfg.num_queues;
 

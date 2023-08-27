@@ -19,8 +19,6 @@ use vm_virtio::AccessPlatform;
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
 pub const MAX_QUEUE_SIZE: u32 = 32768;
 
-
-
 #[derive(Clone, Versionize)]
 pub struct VirtioPciCommonConfigState {
     pub driver_status: u8,
@@ -42,11 +40,11 @@ struct QueueAdresses {
     pub avail_ring_address: u64,
     pub avail_size: u32,
     pub used_ring_address: u64,
-    pub used_size: u32
+    pub used_size: u32,
 }
 #[cfg(all(feature = "mshv", feature = "snp"))]
 impl QueueAdresses {
-    pub fn new() -> QueueAdresses{
+    pub fn new() -> QueueAdresses {
         QueueAdresses::default()
     }
     fn set_desc_table_address(&mut self, low: Option<u32>, high: Option<u32>, size: Option<u32>) {
@@ -127,8 +125,7 @@ impl VirtioPciCommonConfig {
     pub fn new(
         state: VirtioPciCommonConfigState,
         access_platform: Option<Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] 
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Self {
         VirtioPciCommonConfig {
             access_platform,
@@ -244,7 +241,6 @@ impl VirtioPciCommonConfig {
     }
 
     fn write_common_config_word(&mut self, offset: u64, value: u16, queues: &mut [Queue]) {
-
         match offset {
             0x10 => self.msix_config.store(value, Ordering::Release),
             0x16 => self.queue_select = value,
@@ -308,7 +304,6 @@ impl VirtioPciCommonConfig {
         queues: &mut [Queue],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
-
         match offset {
             0x00 => self.device_feature_select = value,
             0x08 => self.driver_feature_select = value,
@@ -326,40 +321,55 @@ impl VirtioPciCommonConfig {
             }
             0x20 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None));
-                #[cfg(all(feature = "mshv", feature = "snp"))] {
-                    self.queue_addresses.set_desc_table_address(Some(value), None, None);
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                {
+                    self.queue_addresses
+                        .set_desc_table_address(Some(value), None, None);
                 }
             }
             0x24 => {
-
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
-                #[cfg(all(feature = "mshv", feature = "snp"))]{
-                    self.queue_addresses.set_desc_table_address(None, Some(value), None);
-                    self.vm.gain_page_access(self.queue_addresses.desc_table_address, 4096).unwrap()
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                {
+                    self.queue_addresses
+                        .set_desc_table_address(None, Some(value), None);
+                    self.vm
+                        .gain_page_access(self.queue_addresses.desc_table_address, 4096)
+                        .unwrap()
                 }
             }
             0x28 => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(Some(value), None));
                 #[cfg(all(feature = "mshv", feature = "snp"))]
-                self.queue_addresses.set_avail_ring_address(Some(value), None, None);
+                self.queue_addresses
+                    .set_avail_ring_address(Some(value), None, None);
             }
             0x2c => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(None, Some(value)));
-                #[cfg(all(feature = "mshv", feature = "snp"))] {
-                    self.queue_addresses.set_avail_ring_address(None, Some(value), None);
-                    self.vm.gain_page_access(self.queue_addresses.avail_ring_address, 4096).unwrap()
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                {
+                    self.queue_addresses
+                        .set_avail_ring_address(None, Some(value), None);
+                    self.vm
+                        .gain_page_access(self.queue_addresses.avail_ring_address, 4096)
+                        .unwrap()
                 }
             }
             0x30 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(Some(value), None));
                 #[cfg(all(feature = "mshv", feature = "snp"))]
-                self.queue_addresses.set_used_ring_address(Some(value), None, None);
+                self.queue_addresses
+                    .set_used_ring_address(Some(value), None, None);
             }
             0x34 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(None, Some(value)));
-                #[cfg(all(feature = "mshv", feature = "snp"))] {
-                    self.queue_addresses.set_used_ring_address(None, Some(value), None);
-                    self.vm.gain_page_access(self.queue_addresses.used_ring_address, 4096).unwrap()
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                {
+                    self.queue_addresses
+                        .set_used_ring_address(None, Some(value), None);
+                    self.vm
+                        .gain_page_access(self.queue_addresses.used_ring_address, 4096)
+                        .unwrap()
                 }
             }
             _ => {
@@ -373,7 +383,6 @@ impl VirtioPciCommonConfig {
     }
 
     fn write_common_config_qword(&mut self, offset: u64, value: u64, queues: &mut [Queue]) {
-
         let low = Some((value & 0xffff_ffff) as u32);
         let high = Some((value >> 32) as u32);
 

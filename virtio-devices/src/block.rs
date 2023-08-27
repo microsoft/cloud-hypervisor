@@ -145,8 +145,13 @@ impl BlockEpollHandler {
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
-            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref(),  #[cfg(all(feature = "mshv", feature = "snp"))] Some(&self.vm.clone()))
-                .map_err(Error::RequestParsing)?;
+            let mut request = Request::parse(
+                &mut desc_chain,
+                self.access_platform.as_ref(),
+                #[cfg(all(feature = "mshv", feature = "snp"))]
+                Some(&self.vm.clone()),
+            )
+            .map_err(Error::RequestParsing)?;
 
             // For virtio spec compliance
             // "A device MUST set the status byte to VIRTIO_BLK_S_IOERR for a write request
@@ -522,8 +527,7 @@ impl Block {
         rate_limiter_config: Option<RateLimiterConfig>,
         exit_evt: EventFd,
         state: Option<BlockState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))]
-        vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Self> {
         let (disk_nsectors, avail_features, acked_features, config, paused) =
             if let Some(state) = state {
