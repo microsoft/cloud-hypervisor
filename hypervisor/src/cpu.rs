@@ -20,8 +20,8 @@ use crate::CpuState;
 use crate::MpState;
 use thiserror::Error;
 use vm_memory::bitmap::AtomicBitmap;
+use vm_memory::GuestAddress;
 use vm_memory::GuestMemoryAtomic;
-use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 
 #[derive(Error, Debug)]
 ///

@@ -13,7 +13,6 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
-use byteorder::BigEndian;
 #[cfg(feature = "snp")]
 use igvm_parser::importer::HV_PAGE_SIZE;
 pub use mshv_bindings::*;
@@ -24,10 +23,8 @@ use std::sync::{Arc, RwLock};
 use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
 use vm_memory::bitmap::AtomicBitmap;
-use vm_memory::GuestAddress;
-use vm_memory::GuestAddressSpace;
 use vm_memory::GuestMemory;
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::GuestMemoryAtomic;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
