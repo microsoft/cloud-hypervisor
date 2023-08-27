@@ -17,7 +17,6 @@ use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, VersionMa
 use vm_virtio::AccessPlatform;
 
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
-pub const MAX_QUEUE_SIZE: u32 = 32768;
 
 #[derive(Clone, Versionize)]
 pub struct VirtioPciCommonConfigState {
