@@ -17,8 +17,6 @@ use vm_memory::GuestAddress;
 
 pub mod queue;
 pub use queue::*;
-#[macro_use]
-extern crate log;
 
 pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
