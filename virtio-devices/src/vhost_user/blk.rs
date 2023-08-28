@@ -63,8 +63,6 @@ pub struct Blk {
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
     iommu: bool,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl Blk {
@@ -205,8 +203,6 @@ impl Blk {
             seccomp_action,
             exit_evt,
             iommu,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
-            vm,
         })
     }
 

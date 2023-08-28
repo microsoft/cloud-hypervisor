@@ -73,15 +73,6 @@ impl QueueAdresses {
             self.used_size = size.unwrap();
         }
     }
-    fn set_desc_size(&mut self, sz: u32) {
-        self.desc_size = sz;
-    }
-    fn set_avail_size(&mut self, sz: u32) {
-        self.avail_size = sz;
-    }
-    fn set_ring_size(&mut self, sz: u32) {
-        self.used_size = sz;
-    }
 }
 /// Contains the data for reading and writing the common configuration structure of a virtio PCI
 /// device.
