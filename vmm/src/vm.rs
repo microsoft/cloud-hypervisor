@@ -1084,7 +1084,7 @@ impl Vm {
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
-        cpu_manager: Arc<Mutex<CpuManager>>,
+        _cpu_manager: Arc<Mutex<CpuManager>>,
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
         let firmware = &payload.firmware;
@@ -1115,13 +1115,13 @@ impl Vm {
                 #[cfg(feature = "snp")]
                 {
                     if let Some(host_data_str) = host_data {
-                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                        return Self::load_igvm(igvm, memory_manager, _cpu_manager, host_data_str);
                     } else {
-                        return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
+                        return Self::load_igvm(igvm, memory_manager, _cpu_manager, "");
                     }
                 }
                 #[cfg(not(feature = "snp"))]
-                return Self::load_igvm(igvm, memory_manager, cpu_manager);
+                return Self::load_igvm(igvm, memory_manager, _cpu_manager);
             }
         }
         Err(Error::InvalidPayload)

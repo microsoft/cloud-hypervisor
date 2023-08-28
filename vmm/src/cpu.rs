@@ -902,7 +902,6 @@ impl CpuManager {
             .vcpu_run_interrupted
             .clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
-        let vm = self.vm.clone();
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
