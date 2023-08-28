@@ -2178,8 +2178,6 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 ) {
                     Ok(vub_device) => vub_device,
                     Err(e) => {
