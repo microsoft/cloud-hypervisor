@@ -503,12 +503,12 @@ impl Vm {
         let mut force_iommu = true;
         #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
         let force_iommu = false;
-        let mut snp_enabled = false;
+        let snp_enabled = false;
         #[cfg(feature = "snp")]
-        {
-            snp_enabled = config.lock().unwrap().is_snp_enabled();
+        let snp_enabled = {
             force_iommu = snp_enabled;
-        }
+            config.lock().unwrap().is_snp_enabled()
+        };
 
         #[cfg(feature = "guest_debug")]
         let stop_on_boot = config.lock().unwrap().gdb;
@@ -781,7 +781,7 @@ impl Vm {
             vm_config.lock().unwrap().is_tdx_enabled()
         };
 
-        let mut snp_enabled = false;
+        let snp_enabled = false;
         #[cfg(feature = "snp")]
         let snp_enabled = if snapshot.is_some() {
             false
@@ -1402,7 +1402,7 @@ impl Vm {
                 .resize(desired_memory)
                 .map_err(Error::MemoryManager)?;
 
-            let mut memory_config = &mut self.config.lock().unwrap().memory;
+            let memory_config = &mut self.config.lock().unwrap().memory;
 
             if let Some(new_region) = &new_region {
                 self.device_manager

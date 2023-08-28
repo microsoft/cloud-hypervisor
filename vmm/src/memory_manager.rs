@@ -443,7 +443,7 @@ impl MemoryManager {
         zones: &[MemoryZoneConfig],
         prefault: Option<bool>,
         thp: bool,
-        snp_enabled: bool,
+        _snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut zones = zones.to_owned();
         let mut mem_regions = Vec::new();
@@ -502,7 +502,7 @@ impl MemoryManager {
                     None,
                     thp,
                     #[cfg(feature = "snp")]
-                    snp_enabled,
+                    _snp_enabled,
                 )?;
 
                 // Add region to the list of regions associated with the
@@ -556,7 +556,7 @@ impl MemoryManager {
         prefault: Option<bool>,
         mut existing_memory_files: HashMap<u32, File>,
         thp: bool,
-        snp_enabled: bool,
+        _snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut memory_regions = Vec::new();
         let mut memory_zones = HashMap::new();
@@ -1531,7 +1531,7 @@ impl MemoryManager {
             .ok_or(Error::MemoryRangeAllocation)?;
 
         // Update the slot so that it can be queried via the I/O port
-        let mut slot = &mut self.hotplug_slots[self.next_hotplug_slot];
+        let slot = &mut self.hotplug_slots[self.next_hotplug_slot];
         slot.active = true;
         slot.inserting = true;
         slot.base = region.start_addr().0;
