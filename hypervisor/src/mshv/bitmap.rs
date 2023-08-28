@@ -45,7 +45,6 @@ impl AtomicBitmapOps for AtomicU64 {
 pub struct SimpleAtomicBitmap {
     map: Vec<AtomicU64>,
     size: usize,
-    map_size: usize,
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -58,11 +57,7 @@ impl SimpleAtomicBitmap {
                 0
             };
         let map: Vec<AtomicU64> = (0..map_size).map(|_| AtomicU64::new(0)).collect();
-        SimpleAtomicBitmap {
-            map,
-            size,
-            map_size,
-        }
+        SimpleAtomicBitmap { map, size }
     }
     pub fn new_with_bytes(size: usize, page_size: usize) -> Self {
         let mut num_pages = size / page_size;
@@ -71,6 +66,7 @@ impl SimpleAtomicBitmap {
         }
         SimpleAtomicBitmap::new(num_pages)
     }
+
     pub fn is_bit_set(&self, index: usize) -> bool {
         if index >= self.size {
             panic!("Index: {:?} is greater than size: {:?}", index, self.size);
@@ -78,18 +74,6 @@ impl SimpleAtomicBitmap {
         self.map[index >> 6].get_bit(index & INDEX_MASK)
     }
 
-    pub fn set_bits_range(&self, start_bit: usize, len: usize) {
-        if len == 0 {
-            return;
-        }
-        let last_bit = start_bit.saturating_add(len - 1);
-        for n in start_bit..=last_bit {
-            if n >= self.size {
-                break;
-            }
-            self.map[n >> 6].set_bit(n & INDEX_MASK);
-        }
-    }
     pub fn reset_bits_range(&self, start_bit: usize, len: usize) {
         if len == 0 {
             return;
@@ -115,19 +99,8 @@ impl SimpleAtomicBitmap {
         }
         self.map[index >> 6].reset_bit(index & INDEX_MASK)
     }
-
-    pub fn len(&self) -> usize {
-        self.size
-    }
-    pub fn size_in_bytes(&self) -> usize {
-        self.map_size * 8
-    }
-    pub fn reset(&self) {
-        for it in self.map.iter() {
-            it.store(0, Ordering::Release);
-        }
-    }
 }
+
 impl Default for SimpleAtomicBitmap {
     fn default() -> Self {
         SimpleAtomicBitmap::new(0)
