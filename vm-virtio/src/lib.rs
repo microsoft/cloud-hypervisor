@@ -99,17 +99,17 @@ const VRING_AVAIL_ELEMENT_SIZE: usize = 2;
 const VRING_USED_ELEMENT_SIZE: usize = 8;
 #[cfg(all(feature = "mshv", feature = "snp"))]
 enum VringType {
-    VRING_DESC,
-    VRING_AVAIL,
-    VRING_USED,
+    VringDesc,
+    VringAvail,
+    VringUsed,
 }
 
 #[cfg(all(feature = "mshv", feature = "snp"))]
 fn get_vring_size(t: VringType, queue_size: u16) -> usize {
     let (length_except_ring, element_size) = match t {
-        VringType::VRING_DESC => (0, VRING_DESC_ELEMENT_SIZE),
-        VringType::VRING_AVAIL => (6, VRING_AVAIL_ELEMENT_SIZE),
-        VringType::VRING_USED => (6, VRING_USED_ELEMENT_SIZE),
+        VringType::VringDesc => (0, VRING_DESC_ELEMENT_SIZE),
+        VringType::VringAvail => (6, VRING_AVAIL_ELEMENT_SIZE),
+        VringType::VringUsed => (6, VRING_USED_ELEMENT_SIZE),
     };
     length_except_ring + element_size * queue_size as usize
 }
@@ -268,17 +268,17 @@ pub fn clone_queue(
 
         let _ = desc_a.translate_gva_with_vmfd(
             None,
-            get_vring_size(VringType::VRING_DESC, queue.size()) as usize,
+            get_vring_size(VringType::VringDesc, queue.size()) as usize,
             vm,
         );
         let _ = avail_a.translate_gva_with_vmfd(
             None,
-            get_vring_size(VringType::VRING_AVAIL, queue.size()) as usize,
+            get_vring_size(VringType::VringAvail, queue.size()) as usize,
             vm,
         );
         let _ = ring_a.translate_gva_with_vmfd(
             None,
-            get_vring_size(VringType::VRING_USED, queue.size()) as usize,
+            get_vring_size(VringType::VringUsed, queue.size()) as usize,
             vm,
         );
     }
