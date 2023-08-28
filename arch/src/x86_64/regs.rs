@@ -10,7 +10,9 @@ use crate::layout::{BOOT_GDT_START, BOOT_IDT_START, PVH_INFO_START};
 use crate::GuestMemoryMmap;
 use hypervisor::arch::x86::gdt::{gdt_entry, segment_from_gdt};
 use hypervisor::arch::x86::regs::CR0_PE;
-use hypervisor::arch::x86::{FpuState, SegmentRegister, SpecialRegisters, StandardRegisters};
+#[cfg(feature = "igvm")]
+use hypervisor::arch::x86::SegmentRegister;
+use hypervisor::arch::x86::{FpuState, SpecialRegisters, StandardRegisters};
 #[cfg(feature = "igvm")]
 use igvm_parser::snp::{SEV_SELECTOR, SEV_VMSA};
 use std::sync::Arc;
@@ -56,19 +58,22 @@ pub fn setup_fpu(
     vcpu: &Arc<dyn hypervisor::Vcpu>,
     #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
 ) -> Result<()> {
-    let mut fpu: FpuState = FpuState {
+    let fpu: FpuState = FpuState {
         fcw: 0x37f,
         mxcsr: 0x1f80,
         ..Default::default()
     };
 
     #[cfg(feature = "igvm")]
-    {
-        if let Some(_vmsa) = vmsa {
-            fpu.fcw = _vmsa.x87_fcw;
-            fpu.mxcsr = _vmsa.mxcsr;
+    let fpu = if vmsa.is_some() {
+        FpuState {
+            fcw: vmsa.unwrap().x87_fcw,
+            mxcsr: vmsa.unwrap().mxcsr,
+            ..Default::default()
         }
-    }
+    } else {
+        fpu
+    };
 
     vcpu.set_fpu(&fpu).map_err(Error::SetFpuRegisters)
 }
@@ -96,7 +101,7 @@ pub fn setup_regs(
     boot_ip: u64,
     #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
 ) -> Result<()> {
-    let mut regs = StandardRegisters {
+    let regs = StandardRegisters {
         rflags: 0x0000000000000002u64,
         rbx: PVH_INFO_START.raw_value(),
         rip: boot_ip,
@@ -104,15 +109,17 @@ pub fn setup_regs(
     };
 
     #[cfg(feature = "igvm")]
-    {
-        if let Some(_vmsa) = vmsa {
-            regs.rflags = _vmsa.rflags;
-            regs.rip = _vmsa.rip;
-            regs.rbx = _vmsa.rbx;
-            regs.rsi = _vmsa.rsi;
-            regs.rsp = _vmsa.rsp;
-        }
-    }
+    let regs = if vmsa.is_some() {
+        let mut t = regs;
+        t.rflags = vmsa.unwrap().rflags;
+        t.rip = vmsa.unwrap().rip;
+        t.rbx = vmsa.unwrap().rbx;
+        t.rsi = vmsa.unwrap().rsi;
+        t.rsp = vmsa.unwrap().rsp;
+        t
+    } else {
+        regs
+    };
 
     info!("DUMP REGS: {:?}", regs);
 
