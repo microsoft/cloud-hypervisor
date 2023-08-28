@@ -54,6 +54,7 @@ use bitmap::SimpleAtomicBitmap;
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
+#[cfg(feature = "snp")]
 const ONE_GB: usize = 1024 * 1024 * 1024;
 
 ///
@@ -368,6 +369,7 @@ pub struct MshvVcpu {
     cpuid: Vec<CpuIdEntry>,
     msrs: Vec<MsrEntry>,
     vm_ops: Option<Arc<dyn vm::VmOps>>,
+    #[cfg(feature = "snp")]
     vm_fd: Arc<VmFd>,
     #[cfg(feature = "snp")]
     host_access_pages: Arc<SimpleAtomicBitmap>,
@@ -1502,6 +1504,7 @@ impl vm::Vm for MshvVm {
             cpuid: Vec::new(),
             msrs: self.msrs.clone(),
             vm_ops,
+            #[cfg(feature = "snp")]
             vm_fd: self.fd.clone(),
             #[cfg(feature = "snp")]
             host_access_pages: self.host_access_pages.clone(),
