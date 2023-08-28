@@ -833,7 +833,7 @@ impl vm::Vm for KvmVm {
         self
     }
     #[cfg(feature = "snp")]
-    fn gain_page_access(&self, gpa: u64, size: u32) -> vm::Result<()> {
+    fn gain_page_access(&self, _gpa: u64, _size: u32) -> vm::Result<()> {
         Ok(())
     }
 }

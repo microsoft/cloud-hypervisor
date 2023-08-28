@@ -381,39 +381,44 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn import_isolated_pages(&self, page_type: u32, page_size: u32, pages: &[u64]) -> Result<()> {
+    fn import_isolated_pages(
+        &self,
+        _page_type: u32,
+        _page_size: u32,
+        _pages: &[u64],
+    ) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
     fn modify_gpa_host_access(
         &self,
-        host_access: u32,
-        flags: u32,
-        acquire: u8,
-        gpas: &[u64],
+        _host_access: u32,
+        _flags: u32,
+        _acquire: u8,
+        _gpas: &[u64],
     ) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn gain_page_access(&self, gpa: u64, size: u32) -> Result<()> {
+    fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
-    fn psp_issue_guest_request(&self, req_gpa: u64, rsp_gpa: u64) -> Result<()> {
+    fn psp_issue_guest_request(&self, _req_gpa: u64, _rsp_gpa: u64) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
     fn complete_isolated_import(
         &self,
-        snp_id_block: IgvmVhsSnpIdBlock,
-        host_data: &[u8],
-        id_block_enabled: u8,
+        _snp_id_block: IgvmVhsSnpIdBlock,
+        _host_data: &[u8],
+        _id_block_enabled: u8,
     ) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]
     /// Remove a gpa from ache of pages that host has access to
-    fn remove_gpa_from_host_acess_cache(&self, gpa: u64) -> Result<()> {
+    fn remove_gpa_from_host_acess_cache(&self, _gpa: u64) -> Result<()> {
         unimplemented!()
     }
 }

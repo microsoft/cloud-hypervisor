@@ -23,7 +23,6 @@ use std::sync::{Arc, RwLock};
 use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
 use vm_memory::bitmap::AtomicBitmap;
-use vm_memory::GuestMemory;
 use vm_memory::GuestMemoryAtomic;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
@@ -510,7 +509,7 @@ impl cpu::Vcpu for MshvVcpu {
     #[allow(non_upper_case_globals)]
     fn run(
         &self,
-        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
+        _guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
     ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         let hv_message: hv_message = hv_message::default();
         match self.fd.run(hv_message) {
@@ -662,10 +661,10 @@ impl cpu::Vcpu for MshvVcpu {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
-                    let GB = gpa / (1024 * 1024 * 1024);
+                    let gb = gpa / (1024 * 1024 * 1024);
                     debug!(
                         "Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}",
-                        gva, gpa, GB
+                        gva, gpa, gb
                     );
                     Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
                         "Unhandled VCPU exit: Unaccepted GPA"
@@ -674,7 +673,6 @@ impl cpu::Vcpu for MshvVcpu {
                 #[cfg(feature = "snp")]
                 hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
                     let info = x.to_gpa_attribute_info().unwrap();
-                    let vp_index = info.vp_index;
                     let host_vis = info.__bindgen_anon_1.host_visibility();
                     // debug!("Attribute intercept: vp_index: {:?}, host_vis: {:x?}", vp_index, host_vis);
                     if host_vis >= HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE {
@@ -796,20 +794,14 @@ impl cpu::Vcpu for MshvVcpu {
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
-                        let data = unsafe { ghcb_msr.as_uint64 } >> 16;
-                        let bytes = data.to_le_bytes();
-                        // if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
-                        //     print!("{}", s);
-                        // }
+                        // Do nothing
                     } else if op == GHCB_INFO_NORMAL as u64 {
-                        // SAFETY: access_info is valid, otherwise we won't be here
-                        let _exit_code =
-                            unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u64;
+                        let exit_code = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code as u64;
                         let exit_info1 =
                             info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u64;
 
-                        let _exit_code_u32 =
-                            unsafe { info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code } as u32;
+                        let exit_code_u32 =
+                            info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_code as u32;
                         let exit_info1_u32 =
                             info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info1 as u32;
                         let exit_info2 = info.__bindgen_anon_2.__bindgen_anon_1.sw_exit_info2;
@@ -817,7 +809,7 @@ impl cpu::Vcpu for MshvVcpu {
                         let pfn: u64 =
                             unsafe { ghcb_msr.__bindgen_anon_2.gpa_page_number() as u64 };
                         let gpa: u64 = pfn << GHCB_INFO_BIT_WIDTH;
-                        match _exit_code_u32 {
+                        match exit_code_u32 {
                             SVM_EXITCODE_HV_DOORBELL_PAGE => match exit_info1_u32 {
                                 SVM_NAE_HV_DOORBELL_PAGE_GET_PREFERRED => {
                                     let mut arg: mshv_read_write_gpa =
@@ -929,7 +921,6 @@ impl cpu::Vcpu for MshvVcpu {
                             }
                             // IPPROT Handle
                             0x7b => {
-                                let addr = info.__bindgen_anon_2.__bindgen_anon_1.sw_scratch;
                                 let port_into = hv_sev_vmgexit_port_info {
                                     as_uint32: (exit_info1 & 0xFFFFFFFF) as u32,
                                 };
@@ -968,11 +959,7 @@ impl cpu::Vcpu for MshvVcpu {
                                         )?;
                                     }
 
-                                    let mut v = u32::from_le_bytes(data);
-                                    //v =  ((v) & ((1u64 << ((len) * 8)) - 1) as u32);
-                                    // /* Preserve high bits in EAX but clear out high bits in RAX */
-                                    // let mask = 0xffffffff >> (32 - len * 8);
-                                    // let eax = (rax as u32 & !mask) | (v & mask);
+                                    let v = u32::from_le_bytes(data);
                                     let ret_rax = v as u64;
                                     arg.data[0..8].copy_from_slice(&ret_rax.to_le_bytes());
                                     self.fd.gpa_write(&mut arg).unwrap();
@@ -1049,7 +1036,7 @@ impl cpu::Vcpu for MshvVcpu {
                                 }
                             }
                             _ => {
-                                panic!("Unhandled exit code: {:0x}", _exit_code);
+                                panic!("Unhandled exit code: {:0x}", exit_code);
                             }
                         }
                     } else {
