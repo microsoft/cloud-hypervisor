@@ -457,6 +457,7 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    #[cfg(feature = "snp")]
     snp_enabled: bool,
 }
 
@@ -499,15 +500,12 @@ impl Vm {
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
-        #[cfg(feature = "snp")]
-        let mut force_iommu = true;
         #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
         let force_iommu = false;
-        let snp_enabled = false;
         #[cfg(feature = "snp")]
-        let snp_enabled = {
-            force_iommu = snp_enabled;
-            config.lock().unwrap().is_snp_enabled()
+        let (snp_enabled, force_iommu) = {
+            let v = config.lock().unwrap().is_snp_enabled();
+            (v, v)
         };
 
         #[cfg(feature = "guest_debug")]
@@ -541,6 +539,7 @@ impl Vm {
             #[cfg(feature = "tdx")]
             tdx_enabled,
             &numa_nodes,
+            #[cfg(feature = "snp")]
             snp_enabled,
         )
         .map_err(Error::CpuManager)?;
@@ -669,6 +668,7 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            #[cfg(feature = "snp")]
             snp_enabled,
         })
     }
@@ -781,7 +781,6 @@ impl Vm {
             vm_config.lock().unwrap().is_tdx_enabled()
         };
 
-        let snp_enabled = false;
         #[cfg(feature = "snp")]
         let snp_enabled = if snapshot.is_some() {
             false
@@ -828,6 +827,7 @@ impl Vm {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc_config,
+                #[cfg(feature = "snp")]
                 snp_enabled,
             )
             .map_err(Error::MemoryManager)?
@@ -1089,14 +1089,14 @@ impl Vm {
         trace_scoped!("load_payload");
         let firmware = &payload.firmware;
         let kernel = &payload.kernel;
-        let igvm: Option<std::path::PathBuf> = None;
+        let _igvm: Option<std::path::PathBuf> = None;
         #[cfg(feature = "igvm")]
-        let igvm = &payload.igvm;
+        let _igvm = &payload.igvm;
         #[cfg(feature = "snp")]
         let host_data = &payload.host_data;
         #[cfg(feature = "igvm")]
         {
-            if kernel.is_some() && igvm.is_some() {
+            if kernel.is_some() && _igvm.is_some() {
                 // Providing both Kernel and IGVM is wrong
                 panic!("Invalid playload: Either igvm or kernel should be provided");
             }
@@ -1108,10 +1108,10 @@ impl Vm {
             let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
             let cmdline = Self::generate_cmdline(payload)?;
             return Self::load_kernel(kernel, Some(cmdline), memory_manager);
-        } else if igvm.is_some() {
+        } else if _igvm.is_some() {
             #[cfg(feature = "igvm")]
             {
-                let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
+                let igvm = File::open(_igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
                 #[cfg(feature = "snp")]
                 {
                     if let Some(host_data_str) = host_data {
@@ -2168,7 +2168,15 @@ impl Vm {
         #[cfg(target_arch = "aarch64")]
         let rsdp_addr = self.create_acpi_tables();
 
-        if !self.snp_enabled {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "snp")] {
+                let normal_boot = !self.snp_enabled;
+            } else {
+                let normal_boot = true;
+            }
+        }
+
+        if normal_boot {
             // Configure shared state based on loaded kernel
             entry_point
                 .map(|_| {
@@ -2201,7 +2209,7 @@ impl Vm {
         // userspace mappings to update the hypervisor about the memory mappings.
         // These mappings must be created before we start the vCPU threads for
         // the very first time.
-        if !self.snp_enabled {
+        if normal_boot {
             self.memory_manager
                 .lock()
                 .unwrap()

@@ -443,7 +443,7 @@ impl MemoryManager {
         zones: &[MemoryZoneConfig],
         prefault: Option<bool>,
         thp: bool,
-        _snp_enabled: bool,
+        #[cfg(feature = "snp")] _snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut zones = zones.to_owned();
         let mut mem_regions = Vec::new();
@@ -556,7 +556,7 @@ impl MemoryManager {
         prefault: Option<bool>,
         mut existing_memory_files: HashMap<u32, File>,
         thp: bool,
-        _snp_enabled: bool,
+        #[cfg(feature = "snp")] _snp_enabled: bool,
     ) -> Result<(Vec<Arc<GuestRegionMmap>>, MemoryZones), Error> {
         let mut memory_regions = Vec::new();
         let mut memory_zones = HashMap::new();
@@ -886,7 +886,7 @@ impl MemoryManager {
         restore_data: Option<&MemoryManagerSnapshotData>,
         existing_memory_files: Option<HashMap<u32, File>>,
         #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
-        snp_enabled: bool,
+        #[cfg(feature = "snp")] snp_enabled: bool,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         trace_scoped!("MemoryManager::new");
 
@@ -923,6 +923,7 @@ impl MemoryManager {
                 prefault,
                 existing_memory_files.unwrap_or_default(),
                 config.thp,
+                #[cfg(feature = "snp")]
                 snp_enabled,
             )?;
             let guest_memory =
@@ -965,6 +966,7 @@ impl MemoryManager {
                 &zones,
                 prefault,
                 config.thp,
+                #[cfg(feature = "snp")]
                 snp_enabled,
             )?;
 
@@ -1197,6 +1199,7 @@ impl MemoryManager {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 None,
+                #[cfg(feature = "snp")]
                 false,
             )?;
 

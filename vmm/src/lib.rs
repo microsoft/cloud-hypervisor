@@ -1229,7 +1229,6 @@ impl Vmm {
         })?;
 
         let phys_bits = vm::physical_bits(config.lock().unwrap().cpus.max_phys_bits);
-        let snp_enabled = false;
         #[cfg(feature = "snp")]
         let snp_enabled = config.lock().unwrap().is_snp_enabled();
 
@@ -1244,6 +1243,7 @@ impl Vmm {
             existing_memory_files,
             #[cfg(target_arch = "x86_64")]
             None,
+            #[cfg(feature = "snp")]
             snp_enabled,
         )
         .map_err(|e| {

@@ -480,6 +480,7 @@ pub struct CpuManager {
     proximity_domain_per_cpu: BTreeMap<u8, u32>,
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
+    #[cfg(feature = "snp")]
     snp_enabled: bool,
 }
 
@@ -627,7 +628,7 @@ impl CpuManager {
         vm_ops: Arc<dyn VmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         numa_nodes: &NumaNodes,
-        snp_enabled: bool,
+        #[cfg(feature = "snp")] snp_enabled: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         if u32::from(config.max_vcpus) > hypervisor.get_max_vcpus() {
             return Err(Error::MaximumVcpusExceeded);
@@ -717,6 +718,7 @@ impl CpuManager {
             proximity_domain_per_cpu,
             affinity,
             dynamic,
+            #[cfg(feature = "snp")]
             snp_enabled,
         })))
     }
@@ -793,24 +795,25 @@ impl CpuManager {
 
     pub fn configure_vcpu(
         &self,
-        vcpu: Arc<Mutex<Vcpu>>,
-        boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
+        _vcpu: Arc<Mutex<Vcpu>>,
+        _boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(feature = "igvm")] vmsa: Option<SEV_VMSA>,
         #[cfg(feature = "snp")] vmsa_pfn: u64,
     ) -> Result<()> {
-        let mut vcpu = vcpu.lock().unwrap();
+        #[cfg(feature = "snp")]
+        let mut vcpu = _vcpu.lock().unwrap();
 
         #[cfg(feature = "snp")]
         if self.snp_enabled {
             vcpu.set_sev_control_register(vmsa_pfn)?;
         }
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "snp"))]
         if !self.snp_enabled {
             assert!(!self.cpuid.is_empty());
 
             vcpu.configure(
-                boot_setup,
+                _boot_setup,
                 self.cpuid.clone(),
                 self.config.kvm_hyperv,
                 #[cfg(feature = "igvm")]
@@ -818,7 +821,7 @@ impl CpuManager {
             )?;
         }
         #[cfg(target_arch = "aarch64")]
-        vcpu.configure(&self.vm, boot_setup)?;
+        vcpu.configure(&self.vm, _boot_setup)?;
 
         Ok(())
     }
