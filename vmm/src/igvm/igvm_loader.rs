@@ -2,15 +2,13 @@
 
 //! Loader implementation to load IGVM files.
 
-use crate::cpu::{CpuManager, Error as CpuManagerError};
+use crate::cpu::CpuManager;
 use crate::igvm::loader::ImageLoad;
 use crate::igvm::loader::Loader;
 use crate::igvm::IgvmLoadedInfo;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::ArchMemRegion;
 use arch::RegionType;
-use hypervisor::mshv::*;
-use igvm_parser::hvdef::Vtl;
 use igvm_parser::igvm::IgvmFile;
 use igvm_parser::igvm::IgvmPageDataType;
 use igvm_parser::igvm::IgvmPlatformHeader;
@@ -18,22 +16,14 @@ use igvm_parser::igvm::IgvmPlatformType;
 use igvm_parser::igvm::IgvmRelocatableRegion;
 use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_MEMORY;
 use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_PLATFORM_RESERVED;
-use igvm_parser::igvm::IGVM_VHF_MEMORY_MAP_ENTRY_TYPE_VTL2_PROTECTABLE;
 use igvm_parser::igvm::IGVM_VHF_PAGE_DATA_FLAGS_UNMEASURED;
 use igvm_parser::igvm::IGVM_VHF_REQUIRED_MEMORY_FLAGS_VTL2_PROTECTABLE;
 use igvm_parser::igvm::IGVM_VHS_MEMORY_MAP_ENTRY;
-use igvm_parser::igvm::IGVM_VHS_MEMORY_RANGE;
-use igvm_parser::igvm::IGVM_VHS_MMIO_RANGES;
 use igvm_parser::igvm::IGVM_VHS_PARAMETER;
 use igvm_parser::igvm::IGVM_VHS_PARAMETER_INSERT;
 use igvm_parser::importer::BootPageAcceptance;
-use igvm_parser::importer::Register;
 use igvm_parser::importer::StartupMemoryType;
-use igvm_parser::importer::TableRegister;
 use igvm_parser::importer::HV_PAGE_SIZE;
-use igvm_parser::map_range::RangeMap;
-use igvm_parser::memlayout::MemoryRange;
-use igvm_parser::page_table::CpuPagingState;
 use igvm_parser::snp::SEV_VMSA;
 pub use mshv_bindings::*;
 use std::collections::HashMap;
@@ -44,9 +34,6 @@ use std::io::SeekFrom;
 use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use vm_memory::bitmap::AtomicBitmap;
-use vm_memory::GuestMemoryAtomic;
-use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryMmap};
 use zerocopy::AsBytes;
 
 #[derive(Debug, Error)]
@@ -87,14 +74,6 @@ pub enum Error {
     CompleteIsolatedImport(#[source] hypervisor::HypervisorVmError),
 }
 
-fn from_memory_range(range: &MemoryRange) -> IGVM_VHS_MEMORY_RANGE {
-    assert!(range.len() % HV_PAGE_SIZE == 0);
-    IGVM_VHS_MEMORY_RANGE {
-        starting_gpa_page_number: range.start() / HV_PAGE_SIZE,
-        number_of_pages: range.len() / HV_PAGE_SIZE,
-    }
-}
-
 fn memory_map_entry(range: &ArchMemRegion) -> IGVM_VHS_MEMORY_MAP_ENTRY {
     assert!(range.size as u64 % HV_PAGE_SIZE == 0);
     if range.r_type == RegionType::Ram {
@@ -123,6 +102,7 @@ pub struct AcpiTables<'a> {
     pub pptt: Option<&'a [u8]>,
 }
 
+#[allow(dead_code)]
 struct GpaPages {
     pub gpa: u64,
     pub page_type: u32,
@@ -217,8 +197,6 @@ pub fn load_igvm(
         Ok(())
     };
 
-    let mut page_table_cpu_state: Option<CpuPagingState> = None;
-
     for header in igvm_file.directives() {
         debug_assert!(header.compatibility_mask().unwrap_or(mask) & mask == mask);
 
@@ -272,7 +250,6 @@ pub fn load_igvm(
                             let cpuid_page_p: *mut hv_psp_cpuid_page =
                                 data.as_ptr() as *mut hv_psp_cpuid_page; // as *mut hv_psp_cpuid_page;
                             let cpuid_page: &mut hv_psp_cpuid_page = &mut *cpuid_page_p;
-                            let i: usize = 0; /* Type usize */
                             for i in 0..cpuid_page.count {
                                 let leaf = cpuid_page.cpuid_leaf_info[i as usize];
                                 let mut in_leaf = cpu_manager
@@ -357,7 +334,7 @@ pub fn load_igvm(
             //         warn!("igvm file requested a PPTT, but no PPTT was provided")
             //     }
             // }
-            igvm_parser::igvm::IgvmDirectiveHeader::MmioRanges(info) => {
+            igvm_parser::igvm::IgvmDirectiveHeader::MmioRanges(_info) => {
                 todo!("unsupported IgvmPageDataType");
             }
             igvm_parser::igvm::IgvmDirectiveHeader::MemoryMap(info) => {
@@ -401,7 +378,7 @@ pub fn load_igvm(
             }
             igvm_parser::igvm::IgvmDirectiveHeader::SnpVpContext {
                 gpa,
-                compatibility_mask,
+                compatibility_mask: _,
                 vp_index,
                 vmsa,
             } => {
@@ -459,8 +436,8 @@ pub fn load_igvm(
                 loaded_info.snp_id_block.author_public_key = **author_public_key;
             }
             igvm_parser::igvm::IgvmDirectiveHeader::VbsVpContext {
-                vtl,
-                registers,
+                vtl: _,
+                registers: _,
                 compatibility_mask: _,
             } => {
                 todo!("VbsVpContext not supported");

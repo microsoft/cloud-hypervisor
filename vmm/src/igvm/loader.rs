@@ -172,9 +172,6 @@ impl Loader {
         }
     }
 
-    pub fn get_initial_regs(self) -> Vec<Register> {
-        self.regs.into_values().collect()
-    }
     /// Accept a new page range with a given acceptance into the map of accepted ranges.
     pub fn accept_new_range(
         &mut self,
@@ -231,7 +228,7 @@ impl ImageLoad for Loader {
         self.memory
             .memory()
             .write(data, GuestAddress(page_base * HV_PAGE_SIZE))
-            .map_err(|e| {
+            .map_err(|_| {
                 debug!("Importing pages failed due to MemoryError");
                 Error::MemoryUnavailable
             })?;
