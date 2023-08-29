@@ -18,6 +18,7 @@ use std::{
     thread,
     time::Duration,
 };
+use std::env;
 use test_infra::FioOps;
 use thiserror::Error;
 
@@ -220,7 +221,11 @@ impl PerformanceTest {
     // Calculate the timeout for each test
     // Note: To cover the setup/cleanup time, 20s is added for each iteration of the test
     pub fn calc_timeout(&self, test_iterations: &Option<u32>, test_timeout: &Option<u32>) -> u64 {
-        ((test_timeout.unwrap_or(self.control.test_timeout) + 20)
+        let mut setup_time = 20;
+        if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+            setup_time = 100;
+        }
+        ((test_timeout.unwrap_or(self.control.test_timeout) + setup_time)
             * test_iterations.unwrap_or(self.control.test_iterations)) as u64
     }
 }
@@ -637,6 +642,10 @@ fn run_test_with_timeout(
 fn date() -> String {
     let output = test_infra::exec_host_command_output("date");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn get_env_var(var_name: &str) -> Option<String> {
+    env::var(var_name).ok()
 }
 
 #[derive(FromArgs)]

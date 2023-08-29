@@ -6,7 +6,10 @@
 // Performance tests
 
 use crate::{mean, PerformanceTestControl};
+use rand::{Rng, thread_rng};
+use std::env;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::string::String;
 use std::thread;
@@ -76,6 +79,47 @@ fn direct_kernel_boot_path() -> PathBuf {
     kernel_path
 }
 
+fn direct_igvm_boot_path(console: Option<&str>) -> PathBuf {
+    // get the default hvc0 igvm file if console string is not passed
+    let console_str = match console {
+        Some(t) => t,
+        None => "hvc0",
+    };
+
+    if console_str != "hvc0" && console_str != "ttyS0" {
+        panic!("{}", format!("IGVM console should be hvc0 or ttyS0, got: {console_str}"));
+    }
+
+    // Path /igvm_files in docker volume maps to host vm path /usr/share/cloud-hypervisor/cvm
+    // Please add directory as volume to docker container as /igvm_files
+    // Refer ./scripts/dev_cli.sh for this
+    let igvm_filepath = format!("/igvm_files/linux-{console_str}.bin");
+    let igvm_path_exist = Path::new(&igvm_filepath);
+    if igvm_path_exist.exists() {
+        let path = PathBuf::from(
+            igvm_filepath
+        );
+
+        path
+    } else {
+        panic!("{}", format!("IGVM File not found at path: {igvm_filepath}"));
+    }
+}
+
+fn generate_host_data() -> String {
+    let mut rng = thread_rng();
+    let hex_string: String = (0..64)
+        .map(|_| rng.gen_range(0..=15))
+        .map(|num| format!("{:x}", num))
+        .collect();
+
+    hex_string
+}
+
+fn get_env_var(var_name: &str) -> Option<String> {
+    env::var(var_name).ok()
+}
+
 pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
     let test_timeout = control.test_timeout;
     let (rx, bandwidth) = control.net_control.unwrap();
@@ -90,19 +134,24 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
         guest.network.guest_mac, guest.network.host_ip, num_queues, queue_size,
     );
 
-    let mut child = GuestCommand::new(&guest)
-        .args(["--cpus", &format!("boot={num_queues}")])
+    let mut cmd = GuestCommand::new(&guest);
+    cmd.args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-        .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
-        .spawn()
-        .unwrap();
+        .set_print_cmd(false);
+    if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+        cmd.args(["--igvm", direct_igvm_boot_path(Some("hvc0")).to_str().unwrap()]);
+        cmd.args(["--host-data", generate_host_data().as_str()]);
+        cmd.args(["--platform", "snp=on"]);
+    } else {
+        cmd.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+        cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    }
 
+    let mut child = cmd.spawn().unwrap();
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
         measure_virtio_net_throughput(test_timeout, num_queues / 2, &guest, rx, bandwidth).unwrap()
@@ -131,18 +180,24 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
         guest.network.guest_mac, guest.network.host_ip, num_queues, queue_size,
     );
 
-    let mut child = GuestCommand::new(&guest)
-        .args(["--cpus", &format!("boot={num_queues}")])
+    let mut cmd = GuestCommand::new(&guest);
+    cmd.args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-        .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
-        .spawn()
-        .unwrap();
+        .set_print_cmd(false);
+    if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+        cmd.args(["--igvm", direct_igvm_boot_path(Some("hvc0")).to_str().unwrap()]);
+        cmd.args(["--host-data", generate_host_data().as_str()]);
+        cmd.args(["--platform", "snp=on"]);
+    } else {
+        cmd.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+        cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    }
+
+    let mut child = cmd.spawn().unwrap();
 
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
@@ -281,10 +336,17 @@ pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
                 &format!("boot={}", control.num_boot_vcpus.unwrap_or(1)),
             ])
             .args(["--memory", "size=1G"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
             .args(["--console", "off"])
             .default_disks();
+
+        if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+            c.args(["--igvm", direct_igvm_boot_path(Some("hvc0")).to_str().unwrap()]);
+            c.args(["--host-data", generate_host_data().as_str()]);
+            c.args(["--platform", "snp=on"]);
+        } else {
+            c.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+            c.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+        }
 
         measure_boot_time(c, control.test_timeout).unwrap()
     });
@@ -308,8 +370,6 @@ pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
                 &format!("boot={}", control.num_boot_vcpus.unwrap_or(1)),
             ])
             .args(["--memory", "size=1G,hugepages=on"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", "root=/dev/pmem0p1 console=ttyS0 quiet rw"])
             .args(["--console", "off"])
             .args([
                 "--pmem",
@@ -319,6 +379,14 @@ pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
                 )
                 .as_str(),
             ]);
+        if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+            c.args(["--igvm", direct_igvm_boot_path(Some("hvc0")).to_str().unwrap()]);
+            c.args(["--host-data", generate_host_data().as_str()]);
+            c.args(["--platform", "snp=on"]);
+        } else {
+            c.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+            c.args(["--cmdline", "root=/dev/pmem0p1 console=ttyS0 quiet rw"]);
+        }
 
         measure_boot_time(c, control.test_timeout).unwrap()
     });
@@ -346,11 +414,9 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
         .unwrap()
         .to_string();
 
-    let mut child = GuestCommand::new(&guest)
-        .args(["--cpus", &format!("boot={num_queues}")])
+    let mut cmd = GuestCommand::new(&guest);
+    cmd.args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-        .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
         .args([
             "--disk",
             format!(
@@ -371,10 +437,18 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
         .args(["--api-socket", &api_socket])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
-        .set_print_cmd(false)
-        .spawn()
-        .unwrap();
+        .set_print_cmd(false);
+    
+    if get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string()) {
+        cmd.args(["--igvm", direct_igvm_boot_path(Some("hvc0")).to_str().unwrap()]);
+        cmd.args(["--host-data", generate_host_data().as_str()]);
+        cmd.args(["--platform", "snp=on"]);
+    } else {
+        cmd.args(["--kernel", direct_kernel_boot_path().to_str().unwrap()]);
+        cmd.args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE]);
+    }
 
+    let mut child = cmd.spawn().unwrap();
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
 

@@ -39,6 +39,8 @@ hypervisor = { path = "hypervisor" }
 libc = "0.2.139"
 log = { version = "0.4.17", features = ["std"] }
 option_parser = { path = "option_parser" }
+rand = "0.8"
+regex = "1.5"
 seccompiler = "0.3.0"
 serde_json = "1.0.96"
 signal-hook = "0.3.15"
