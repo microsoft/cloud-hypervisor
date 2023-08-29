@@ -377,6 +377,8 @@ pub struct MshvVcpu {
     vm_fd: Arc<VmFd>,
     #[cfg(feature = "snp")]
     host_access_pages: Arc<SimpleAtomicBitmap>,
+    #[cfg(feature = "snp")]
+    debug_print_str: std::sync::Mutex<String>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -799,11 +801,15 @@ impl cpu::Vcpu for MshvVcpu {
                         set_registers_64!(self.fd, arr_reg_name_value)
                             .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     } else if op == GHCB_INFO_SPECIAL_DBGPRINT as u64 {
-                        let data = unsafe { ghcb_msr.as_uint64 } >> 16;
+                        let data = unsafe { ghcb_msr.as_uint64 };
                         let bytes = data.to_le_bytes();
-                        // if let Ok(s) = std::str::from_utf8(bytes.as_slice()) {
-                        //     print!("{}", s);
-                        // }
+                        if let Ok(s) = std::str::from_utf8(&bytes[2..8]) {
+                            self.debug_print_str.lock().unwrap().push_str(s);
+                            if let Some(_) = s.find('\n') {
+                                print!("{}\n", self.debug_print_str.lock().unwrap());
+                                self.debug_print_str.lock().unwrap().clear();
+                            }
+                        }
                     } else if op == GHCB_INFO_NORMAL as u64 {
                         // SAFETY: access_info is valid, otherwise we won't be here
                         let _exit_code =
@@ -1523,6 +1529,8 @@ impl vm::Vm for MshvVm {
             vm_fd: self.fd.clone(),
             #[cfg(feature = "snp")]
             host_access_pages: self.host_access_pages.clone(),
+            #[cfg(feature = "snp")]
+            debug_print_str: std::sync::Mutex::new(String::from("")),
         };
         Ok(Arc::new(vcpu))
     }
