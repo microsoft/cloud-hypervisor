@@ -67,16 +67,7 @@ const DIRECT_KERNEL_BOOT_CMDLINE: &str =
 // For x86_64, this function returns the vmlinux kernel path.
 // For AArch64, this function returns the PE kernel path.
 fn direct_kernel_boot_path() -> PathBuf {
-    let mut workload_path = dirs::home_dir().unwrap();
-    workload_path.push("workloads");
-
-    let mut kernel_path = workload_path;
-    #[cfg(target_arch = "x86_64")]
-    kernel_path.push("vmlinux");
-    #[cfg(target_arch = "aarch64")]
-    kernel_path.push("Image");
-
-    kernel_path
+    PathBuf::from(r"/root/workloads/vmlinux.bin")
 }
 
 fn direct_igvm_boot_path(console: Option<&str>) -> PathBuf {

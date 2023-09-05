@@ -227,6 +227,7 @@ dependencies = [
  "once_cell",
  "option_parser",
  "rand",
+ "regex",
  "seccompiler",
  "serde_json",
  "signal-hook",
@@ -934,6 +935,7 @@ version = "0.1.0"
 dependencies = [
  "argh",
  "dirs",
+ "rand",
  "serde",
  "serde_json",
  "test_infra",
@@ -1396,6 +1398,7 @@ dependencies = [
  "epoll",
  "libc",
  "once_cell",
+ "rand",
  "serde",
  "serde_json",
  "ssh2",

@@ -23,6 +23,8 @@ CLH_CTR_BUILD_DIR="/tmp/cloud-hypervisor/ctr-build"
 CLH_INTEGRATION_WORKLOADS="${HOME}/workloads"
 SRC_IGVM_FILES_PATH="/usr/share/cloud-hypervisor/cvm"
 DEST_IGVM_FILES_PATH="$CLH_INTEGRATION_WORKLOADS/igvm_files"
+SRC_KERNEL_FILES_PATH="/usr/share/cloud-hypervisor/vmlinux.bin"
+DEST_KERNEL_FILES_PATH="$CLH_INTEGRATION_WORKLOADS/vmlinux.bin"
 
 # Container paths
 CTR_CLH_ROOT_DIR="/cloud-hypervisor"
@@ -184,6 +186,20 @@ process_igvm_files() {
         cp $src/* $dest
     else
         say_err "IGVM File path '$src' not found on host"
+        exit 1
+    fi
+
+}
+
+process_kernel_files() {
+    src=$1
+    dest=$2
+
+    if [ -f $src ]; then
+        say "Moving Kernel files from $src to $dest"
+        cp $src $dest
+    else
+        say_err "Kernel File path '$src' not found on host"
         exit 1
     fi
 
@@ -441,6 +457,8 @@ cmd_tests() {
             process_igvm_files $SRC_IGVM_FILES_PATH $DEST_IGVM_FILES_PATH
         fi
 
+        process_kernel_files $SRC_KERNEL_FILES_PATH $DEST_KERNEL_FILES_PATH
+
         say "Running integration tests for $target..."
         $DOCKER_RUNTIME run \
             --workdir "$CTR_CLH_ROOT_DIR" \
@@ -569,6 +587,8 @@ cmd_tests() {
         if [ "$GUEST_VM_TYPE" = "CVM" ]; then
             process_igvm_files $SRC_IGVM_FILES_PATH $DEST_IGVM_FILES_PATH
         fi
+
+        process_kernel_files $SRC_KERNEL_FILES_PATH $DEST_KERNEL_FILES_PATH
 
         say "Generating performance metrics for $target..."
         $DOCKER_RUNTIME run \
