@@ -533,6 +533,24 @@ pub fn load_igvm(
 
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
+        let mut vec_gpa = Vec::new();
+        for gpa in gpas.iter() {
+            vec_gpa.push(gpa.gpa);
+        }
+
+        memory_manager
+            .lock()
+            .unwrap()
+            .vm
+            .map_regions(vec_gpa.as_slice())
+            .map_err(Error::ImportIsolatedPages)?;
+
+        let elapsed = now.elapsed();
+
+        let now = Instant::now();
+
+        info!("Time it took to map address space {:.2?}", elapsed);
+
         for gpa in gpas.iter() {
             memory_manager
                 .lock()
