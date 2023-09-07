@@ -226,6 +226,11 @@ pub enum HypervisorVmError {
     #[error("Failed to import isolated pages: {0}")]
     ImportIsolatedPages(#[source] anyhow::Error),
     ///
+    /// Import isolated pages error
+    ///
+    #[error("Failed to map regions: {0}")]
+    MapRegions(#[source] anyhow::Error),
+    ///
     /// Modify GPA host access error
     ///
     #[error("Failed to modify GPA host access: {0}")]
@@ -382,6 +387,9 @@ pub trait Vm: Send + Sync + Any {
     }
     #[cfg(feature = "snp")]
     fn import_isolated_pages(&self, page_type: u32, page_size: u32, pages: &[u64]) -> Result<()> {
+        unimplemented!()
+    }
+    fn map_regions(&self, pages: &[u64]) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "snp")]

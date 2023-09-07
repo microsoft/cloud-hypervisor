@@ -1759,6 +1759,28 @@ impl vm::Vm for MshvVm {
             )
             .map_err(|e| vm::HypervisorVmError::SnpInit(e.into()))
     }
+    fn map_regions(
+        &self,
+        pages: &[u64],
+    ) -> vm::Result<()> {
+        if pages.len() == 0 {
+            return Ok(());
+        }
+
+        let mut map_regions =
+            vec_with_array_field::<mshv_map_regions, u64>(pages.len());
+        map_regions[0].gpa_list_size = pages.len() as u64;
+        // SAFETY: isolated_pages initialized with pages.len() and now it is being turned into
+        // pages_slice with pages.len() again. It is guaranteed to be large enough to hold
+        // everything from pages.
+        unsafe {
+            let pages_slice: &mut [u64] = map_regions[0].gpa_list.as_mut_slice(pages.len());
+            pages_slice.copy_from_slice(&pages);
+        }
+        self.fd
+            .map_regions(&map_regions[0])
+            .map_err(|e| vm::HypervisorVmError::MapRegions(e.into()))
+    }
     #[cfg(feature = "snp")]
     fn import_isolated_pages(
         &self,
