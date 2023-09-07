@@ -534,9 +534,35 @@ pub fn load_igvm(
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
         let mut vec_gpa = Vec::new();
+
         for gpa in gpas.iter() {
             vec_gpa.push(gpa.gpa);
         }
+
+        let mut i = 0;
+        while true {
+            if i > vec_gpa.len() {
+                break;
+            }
+            let mut size = i + 10;
+            if size > vec_gpa.len() {
+                size = vec_gpa.len();
+            }
+            memory_manager
+                .lock()
+                .unwrap()
+                .vm
+                .modify_gpa_host_access(
+                    0,
+                    HV_MODIFY_SPA_PAGE_HOST_ACCESS_MAKE_EXCLUSIVE,
+                    0,
+                    &vec_gpa[i..size],
+                )
+                .map_err(Error::ModifyHostAccess);
+            i += 10;
+        }
+
+        vec_gpa = Vec::new();
 
         memory_manager
             .lock()
@@ -566,7 +592,11 @@ pub fn load_igvm(
 
         let elapsed = now.elapsed();
 
-        info!("Time it took to for hashing pages {:.2?} and page_count {:?}", elapsed, gpas.len());
+        info!(
+            "Time it took to for hashing pages {:.2?} and page_count {:?}",
+            elapsed,
+            gpas.len()
+        );
 
         let now = Instant::now();
         // Call Complete Isolated Import since we are done importing isolated pages
@@ -579,7 +609,10 @@ pub fn load_igvm(
 
         let elapsed = now.elapsed();
 
-        info!("Time it took to for launch complete command  {:.2?}", elapsed);
+        info!(
+            "Time it took to for launch complete command  {:.2?}",
+            elapsed
+        );
     }
     debug!("Loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);
     Ok(loaded_info)

@@ -1763,10 +1763,6 @@ impl vm::Vm for MshvVm {
         &self,
         pages: &[u64],
     ) -> vm::Result<()> {
-        if pages.len() == 0 {
-            return Ok(());
-        }
-
         let mut map_regions =
             vec_with_array_field::<mshv_map_regions, u64>(pages.len());
         map_regions[0].gpa_list_size = pages.len() as u64;
