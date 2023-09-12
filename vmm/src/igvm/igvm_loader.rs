@@ -524,6 +524,7 @@ pub fn load_igvm(
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
         for gpa in gpas.iter() {
+            println!("{}: {}", gpa.gpa, gpa.page_type);
             memory_manager
                 .lock()
                 .unwrap()
