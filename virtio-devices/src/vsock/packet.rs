@@ -129,7 +129,7 @@ impl VsockPacket {
         if head.len() < VSOCK_PKT_HDR_SIZE as u32 {
             return Err(VsockError::HdrDescTooSmall(head.len()));
         }
-
+        
         let mut pkt = Self {
             hdr: get_host_address_range(
                 desc_chain.memory(),
@@ -172,6 +172,7 @@ impl VsockPacket {
         }
 
         pkt.buf_size = buf_desc.len() as usize;
+        debug!("MUISLAM: from_tx_virtq_head: header: {:0x} Size: {:0x}--- Bufer: {:0x} Size: {:0x}", head.addr().0, head.len(), buf_desc.addr().0, buf_desc.len());
         pkt.buf = Some(
             get_host_address_range(
                 desc_chain.memory(),
@@ -222,7 +223,7 @@ impl VsockPacket {
         }
         let buf_desc = desc_chain.next().ok_or(VsockError::BufDescMissing)?;
         let buf_size = buf_desc.len() as usize;
-
+        debug!("MUISLAM: from_rx_virtq_head: header: {:0x} Size: {:0x}--- Bufer: {:0x} Size: {:0x}", head.addr().0, head.len(), buf_desc.addr().0, buf_desc.len());
         Ok(Self {
             hdr: get_host_address_range(
                 desc_chain.memory(),

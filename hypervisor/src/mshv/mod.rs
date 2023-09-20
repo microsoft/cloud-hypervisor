@@ -1865,15 +1865,26 @@ impl vm::Vm for MshvVm {
             return Ok(());
         }
 
-        let start_gpfn: u64 = gpa >> PAGE_SHIFT;
+        let mut start_gpfn: u64 = gpa >> PAGE_SHIFT;
         let end_gpfn: u64 = (gpa + size as u64 - 1) >> PAGE_SHIFT;
-
+        debug!("MUISLAM: ********** gain_page_access: base gpa: {:0x} size: {:0x}, start_pfn: {:0x} end_pfn: {:0x}", gpa, size, start_gpfn, end_gpfn);
+        /*
         let gpa_list: Vec<u64> = (start_gpfn..=end_gpfn)
             .into_iter()
             .filter(|x| !self.host_access_pages.is_bit_set(*x as usize))
             .map(|x| x << PAGE_SHIFT)
             .collect();
-
+        */
+        let mut gpa_list: Vec<u64> = Vec::new();
+        while (start_gpfn <= end_gpfn) {
+            if !self.host_access_pages.is_bit_set(start_gpfn as usize) {
+                gpa_list.push(start_gpfn << PAGE_SHIFT);
+            }
+            start_gpfn = start_gpfn + 1;
+        }
+        for gpa in gpa_list.iter() {
+            debug!("MUISLAM: ************* each gpa: {:0x} pfn: {:0x}", gpa, (gpa >> PAGE_SHIFT));
+        }
         if gpa_list.len() > 0 {
             _modify_gpa_host_access(
                 self.fd.clone(),
@@ -1883,9 +1894,13 @@ impl vm::Vm for MshvVm {
                 gpa_list.as_slice(),
             )
             .unwrap();
+            debug!("MUISLAM: ------------- start ------------------");
+
             for gpa in gpa_list {
+                debug!("MUISLAM: each gpa: {:0x} pfn: {:0x}", gpa, (gpa >> PAGE_SHIFT));
                 self.host_access_pages.set_bit((gpa >> PAGE_SHIFT) as usize);
             }
+            debug!("MUISLAM: ------------- end ------------------")
         }
 
         Ok(())

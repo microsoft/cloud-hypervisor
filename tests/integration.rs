@@ -1496,6 +1496,11 @@ fn get_fd_count(pid: u32) -> usize {
 fn _test_virtio_vsock(hotplug: bool) {
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = Guest::new(Box::new(focal));
+    let mut workload_path = dirs::home_dir().unwrap();
+    workload_path.push("workloads");
+
+    let mut log_file_path = workload_path;
+    log_file_path.push("clh.log");
 
     #[cfg(target_arch = "x86_64")]
     let kernel_path = direct_kernel_boot_path();
@@ -1513,6 +1518,7 @@ fn _test_virtio_vsock(hotplug: bool) {
     cmd.args(["--api-socket", &api_socket]);
     cmd.args(["--cpus", "boot=1"]);
     cmd.args(["--memory", "size=512M"]);
+    cmd.args(["--log-file", log_file_path.to_str().unwrap()]);
     cmd.default_disks();
     cmd.default_net();
 
@@ -4257,7 +4263,7 @@ mod common_parallel {
     }
 
     #[test]
-    fn test_virtio_vsock() {
+    fn test_virtio_vsock_normal() {
         _test_virtio_vsock(false)
     }
 

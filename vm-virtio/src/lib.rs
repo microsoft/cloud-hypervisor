@@ -265,9 +265,10 @@ pub fn clone_queue(
     let mut desc_a = GuestAddress(queue.desc_table());
     let mut avail_a = GuestAddress(queue.avail_ring());
     let mut ring_a = GuestAddress(queue.used_ring());
-
+    debug!("MUISLAM: Clone Queue: desc: {:0x} avail: {:0x} used: {:0x}", desc_a.0, avail_a.0, ring_a.0);
     #[cfg(all(feature = "mshv", feature = "snp"))]
     if let Some(_vm) = vm {
+        debug!("MUISLAM: clone_queue inside vm");
         desc_a = desc_a.translate_gva_with_vmfd(
             None,
             get_vring_size(VringType::VRING_DESC, queue.size()) as usize,

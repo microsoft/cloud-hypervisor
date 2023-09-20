@@ -1242,7 +1242,7 @@ impl<'a> GuestCommand<'a> {
         match &self.verbosity {
             Warn => {}
             Info => {
-                self.command.arg("-v");
+                self.command.args(["-v", "-v"]);
             }
             Debug => {
                 self.command.args(["-v", "-v"]);

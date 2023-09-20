@@ -19,6 +19,28 @@ use vm_virtio::AccessPlatform;
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
 pub const MAX_QUEUE_SIZE: u32 = 32768;
 
+
+pub const VRING_DESC_ELEMENT_SIZE: usize = 16;
+
+pub const VRING_AVAIL_ELEMENT_SIZE: usize = 2;
+
+pub const VRING_USED_ELEMENT_SIZE: usize = 8;
+
+pub enum VringType {
+    VRING_DESC,
+    VRING_AVAIL,
+    VRING_USED,
+}
+
+pub fn get_vring_size(t: VringType, queue_size: u16) -> usize {
+    let (length_except_ring, element_size) = match t {
+        VringType::VRING_DESC => (0, VRING_DESC_ELEMENT_SIZE),
+        VringType::VRING_AVAIL => (6, VRING_AVAIL_ELEMENT_SIZE),
+        VringType::VRING_USED => (6, VRING_USED_ELEMENT_SIZE),
+    };
+    length_except_ring + element_size * queue_size as usize
+}
+
 #[derive(Clone, Versionize)]
 pub struct VirtioPciCommonConfigState {
     pub driver_status: u8,
@@ -304,6 +326,8 @@ impl VirtioPciCommonConfig {
         queues: &mut [Queue],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
+        let qs = queues[0].size();
+
         match offset {
             0x00 => self.device_feature_select = value,
             0x08 => self.driver_feature_select = value,
@@ -329,12 +353,13 @@ impl VirtioPciCommonConfig {
             }
             0x24 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
+
                 #[cfg(all(feature = "mshv", feature = "snp"))]
                 {
                     self.queue_addresses
                         .set_desc_table_address(None, Some(value), None);
                     self.vm
-                        .gain_page_access(self.queue_addresses.desc_table_address, 4096)
+                        .gain_page_access(self.queue_addresses.desc_table_address, get_vring_size(VringType::VRING_DESC, qs) as u32)
                         .unwrap()
                 }
             }
@@ -351,7 +376,7 @@ impl VirtioPciCommonConfig {
                     self.queue_addresses
                         .set_avail_ring_address(None, Some(value), None);
                     self.vm
-                        .gain_page_access(self.queue_addresses.avail_ring_address, 4096)
+                        .gain_page_access(self.queue_addresses.avail_ring_address, get_vring_size(VringType::VRING_AVAIL, qs) as u32)
                         .unwrap()
                 }
             }
@@ -368,7 +393,7 @@ impl VirtioPciCommonConfig {
                     self.queue_addresses
                         .set_used_ring_address(None, Some(value), None);
                     self.vm
-                        .gain_page_access(self.queue_addresses.used_ring_address, 4096)
+                        .gain_page_access(self.queue_addresses.used_ring_address, get_vring_size(VringType::VRING_USED, qs) as u32)
                         .unwrap()
                 }
             }
