@@ -6,6 +6,7 @@
 // Performance tests
 
 use crate::{mean, PerformanceTestControl};
+use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -107,7 +108,7 @@ fn direct_igvm_boot_path(console: Option<&str>) -> PathBuf {
     }
 }
 
-pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
+pub fn performance_net_throughput(control: &PerformanceTestControl) -> Vec<f64> {
     let test_timeout = control.test_timeout;
     let (rx, bandwidth) = control.net_control.unwrap();
 
@@ -150,7 +151,7 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
     let output = child.wait_with_output().unwrap();
 
     match r {
-        Ok(r) => r,
+        Ok(r) => Vec::from([r, 0.0, 0.0, 0.0, 0.0]),
         Err(e) => {
             handle_child_output(Err(e), &output);
             panic!("test failed!");
@@ -158,7 +159,7 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
     }
 }
 
-pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
+pub fn performance_net_latency(control: &PerformanceTestControl) -> Vec<f64> {
     let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
     let guest = performance_test_new_guest(Box::new(focal));
 
@@ -202,7 +203,7 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
     let output = child.wait_with_output().unwrap();
 
     match r {
-        Ok(r) => r,
+        Ok(r) => Vec::from([r, 0.0, 0.0, 0.0, 0.0]),
         Err(e) => {
             handle_child_output(Err(e), &output);
             panic!("test failed!");
@@ -289,7 +290,7 @@ fn parse_boot_time_output(output: &[u8]) -> Result<f64, Error> {
     })
 }
 
-fn measure_boot_time(cmd: &mut GuestCommand, test_timeout: u32) -> Result<f64, Error> {
+fn measure_boot_time(cmd: &mut GuestCommand, test_timeout: u32) -> Result<Vec<f64>, Error> {
     let mut child = cmd
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
@@ -305,21 +306,36 @@ fn measure_boot_time(cmd: &mut GuestCommand, test_timeout: u32) -> Result<f64, E
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
 
-    parse_boot_time_output(&output.stderr).map_err(|e| {
-        eprintln!(
-            "\n\n==== Start child stdout ====\n\n{}\n\n==== End child stdout ====",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        eprintln!(
-            "\n\n==== Start child stderr ====\n\n{}\n\n==== End child stderr ====",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let boot_time = std::panic::catch_unwind(|| {
+        parse_boot_time_output(&output.stderr).map_err(|e| {
+            eprintln!(
+                "\n\n==== Start child stdout ====\n\n{}\n\n==== End child stdout ====",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "\n\n==== Start child stderr ====\n\n{}\n\n==== End child stderr ====",
+                String::from_utf8_lossy(&output.stderr)
+            );
 
-        e
-    })
+            e
+        })
+    });
+
+    match boot_time {
+        Ok(boot_time) => Ok(Vec::from([
+            boot_time.unwrap_or_default(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ])),
+        Err(_) => {
+            panic!("test failed!");
+        }
+    }
 }
 
-pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
+pub fn performance_boot_time(control: &PerformanceTestControl) -> Vec<f64> {
     let r = std::panic::catch_unwind(|| {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = performance_test_new_guest(Box::new(focal));
@@ -354,7 +370,7 @@ pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
     }
 }
 
-pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
+pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> Vec<f64> {
     let r = std::panic::catch_unwind(|| {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = performance_test_new_guest(Box::new(focal));
@@ -388,7 +404,7 @@ pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
     }
 }
 
-pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
+pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
     let test_timeout = control.test_timeout;
     let num_queues = control.num_queues.unwrap();
     let (fio_ops, bandwidth) = control.fio_control.as_ref().unwrap();
@@ -464,12 +480,35 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
     let output = child.wait_with_output().unwrap();
 
     match r {
-        Ok(r) => r,
+        Ok(r) => Vec::from([r, 0.0, 0.0, 0.0, 0.0]),
         Err(e) => {
             handle_child_output(Err(e), &output);
             panic!("test failed!");
         }
     }
+}
+
+#[allow(dead_code)]
+pub fn get_cvm_boot_params(param: &str, output: String) -> f64 {
+    let re = match param {
+        "address_space_time" => Regex::new(r"Time it took to allocate address space (\d+\.\d+)s"),
+        "hashing_page_time" => Regex::new(r"Time it took to for hashing pages (\d+\.\d+)s.*"),
+        "hashing_page_count" => Regex::new(r"Time it took to for hashing pages .*page_count (\d+)"),
+        "launch_command_time" => {
+            Regex::new(r"Time it took to for launch complete command  (\d+\.\d+)ms")
+        }
+        _ => panic!("Invalid CVM param"),
+    };
+
+    if let Some(captured) = re.unwrap().captures(output.as_str()) {
+        if let Some(matched) = captured.get(1) {
+            let number_str = matched.as_str();
+            if let Ok(number) = number_str.parse::<f64>() {
+                return number;
+            }
+        }
+    }
+    0.0
 }
 
 #[cfg(test)]

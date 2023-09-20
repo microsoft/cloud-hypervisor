@@ -30,6 +30,13 @@ enum Error {
     TestFailed,
 }
 
+enum PerfAttrib {
+    Mean,
+    StdDev,
+    Max,
+    Min,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct PerformanceTestResult {
     name: String,
@@ -37,6 +44,18 @@ pub struct PerformanceTestResult {
     std_dev: f64,
     max: f64,
     min: f64,
+    address_space_time_mean: f64,
+    address_space_time_max: f64,
+    address_space_time_min: f64,
+    hashing_page_time_mean: f64,
+    hashing_page_time_max: f64,
+    hashing_page_time_min: f64,
+    hashing_page_count_mean: f64,
+    hashing_page_count_max: f64,
+    hashing_page_count_min: f64,
+    launch_command_time_mean: f64,
+    launch_command_time_max: f64,
+    launch_command_time_min: f64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -182,14 +201,20 @@ impl PerformanceTestControl {
 /// standard deviation)
 struct PerformanceTest {
     pub name: &'static str,
-    pub func_ptr: fn(&PerformanceTestControl) -> f64,
+    pub func_ptr: fn(&PerformanceTestControl) -> Vec<f64>,
     pub control: PerformanceTestControl,
     unit_adjuster: fn(f64) -> f64,
 }
 
 impl PerformanceTest {
     pub fn run(&self, overrides: &PerformanceTestOverrides) -> PerformanceTestResult {
-        let mut metrics = Vec::new();
+        let mut metrics: Vec<f64> = Vec::new();
+        let mut address_space_time: Vec<f64> = Vec::new();
+        let mut hashing_page_time: Vec<f64> = Vec::new();
+        let mut hashing_page_count: Vec<f64> = Vec::new();
+        let mut launch_command_time: Vec<f64> = Vec::new();
+        let mut res: Vec<f64> = Vec::new();
+
         for _ in 0..overrides
             .test_iterations
             .unwrap_or(self.control.test_iterations)
@@ -198,16 +223,67 @@ impl PerformanceTest {
             if let Some(test_timeout) = overrides.test_timeout {
                 let mut control: PerformanceTestControl = self.control.clone();
                 control.test_timeout = test_timeout;
-                metrics.push((self.func_ptr)(&control));
+                res = (self.func_ptr)(&control);
             } else {
-                metrics.push((self.func_ptr)(&self.control));
+                res = (self.func_ptr)(&self.control);
             }
+            println!("Result: {:?}", res);
+            metrics.push(res[0]);
+            address_space_time.push(res[1]);
+            hashing_page_time.push(res[2]);
+            hashing_page_count.push(res[3]);
+            launch_command_time.push(res[4]);
         }
 
-        let mean = (self.unit_adjuster)(mean(&metrics).unwrap());
-        let std_dev = (self.unit_adjuster)(std_deviation(&metrics).unwrap());
-        let max = (self.unit_adjuster)(metrics.clone().into_iter().reduce(f64::max).unwrap());
-        let min = (self.unit_adjuster)(metrics.clone().into_iter().reduce(f64::min).unwrap());
+        let address_space_time_mean = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            PerfAttrib::Mean,
+            &address_space_time,
+        )
+        .unwrap();
+        let address_space_time_max = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            PerfAttrib::Max,
+            &address_space_time,
+        )
+        .unwrap();
+        let address_space_time_min = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            PerfAttrib::Min,
+            &address_space_time,
+        )
+        .unwrap();
+
+        let hashing_page_time_mean = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            PerfAttrib::Mean,
+            &hashing_page_time,
+        )
+        .unwrap();
+        let hashing_page_time_max =
+            get_perf_attrb(Some(adjuster::s_to_ms), PerfAttrib::Max, &hashing_page_time).unwrap();
+        let hashing_page_time_min =
+            get_perf_attrb(Some(adjuster::s_to_ms), PerfAttrib::Min, &hashing_page_time).unwrap();
+
+        let hashing_page_count_mean =
+            get_perf_attrb(None, PerfAttrib::Mean, &hashing_page_count).unwrap();
+        let hashing_page_count_max =
+            get_perf_attrb(None, PerfAttrib::Max, &hashing_page_count).unwrap();
+        let hashing_page_count_min =
+            get_perf_attrb(None, PerfAttrib::Min, &hashing_page_count).unwrap();
+
+        let launch_command_time_mean =
+            get_perf_attrb(None, PerfAttrib::Mean, &launch_command_time).unwrap();
+        let launch_command_time_max =
+            get_perf_attrb(None, PerfAttrib::Max, &launch_command_time).unwrap();
+        let launch_command_time_min =
+            get_perf_attrb(None, PerfAttrib::Min, &launch_command_time).unwrap();
+
+        let mean = get_perf_attrb(Some(self.unit_adjuster), PerfAttrib::Mean, &metrics).unwrap();
+        let std_dev =
+            get_perf_attrb(Some(self.unit_adjuster), PerfAttrib::StdDev, &metrics).unwrap();
+        let max = get_perf_attrb(Some(self.unit_adjuster), PerfAttrib::Max, &metrics).unwrap();
+        let min = get_perf_attrb(Some(self.unit_adjuster), PerfAttrib::Min, &metrics).unwrap();
 
         PerformanceTestResult {
             name: self.name.to_string(),
@@ -215,6 +291,18 @@ impl PerformanceTest {
             std_dev,
             max,
             min,
+            address_space_time_mean,
+            address_space_time_max,
+            address_space_time_min,
+            hashing_page_time_mean,
+            hashing_page_time_max,
+            hashing_page_time_min,
+            hashing_page_count_mean,
+            hashing_page_count_max,
+            hashing_page_count_min,
+            launch_command_time_mean,
+            launch_command_time_max,
+            launch_command_time_min,
         }
     }
 
@@ -254,6 +342,23 @@ fn std_deviation(data: &[f64]) -> Option<f64> {
         Some(variance.sqrt())
     } else {
         None
+    }
+}
+
+fn get_perf_attrb(
+    unit_adjuster: Option<fn(f64) -> f64>,
+    perf_attrb: PerfAttrib,
+    data: &Vec<f64>,
+) -> Option<f64> {
+    let res: f64 = match perf_attrb {
+        PerfAttrib::Mean => mean(data).unwrap(),
+        PerfAttrib::StdDev => std_deviation(data).unwrap(),
+        PerfAttrib::Max => data.clone().into_iter().reduce(f64::max).unwrap(),
+        PerfAttrib::Min => data.clone().into_iter().reduce(f64::min).unwrap(),
+    };
+    match unit_adjuster {
+        Some(f) => Some(f(res)),
+        None => Some(res),
     }
 }
 

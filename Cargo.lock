@@ -942,6 +942,7 @@ version = "0.1.0"
 dependencies = [
  "argh",
  "dirs",
+ "regex",
  "serde",
  "serde_json",
  "test_infra",
