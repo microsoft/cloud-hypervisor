@@ -1871,6 +1871,7 @@ impl vm::Vm for MshvVm {
         let gpa_list: Vec<u64> = (start_gpfn..=end_gpfn)
             .into_iter()
             .filter(|x| !self.host_access_pages.is_bit_set(*x as usize))
+            .map(|x| x << PAGE_SHIFT)
             .collect();
 
         if gpa_list.len() > 0 {
