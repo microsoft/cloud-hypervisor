@@ -1864,14 +1864,25 @@ impl vm::Vm for MshvVm {
         if !self.snp_enabled {
             return Ok(());
         }
+        let mut gpa_list = Vec::new();
+        let mut _pfn = (gpa >> PAGE_SHIFT) as usize;
 
-        let start_gpfn: u64 = gpa >> PAGE_SHIFT;
-        let end_gpfn: u64 = (gpa + size as u64 - 1) >> PAGE_SHIFT;
+        if !self.host_access_pages.is_bit_set(_pfn) {
+            gpa_list.push(gpa);
+        }
 
-        let gpa_list: Vec<u64> = (start_gpfn..=end_gpfn)
-            .into_iter()
-            .filter(|x| !self.host_access_pages.is_bit_set(*x as usize))
-            .collect();
+        let mut _size: i64 = size as i64;
+        _size = _size - HV_PAGE_SIZE as i64;
+        let mut i = 1;
+        while _size > 0 {
+            let _gpa = gpa + HV_PAGE_SIZE * i;
+            _pfn = _pfn + 1;
+            if !self.host_access_pages.is_bit_set(_pfn) {
+                gpa_list.push(_gpa);
+            }
+            _size = _size - HV_PAGE_SIZE as i64;
+            i = i + 1;
+        }
 
         if gpa_list.len() > 0 {
             _modify_gpa_host_access(
@@ -1883,7 +1894,7 @@ impl vm::Vm for MshvVm {
             )
             .unwrap();
             for gpa in gpa_list {
-                self.host_access_pages.set_bit((gpa >> PAGE_SHIFT) as usize);
+                self.host_access_pages.set_bit(gpa as usize >> PAGE_SHIFT);
             }
         }
 
