@@ -7270,19 +7270,15 @@ mod common_parallel {
             let output = exec_host_command_output("date +%s");
             let host_time_str = String::from_utf8_lossy(&output.stdout)
                 .trim()
-                .parse::<u128>();
-            let guest_time_str = guest
-                .ssh_command("date +%s")
-                .unwrap()
-                .trim()
-                .parse::<u128>();
+                .parse::<u64>();
+            let guest_time_str = guest.ssh_command("date +%s").unwrap().trim().parse::<u64>();
 
             assert!(host_time_str.is_ok(), "Can not parse Host time string");
             assert!(guest_time_str.is_ok(), "Can not parse Guest time string");
 
-            let host_time = host_time_str.unwrap();
-            let guest_time = guest_time_str.unwrap();
-            let difference = host_time - guest_time;
+            let host_time: u64 = host_time_str.unwrap();
+            let guest_time: u64 = guest_time_str.unwrap();
+            let difference = host_time.abs_diff(guest_time);
 
             assert!(
                 difference < 5,
