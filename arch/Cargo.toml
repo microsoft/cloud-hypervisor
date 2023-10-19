@@ -25,8 +25,8 @@ versionize_derive = "0.1.4"
 vm-memory = { version = "0.10.0", features = ["backend-mmap", "backend-bitmap"] }
 vm-migration = { path = "../vm-migration" }
 vmm-sys-util = { version = "0.11.0", features = ["with-serde"] }
-igvm_parser = { version = "0.1.0", package = "igvm", optional  = true }
-igvm_defs = { version = "0.1.0", optional  = true }
+igvm_defs = { git = "https://github.com/russell-islam/igvm", branch = "msft-main" , package = "igvm_defs", optional  = true }
+igvm_parser = { git = "https://github.com/russell-islam/igvm", branch = "msft-main" , package = "igvm", optional  = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 fdt_parser = { version = "0.1.4", package = "fdt" }
