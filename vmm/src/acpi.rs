@@ -25,7 +25,7 @@ use zerocopy::AsBytes;
 
 /* Values for Type in APIC sub-headers */
 #[cfg(target_arch = "x86_64")]
-pub const ACPI_APIC_PROCESSOR: u8 = 0;
+pub const ACPI_X2APIC_PROCESSOR: u8 = 9;
 #[cfg(target_arch = "x86_64")]
 pub const ACPI_APIC_IO: u8 = 1;
 #[cfg(target_arch = "x86_64")]
@@ -511,7 +511,7 @@ fn create_iort_table(pci_segments: &[PciSegment]) -> Sdt {
     const ACPI_IORT_NODE_ROOT_COMPLEX_OFFSET: usize = 72;
     const ACPI_IORT_NODE_ROOT_COMPLEX_SIZE: usize = 60;
 
-    // The IORT table containes:
+    // The IORT table contains:
     // - Header (size = 40)
     // - 1 x ITS Group Node (size = 24)
     // - N x Root Complex Node (N = number of pci segments, size = 60 x N)

@@ -34,11 +34,13 @@ use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 use arch::NumaNodes;
 #[cfg(target_arch = "aarch64")]
 use arch::{DeviceType, MmioDeviceInfo};
-use block_util::{
-    async_io::DiskFile, block_io_uring_is_supported, detect_image_type,
-    fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
-    raw_async::RawFileDisk, raw_sync::RawFileDiskSync, vhdx_sync::VhdxDiskSync, ImageType,
+use block::{
+    async_io::DiskFile, block_aio_is_supported, block_io_uring_is_supported, detect_image_type,
+    fixed_vhd_sync::FixedVhdDiskSync, qcow, qcow_sync::QcowDiskSync, raw_async_aio::RawFileDiskAio,
+    raw_sync::RawFileDiskSync, vhdx, vhdx_sync::VhdxDiskSync, ImageType,
 };
+#[cfg(feature = "io_uring")]
+use block::{fixed_vhd_async::FixedVhdDiskAsync, raw_async::RawFileDisk};
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
@@ -114,6 +116,7 @@ const RNG_DEVICE_NAME: &str = "__rng";
 const IOMMU_DEVICE_NAME: &str = "__iommu";
 const BALLOON_DEVICE_NAME: &str = "__balloon";
 const CONSOLE_DEVICE_NAME: &str = "__console";
+const PVPANIC_DEVICE_NAME: &str = "__pvpanic";
 
 // Devices that the user may name and for which we generate
 // identifiers if the user doesn't give one
@@ -392,6 +395,9 @@ pub enum DeviceManagerError {
     /// No support for device passthrough
     NoDevicePassthroughSupport,
 
+    /// No socket option support for console device
+    NoSocketOptionSupportForConsoleDevice,
+
     /// Failed to resize virtio-balloon
     VirtioBalloonResize(virtio_devices::balloon::Error),
 
@@ -421,7 +427,7 @@ pub enum DeviceManagerError {
     CreateQcowDiskSync(qcow::Error),
 
     /// Failed to create FixedVhdxDiskSync
-    CreateFixedVhdxDiskSync(vhdx::vhdx::VhdxError),
+    CreateFixedVhdxDiskSync(vhdx::VhdxError),
 
     /// Failed to add DMA mapping handler to virtio-mem device.
     AddDmaMappingHandlerVirtioMem(virtio_devices::mem::Error),
@@ -470,6 +476,9 @@ pub enum DeviceManagerError {
 
     /// Failed retrieving device state from snapshot
     RestoreGetState(MigratableError),
+
+    /// Cannot create a PvPanic device
+    PvPanicCreate(devices::pvpanic::PvPanicError),
 }
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
 
@@ -505,7 +514,7 @@ pub fn create_pty() -> io::Result<(File, File, PathBuf)> {
     // SAFETY: FFI call into libc, trivially safe
     unsafe { libc::ioctl(main.as_raw_fd(), TIOCSPTLCK as _, &mut unlock) };
 
-    // SAFETY: FFI call into libc, trivally safe
+    // SAFETY: FFI call into libc, trivially safe
     let sub_fd = unsafe {
         libc::ioctl(
             main.as_raw_fd(),
@@ -931,11 +940,17 @@ pub struct DeviceManager {
     // GPIO device for AArch64
     gpio_device: Option<Arc<Mutex<devices::legacy::Gpio>>>,
 
+    // pvpanic device
+    pvpanic_device: Option<Arc<Mutex<devices::PvPanicDevice>>>,
+
     // Flag to force setting the iommu on virtio devices
     force_iommu: bool,
 
     // io_uring availability if detected
     io_uring_supported: Option<bool>,
+
+    // aio availability if detected
+    aio_supported: Option<bool>,
 
     // List of unique identifiers provided at boot through the configuration.
     boot_id_list: BTreeSet<String>,
@@ -1062,6 +1077,7 @@ impl DeviceManager {
         for i in 1..num_pci_segments as usize {
             pci_segments.push(PciSegment::new(
                 i as u16,
+                numa_node_id_from_pci_segment_id(&numa_nodes, i as u16),
                 &address_manager,
                 Arc::clone(&address_manager.pci_mmio_allocators[i]),
                 &pci_irq_slots,
@@ -1131,8 +1147,10 @@ impl DeviceManager {
             virtio_mem_devices: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             gpio_device: None,
+            pvpanic_device: None,
             force_iommu,
             io_uring_supported: None,
+            aio_supported: None,
             boot_id_list,
             timestamp,
             pending_activations: Arc::new(Mutex::new(Vec::default())),
@@ -1253,6 +1271,10 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
 
         self.virtio_devices = virtio_devices;
+
+        if self.config.clone().lock().unwrap().pvpanic {
+            self.pvpanic_device = self.add_pvpanic_device()?;
+        }
 
         Ok(())
     }
@@ -1480,8 +1502,16 @@ impl DeviceManager {
         reset_evt: EventFd,
         exit_evt: EventFd,
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGedDevice>>>> {
+        let vcpus_kill_signalled = self
+            .cpu_manager
+            .lock()
+            .unwrap()
+            .vcpus_kill_signalled()
+            .clone();
         let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
-            exit_evt, reset_evt,
+            exit_evt,
+            reset_evt,
+            vcpus_kill_signalled,
         )));
 
         self.bus_devices
@@ -1580,9 +1610,16 @@ impl DeviceManager {
 
     #[cfg(target_arch = "x86_64")]
     fn add_legacy_devices(&mut self, reset_evt: EventFd) -> DeviceManagerResult<()> {
+        let vcpus_kill_signalled = self
+            .cpu_manager
+            .lock()
+            .unwrap()
+            .vcpus_kill_signalled()
+            .clone();
         // Add a shutdown device (i8042)
         let i8042 = Arc::new(Mutex::new(devices::legacy::I8042Device::new(
             reset_evt.try_clone().unwrap(),
+            vcpus_kill_signalled.clone(),
         )));
 
         self.bus_devices
@@ -1610,6 +1647,7 @@ impl DeviceManager {
                 mem_below_4g,
                 mem_above_4g,
                 reset_evt,
+                Some(vcpus_kill_signalled),
             )));
 
             self.bus_devices
@@ -1884,7 +1922,7 @@ impl DeviceManager {
         Ok(())
     }
 
-    fn set_raw_mode(&mut self, f: &mut dyn AsRawFd) -> vmm_sys_util::errno::Result<()> {
+    fn set_raw_mode(&mut self, f: &dyn AsRawFd) -> vmm_sys_util::errno::Result<()> {
         // SAFETY: FFI call. Variable t is guaranteed to be a valid termios from modify_mode.
         self.modify_mode(f.as_raw_fd(), |t| unsafe { cfmakeraw(t) })
     }
@@ -1924,9 +1962,9 @@ impl DeviceManager {
                     self.console_resize_pipe = resize_pipe.map(Arc::new);
                     Endpoint::PtyPair(file.try_clone().unwrap(), file)
                 } else {
-                    let (main, mut sub, path) =
+                    let (main, sub, path) =
                         create_pty().map_err(DeviceManagerError::ConsolePtyOpen)?;
-                    self.set_raw_mode(&mut sub)
+                    self.set_raw_mode(&sub)
                         .map_err(DeviceManagerError::SetPtyRaw)?;
                     self.config.lock().unwrap().console.file = Some(path.clone());
                     let file = main.try_clone().unwrap();
@@ -1946,10 +1984,10 @@ impl DeviceManager {
                     return vmm_sys_util::errno::errno_result().map_err(DeviceManagerError::DupFd);
                 }
                 // SAFETY: stdout is valid and owned solely by us.
-                let mut stdout = unsafe { File::from_raw_fd(stdout) };
+                let stdout = unsafe { File::from_raw_fd(stdout) };
 
                 // Make sure stdout is in raw mode, if it's a terminal.
-                let _ = self.set_raw_mode(&mut stdout);
+                let _ = self.set_raw_mode(&stdout);
 
                 // SAFETY: FFI call. Trivially safe.
                 if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
@@ -1973,6 +2011,9 @@ impl DeviceManager {
                 } else {
                     Endpoint::File(stdout)
                 }
+            }
+            ConsoleOutputMode::Socket => {
+                return Err(DeviceManagerError::NoSocketOptionSupportForConsoleDevice);
             }
             ConsoleOutputMode::Null => Endpoint::Null,
             ConsoleOutputMode::Off => return Ok(None),
@@ -2041,9 +2082,9 @@ impl DeviceManager {
                     self.config.lock().unwrap().serial.file = Some(pty.path.clone());
                     self.serial_pty = Some(Arc::new(Mutex::new(pty)));
                 } else {
-                    let (main, mut sub, path) =
+                    let (main, sub, path) =
                         create_pty().map_err(DeviceManagerError::SerialPtyOpen)?;
-                    self.set_raw_mode(&mut sub)
+                    self.set_raw_mode(&sub)
                         .map_err(DeviceManagerError::SetPtyRaw)?;
                     self.config.lock().unwrap().serial.file = Some(path.clone());
                     self.serial_pty = Some(Arc::new(Mutex::new(PtyPair { main, path })));
@@ -2051,19 +2092,23 @@ impl DeviceManager {
                 None
             }
             ConsoleOutputMode::Tty => {
-                let mut out = stdout();
-                let _ = self.set_raw_mode(&mut out);
+                let out = stdout();
+                let _ = self.set_raw_mode(&out);
                 Some(Box::new(out))
             }
-            ConsoleOutputMode::Off | ConsoleOutputMode::Null => None,
+            ConsoleOutputMode::Off | ConsoleOutputMode::Null | ConsoleOutputMode::Socket => None,
         };
         if serial_config.mode != ConsoleOutputMode::Off {
             let serial = self.add_serial_device(interrupt_manager, serial_writer)?;
             self.serial_manager = match serial_config.mode {
-                ConsoleOutputMode::Pty | ConsoleOutputMode::Tty => {
-                    let serial_manager =
-                        SerialManager::new(serial, self.serial_pty.clone(), serial_config.mode)
-                            .map_err(DeviceManagerError::CreateSerialManager)?;
+                ConsoleOutputMode::Pty | ConsoleOutputMode::Tty | ConsoleOutputMode::Socket => {
+                    let serial_manager = SerialManager::new(
+                        serial,
+                        self.serial_pty.clone(),
+                        serial_config.mode,
+                        serial_config.socket,
+                    )
+                    .map_err(DeviceManagerError::CreateSerialManager)?;
                     if let Some(mut serial_manager) = serial_manager {
                         serial_manager
                             .start_thread(
@@ -2139,6 +2184,17 @@ impl DeviceManager {
         devices.append(&mut self.make_vdpa_devices()?);
 
         Ok(devices)
+    }
+
+    // Cache whether aio is supported to avoid checking for very block device
+    fn aio_is_supported(&mut self) -> bool {
+        if let Some(supported) = self.aio_supported {
+            return supported;
+        }
+
+        let supported = block_aio_is_supported();
+        self.aio_supported = Some(supported);
+        supported
     }
 
     // Cache whether io_uring is supported to avoid probing for very block device
@@ -2226,12 +2282,21 @@ impl DeviceManager {
                 ImageType::FixedVhd => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
-                    if !disk_cfg.disable_io_uring && self.io_uring_is_supported() {
+                    if cfg!(feature = "io_uring")
+                        && !disk_cfg.disable_io_uring
+                        && self.io_uring_is_supported()
+                    {
                         info!("Using asynchronous fixed VHD disk file (io_uring)");
-                        Box::new(
-                            FixedVhdDiskAsync::new(file)
-                                .map_err(DeviceManagerError::CreateFixedVhdDiskAsync)?,
-                        ) as Box<dyn DiskFile>
+
+                        #[cfg(not(feature = "io_uring"))]
+                        unreachable!("Checked in if statement above");
+                        #[cfg(feature = "io_uring")]
+                        {
+                            Box::new(
+                                FixedVhdDiskAsync::new(file)
+                                    .map_err(DeviceManagerError::CreateFixedVhdDiskAsync)?,
+                            ) as Box<dyn DiskFile>
+                        }
                     } else {
                         info!("Using synchronous fixed VHD disk file");
                         Box::new(
@@ -2243,9 +2308,21 @@ impl DeviceManager {
                 ImageType::Raw => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
-                    if !disk_cfg.disable_io_uring && self.io_uring_is_supported() {
+                    if cfg!(feature = "io_uring")
+                        && !disk_cfg.disable_io_uring
+                        && self.io_uring_is_supported()
+                    {
                         info!("Using asynchronous RAW disk file (io_uring)");
-                        Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
+
+                        #[cfg(not(feature = "io_uring"))]
+                        unreachable!("Checked in if statement above");
+                        #[cfg(feature = "io_uring")]
+                        {
+                            Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
+                        }
+                    } else if !disk_cfg.disable_aio && self.aio_is_supported() {
+                        info!("Using asynchronous RAW disk file (aio)");
+                        Box::new(RawFileDiskAio::new(file)) as Box<dyn DiskFile>
                     } else {
                         info!("Using synchronous RAW disk file");
                         Box::new(RawFileDiskSync::new(file)) as Box<dyn DiskFile>
@@ -2280,6 +2357,7 @@ impl DeviceManager {
                     self.force_iommu | disk_cfg.iommu,
                     disk_cfg.num_queues,
                     disk_cfg.queue_size,
+                    disk_cfg.serial.clone(),
                     self.seccomp_action.clone(),
                     disk_cfg.rate_limiter_config,
                     self.exit_evt
@@ -3637,6 +3715,43 @@ impl DeviceManager {
         Ok(pci_device_bdf)
     }
 
+    fn add_pvpanic_device(
+        &mut self,
+    ) -> DeviceManagerResult<Option<Arc<Mutex<devices::PvPanicDevice>>>> {
+        let id = String::from(PVPANIC_DEVICE_NAME);
+        let pci_segment_id = 0x0_u16;
+
+        info!("Creating pvpanic device {}", id);
+
+        let (pci_segment_id, pci_device_bdf, resources) =
+            self.pci_resources(&id, pci_segment_id)?;
+
+        let snapshot = snapshot_from_id(self.snapshot.as_ref(), id.as_str());
+
+        let pvpanic_device = devices::PvPanicDevice::new(id.clone(), snapshot)
+            .map_err(DeviceManagerError::PvPanicCreate)?;
+
+        let pvpanic_device = Arc::new(Mutex::new(pvpanic_device));
+
+        let new_resources = self.add_pci_device(
+            pvpanic_device.clone(),
+            pvpanic_device.clone(),
+            pci_segment_id,
+            pci_device_bdf,
+            resources,
+        )?;
+
+        let mut node = device_node!(id, pvpanic_device);
+
+        node.resources = new_resources;
+        node.pci_bdf = Some(pci_device_bdf);
+        node.pci_device_handle = None;
+
+        self.device_tree.lock().unwrap().insert(id, node);
+
+        Ok(Some(pvpanic_device))
+    }
+
     fn pci_resources(
         &self,
         id: &str,
@@ -4228,7 +4343,7 @@ impl DeviceManager {
         // 1. Users will use direct kernel boot with device tree.
         // 2. Users will use ACPI+UEFI boot.
 
-        // Trigger a GPIO pin 3 event to satisify use case 1.
+        // Trigger a GPIO pin 3 event to satisfy use case 1.
         self.gpio_device
             .as_ref()
             .unwrap()
@@ -4236,7 +4351,7 @@ impl DeviceManager {
             .unwrap()
             .trigger_key(3)
             .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
-        // Trigger a GED power button event to satisify use case 2.
+        // Trigger a GED power button event to satisfy use case 2.
         return self
             .ged_notification_device
             .as_ref()
@@ -4278,6 +4393,16 @@ fn numa_node_id_from_memory_zone_id(numa_nodes: &NumaNodes, memory_zone_id: &str
     }
 
     None
+}
+
+fn numa_node_id_from_pci_segment_id(numa_nodes: &NumaNodes, pci_segment_id: u16) -> u32 {
+    for (numa_node_id, numa_node) in numa_nodes.iter() {
+        if numa_node.pci_segments.contains(&pci_segment_id) {
+            return *numa_node_id;
+        }
+    }
+
+    0
 }
 
 struct TpmDevice {}
@@ -4331,10 +4456,11 @@ impl Aml for DeviceManager {
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
+                        aml::AddressSpaceCacheable::NotCacheable,
                         true,
                         self.acpi_address.0,
                         self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
+                        None,
                     )]),
                 ),
                 // OpRegion and Fields map MMIO range into individual field values

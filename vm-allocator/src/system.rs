@@ -14,14 +14,7 @@ use crate::gsi::GsiAllocator;
 #[cfg(target_arch = "x86_64")]
 use crate::gsi::GsiApic;
 
-use libc::{sysconf, _SC_PAGESIZE};
-
-/// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
-#[inline(always)]
-fn pagesize() -> usize {
-    // SAFETY: FFI call. Trivially safe.
-    unsafe { sysconf(_SC_PAGESIZE) as usize }
-}
+use crate::page_size::get_page_size;
 
 /// Manages allocating system resources such as address space and interrupt numbers.
 ///
@@ -59,7 +52,7 @@ pub struct SystemAllocator {
 }
 
 impl SystemAllocator {
-    /// Creates a new `SystemAllocator` for managing addresses and irq numvers.
+    /// Creates a new `SystemAllocator` for managing addresses and irq numbers.
     /// Can return `None` if `base` + `size` overflows a u64
     ///
     /// * `io_base` - (X86) The starting address of IO memory.
@@ -126,7 +119,7 @@ impl SystemAllocator {
         self.platform_mmio_address_space.allocate(
             address,
             size,
-            Some(align_size.unwrap_or(pagesize() as u64)),
+            Some(align_size.unwrap_or_else(get_page_size)),
         )
     }
 
@@ -140,7 +133,7 @@ impl SystemAllocator {
         self.mmio_hole_address_space.allocate(
             address,
             size,
-            Some(align_size.unwrap_or(pagesize() as u64)),
+            Some(align_size.unwrap_or_else(get_page_size)),
         )
     }
 

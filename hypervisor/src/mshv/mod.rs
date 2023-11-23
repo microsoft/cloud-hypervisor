@@ -1098,7 +1098,7 @@ impl cpu::Vcpu for MshvVcpu {
                 }
 
                 exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                    "--------------------------- Unhandled VCPU exit {:?}",
+                    "Unhandled VCPU exit {:?}",
                     exit
                 ))),
             },
@@ -1666,7 +1666,6 @@ impl vm::Vm for MshvVm {
         let mut flags = HV_MAP_GPA_READABLE | HV_MAP_GPA_EXECUTABLE | HV_MAP_GPA_ADJUSTABLE;
         if !readonly {
             flags |= HV_MAP_GPA_WRITABLE;
-            //flags |= HV_MAP_GPA_ADJUSTABLE;
         }
 
         mshv_user_mem_region {

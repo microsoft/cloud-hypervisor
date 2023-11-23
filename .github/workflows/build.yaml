@@ -13,7 +13,7 @@ jobs:
           - stable
           - beta
           - nightly
-          - "1.62"
+          - "1.66"
         target:
           - x86_64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
@@ -42,11 +42,17 @@ jobs:
       - name: Build (default features + tdx)
         run: cargo rustc --locked --bin cloud-hypervisor --features "tdx" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
+      - name: Build (default features + dbus_api)
+        run: cargo rustc --locked --bin cloud-hypervisor --features "dbus_api" -- -D warnings -D clippy::undocumented_unsafe_blocks
+
       - name: Build (default features + guest_debug)
         run: cargo rustc --locked --bin cloud-hypervisor --features "guest_debug" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Build (mshv)
         run: cargo rustc --locked --bin cloud-hypervisor --no-default-features --features "mshv"  -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Build (sev_snp)
+        run: cargo rustc --locked --bin cloud-hypervisor --no-default-features --features "sev_snp"  -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Build (mshv + kvm)
         run: cargo rustc --locked --bin cloud-hypervisor --no-default-features --features "mshv,kvm"  -- -D warnings -D clippy::undocumented_unsafe_blocks

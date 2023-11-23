@@ -869,13 +869,11 @@ impl Vm {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "tdx")] {
-                let vm = hypervisor
-                    .create_vm_with_type(if tdx_enabled {
-                        2 // KVM_X86_TDX_VM
-                    } else {
-                        0 // KVM_X86_LEGACY_VM
-                    })
-                    .unwrap();
+		// 0 for KVM_X86_LEGACY_VM
+		// 1 for KVM_X86_TDX_VM
+		let vm = hypervisor
+		    .create_vm_with_type(u64::from(tdx_enabled))
+		    .unwrap();
             } else if #[cfg(feature = "snp")] {
                 // 1 - SNP_ENABLED
                 // 0 - SNP_DISABLED
@@ -3218,6 +3216,7 @@ mod tests {
     }
 }
 
+#[cfg(all(feature = "kvm", target_arch = "x86_64"))]
 #[test]
 #[cfg(not(all(feature = "mshv", feature = "snp")))]
 pub fn test_vm() {

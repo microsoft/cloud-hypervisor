@@ -8,11 +8,14 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-use block_util::{build_disk_image_id, Request, VirtioBlockConfig};
+use block::{
+    build_serial,
+    qcow::{self, ImageType, QcowFile},
+    Request, VirtioBlockConfig,
+};
 use libc::EFD_NONBLOCK;
 use log::*;
 use option_parser::{OptionParser, OptionParserError, Toggle};
-use qcow::{self, ImageType, QcowFile};
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -71,6 +74,11 @@ enum Error {
     SocketParameterMissing,
 }
 
+pub const SYNTAX: &str = "vhost-user-block backend parameters \
+ \"path=<image_path>,socket=<socket_path>,num_queues=<number_of_queues>,\
+ queue_size=<size_of_each_queue>,readonly=true|false,direct=true|false,\
+ poll_queue=true|false\"";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "vhost_user_block_error: {self:?}")
@@ -87,7 +95,7 @@ impl convert::From<Error> for io::Error {
 
 struct VhostUserBlkThread {
     disk_image: Arc<Mutex<dyn DiskFile>>,
-    disk_image_id: Vec<u8>,
+    serial: Vec<u8>,
     disk_nsectors: u64,
     event_idx: bool,
     kill_evt: EventFd,
@@ -98,14 +106,14 @@ struct VhostUserBlkThread {
 impl VhostUserBlkThread {
     fn new(
         disk_image: Arc<Mutex<dyn DiskFile>>,
-        disk_image_id: Vec<u8>,
+        serial: Vec<u8>,
         disk_nsectors: u64,
         writeback: Arc<AtomicBool>,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<Self> {
         Ok(VhostUserBlkThread {
             disk_image,
-            disk_image_id,
+            serial,
             disk_nsectors,
             event_idx: false,
             kill_evt: EventFd::new(EFD_NONBLOCK).map_err(Error::CreateKillEventFd)?,
@@ -139,7 +147,7 @@ impl VhostUserBlkThread {
                         &mut self.disk_image.lock().unwrap().deref_mut(),
                         self.disk_nsectors,
                         desc_chain.memory(),
-                        &self.disk_image_id,
+                        &self.serial,
                     ) {
                         Ok(l) => {
                             len = l;
@@ -224,7 +232,7 @@ impl VhostUserBlkBackend {
         let image: File = options.open(&image_path).unwrap();
         let mut raw_img: qcow::RawFile = qcow::RawFile::new(image, direct);
 
-        let image_id = build_disk_image_id(&PathBuf::from(&image_path));
+        let serial = build_serial(&PathBuf::from(&image_path));
         let image_type = qcow::detect_image_type(&mut raw_img).unwrap();
         let image = match image_type {
             ImageType::Raw => Arc::new(Mutex::new(raw_img)) as Arc<Mutex<dyn DiskFile>>,
@@ -252,7 +260,7 @@ impl VhostUserBlkBackend {
         for i in 0..num_queues {
             let thread = Mutex::new(VhostUserBlkThread::new(
                 image.clone(),
-                image_id.clone(),
+                serial.clone(),
                 nsectors,
                 writeback.clone(),
                 mem.clone(),

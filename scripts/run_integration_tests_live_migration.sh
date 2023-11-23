@@ -4,8 +4,6 @@ set -x
 source $HOME/.cargo/env
 source $(dirname "$0")/test-util.sh
 
-export BUILD_TARGET=${BUILD_TARGET-x86_64-unknown-linux-gnu}
-
 WORKLOADS_DIR="$HOME/workloads"
 mkdir -p "$WORKLOADS_DIR"
 
@@ -15,7 +13,7 @@ process_common_args "$@"
 test_features=""
 
 if [ "$hypervisor" = "mshv" ] ;  then
-    test_features="--no-default-features --features mshv"
+    test_features="--features mshv"
 fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
@@ -46,7 +44,7 @@ fi
 popd
 
 # Download Cloud Hypervisor binary from its last stable release
-LAST_RELEASE_VERSION="v30.0"
+LAST_RELEASE_VERSION="v34.0"
 CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$LAST_RELEASE_VERSION/cloud-hypervisor-static"
 CH_RELEASE_NAME="cloud-hypervisor-static"
 pushd $WORKLOADS_DIR
@@ -60,15 +58,12 @@ if [ ! -f "$VMLINUX_IMAGE" ]; then
     build_custom_linux
 fi
 
-BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 CFLAGS=""
-TARGET_CC=""
 if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-    TARGET_CC="musl-gcc"
     CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --no-default-features --features "kvm,mshv" --all --release --target $BUILD_TARGET
+cargo build --features mshv --all --release --target $BUILD_TARGET
 
 # Test ovs-dpdk relies on hugepages
 HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`

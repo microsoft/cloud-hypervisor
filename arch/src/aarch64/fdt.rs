@@ -24,6 +24,8 @@ use super::layout::{
     IRQ_BASE, MEM_32BIT_DEVICES_SIZE, MEM_32BIT_DEVICES_START, MEM_PCI_IO_SIZE, MEM_PCI_IO_START,
     PCI_HIGH_BASE, PCI_MMIO_CONFIG_SIZE_PER_SEGMENT,
 };
+use std::fs;
+use std::path::Path;
 use vm_fdt::{FdtWriter, FdtWriterResult};
 use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError, GuestMemoryRegion};
 
@@ -40,8 +42,12 @@ const VIRTIO_IOMMU_PHANDLE: u32 = 5;
 // NOTE: Keep FIRST_VCPU_PHANDLE the last PHANDLE defined.
 // This is a value for uniquely identifying the FDT node containing the first vCPU.
 // The last number of vCPU phandle depends on the number of vCPUs.
-const FIRST_VCPU_PHANDLE: u32 = 6;
+const FIRST_VCPU_PHANDLE: u32 = 8;
 
+// This is a value for uniquely identifying the FDT node containing the L2 cache info
+const L2_CACHE_PHANDLE: u32 = 6;
+// This is a value for uniquely identifying the FDT node containing the L3 cache info
+const L3_CACHE_PHANDLE: u32 = 7;
 // Read the documentation specified when appending the root node to the FDT.
 const ADDRESS_CELLS: u32 = 0x2;
 const SIZE_CELLS: u32 = 0x2;
@@ -80,6 +86,132 @@ pub enum Error {
     WriteFdtToMemory(GuestMemoryError),
 }
 type Result<T> = result::Result<T, Error>;
+
+pub enum CacheLevel {
+    /// L1 data cache
+    L1D = 0,
+    /// L1 instruction cache
+    L1I = 1,
+    /// L2 cache
+    L2 = 2,
+    /// L3 cache
+    L3 = 3,
+}
+
+/// NOTE: cache size file directory example,
+/// "/sys/devices/system/cpu/cpu0/cache/index0/size".
+pub fn get_cache_size(cache_level: CacheLevel) -> u32 {
+    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+    match cache_level {
+        CacheLevel::L1D => file_directory += "/index0/size",
+        CacheLevel::L1I => file_directory += "/index1/size",
+        CacheLevel::L2 => file_directory += "/index2/size",
+        CacheLevel::L3 => file_directory += "/index3/size",
+    }
+
+    let file_path = Path::new(&file_directory);
+    if !file_path.exists() {
+        warn!("File: {} does not exist.", file_directory);
+        0
+    } else {
+        info!("File: {} exist.", file_directory);
+
+        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+        // The content of the file is as simple as a size, like: "32K"
+        let src = src.trim();
+        let src_digits: u32 = src[0..src.len() - 1].parse().unwrap();
+        let src_unit = &src[src.len() - 1..];
+
+        src_digits
+            * match src_unit {
+                "K" => 1024,
+                "M" => 1024u32.pow(2),
+                "G" => 1024u32.pow(3),
+                _ => 1,
+            }
+    }
+}
+
+/// NOTE: coherency_line_size file directory example,
+/// "/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size".
+pub fn get_cache_coherency_line_size(cache_level: CacheLevel) -> u32 {
+    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+    match cache_level {
+        CacheLevel::L1D => file_directory += "/index0/coherency_line_size",
+        CacheLevel::L1I => file_directory += "/index1/coherency_line_size",
+        CacheLevel::L2 => file_directory += "/index2/coherency_line_size",
+        CacheLevel::L3 => file_directory += "/index3/coherency_line_size",
+    }
+
+    let file_path = Path::new(&file_directory);
+    if !file_path.exists() {
+        warn!("File: {} does not exist.", file_directory);
+        0
+    } else {
+        info!("File: {} exist.", file_directory);
+
+        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+        src.trim().parse::<u32>().unwrap()
+    }
+}
+
+/// NOTE: number_of_sets file directory example,
+/// "/sys/devices/system/cpu/cpu0/cache/index0/number_of_sets".
+pub fn get_cache_number_of_sets(cache_level: CacheLevel) -> u32 {
+    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+    match cache_level {
+        CacheLevel::L1D => file_directory += "/index0/number_of_sets",
+        CacheLevel::L1I => file_directory += "/index1/number_of_sets",
+        CacheLevel::L2 => file_directory += "/index2/number_of_sets",
+        CacheLevel::L3 => file_directory += "/index3/number_of_sets",
+    }
+
+    let file_path = Path::new(&file_directory);
+    if !file_path.exists() {
+        warn!("File: {} does not exist.", file_directory);
+        0
+    } else {
+        info!("File: {} exist.", file_directory);
+
+        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+        src.trim().parse::<u32>().unwrap()
+    }
+}
+
+/// NOTE: shared_cpu_list file directory example,
+/// "/sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list".
+pub fn get_cache_shared(cache_level: CacheLevel) -> bool {
+    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+    let mut result = true;
+
+    match cache_level {
+        CacheLevel::L1D | CacheLevel::L1I => result = false,
+        CacheLevel::L2 => file_directory += "/index2/shared_cpu_list",
+        CacheLevel::L3 => file_directory += "/index3/shared_cpu_list",
+    }
+
+    if !result {
+        return false;
+    }
+
+    let file_path = Path::new(&file_directory);
+    if !file_path.exists() {
+        warn!("File: {} does not exist.", file_directory);
+        result = false;
+    } else {
+        info!("File: {} exist.", file_directory);
+
+        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+        let src = src.trim();
+        if src.is_empty() {
+            result = false;
+        } else {
+            result = src.contains('-') || src.contains(',');
+        }
+    }
+
+    result
+}
 
 /// Creates the flattened device tree for this aarch64 VM.
 #[allow(clippy::too_many_arguments)]
@@ -158,6 +290,68 @@ fn create_cpu_nodes(
     fdt.property_u32("#size-cells", 0x0)?;
 
     let num_cpus = vcpu_mpidr.len();
+    let (threads_per_core, cores_per_package, packages) = vcpu_topology.unwrap_or((1, 1, 1));
+    let max_cpus: u32 = (threads_per_core * cores_per_package * packages).into();
+
+    // Add cache info.
+    // L1 Data Cache Info.
+    let mut l1_d_cache_size: u32 = 0;
+    let mut l1_d_cache_line_size: u32 = 0;
+    let mut l1_d_cache_sets: u32 = 0;
+
+    // L1 Instruction Cache Info.
+    let mut l1_i_cache_size: u32 = 0;
+    let mut l1_i_cache_line_size: u32 = 0;
+    let mut l1_i_cache_sets: u32 = 0;
+
+    // L2 Cache Info.
+    let mut l2_cache_size: u32 = 0;
+    let mut l2_cache_line_size: u32 = 0;
+    let mut l2_cache_sets: u32 = 0;
+
+    // L3 Cache Info.
+    let mut l3_cache_size: u32 = 0;
+    let mut l3_cache_line_size: u32 = 0;
+    let mut l3_cache_sets: u32 = 0;
+
+    // Cache Shared Info.
+    let mut l2_cache_shared: bool = false;
+    let mut l3_cache_shared: bool = false;
+
+    let cache_path = Path::new("/sys/devices/system/cpu/cpu0/cache");
+    let cache_exist: bool = cache_path.exists();
+    if !cache_exist {
+        warn!("cache sysfs system does not exist.");
+    } else {
+        info!("cache sysfs system exists.");
+        // L1 Data Cache Info.
+        l1_d_cache_size = get_cache_size(CacheLevel::L1D);
+        l1_d_cache_line_size = get_cache_coherency_line_size(CacheLevel::L1D);
+        l1_d_cache_sets = get_cache_number_of_sets(CacheLevel::L1D);
+
+        // L1 Instruction Cache Info.
+        l1_i_cache_size = get_cache_size(CacheLevel::L1I);
+        l1_i_cache_line_size = get_cache_coherency_line_size(CacheLevel::L1I);
+        l1_i_cache_sets = get_cache_number_of_sets(CacheLevel::L1I);
+
+        // L2 Cache Info.
+        l2_cache_size = get_cache_size(CacheLevel::L2);
+        l2_cache_line_size = get_cache_coherency_line_size(CacheLevel::L2);
+        l2_cache_sets = get_cache_number_of_sets(CacheLevel::L2);
+
+        // L3 Cache Info.
+        l3_cache_size = get_cache_size(CacheLevel::L3);
+        l3_cache_line_size = get_cache_coherency_line_size(CacheLevel::L3);
+        l3_cache_sets = get_cache_number_of_sets(CacheLevel::L3);
+
+        // Cache Shared Info.
+        if l2_cache_size != 0 {
+            l2_cache_shared = get_cache_shared(CacheLevel::L2);
+        }
+        if l3_cache_size != 0 {
+            l3_cache_shared = get_cache_shared(CacheLevel::L3);
+        }
+    }
 
     for (cpu_id, mpidr) in vcpu_mpidr.iter().enumerate().take(num_cpus) {
         let cpu_name = format!("cpu@{cpu_id:x}");
@@ -183,7 +377,89 @@ fn create_cpu_nodes(
             }
         }
 
+        if cache_exist && l1_d_cache_size != 0 && l1_i_cache_size != 0 {
+            // Add cache info.
+            fdt.property_u32("d-cache-size", l1_d_cache_size)?;
+            fdt.property_u32("d-cache-line-size", l1_d_cache_line_size)?;
+            fdt.property_u32("d-cache-sets", l1_d_cache_sets)?;
+
+            fdt.property_u32("i-cache-size", l1_i_cache_size)?;
+            fdt.property_u32("i-cache-line-size", l1_i_cache_line_size)?;
+            fdt.property_u32("i-cache-sets", l1_i_cache_sets)?;
+
+            if l2_cache_size != 0 && !l2_cache_shared {
+                fdt.property_u32(
+                    "next-level-cache",
+                    cpu_id as u32 + max_cpus + FIRST_VCPU_PHANDLE + L2_CACHE_PHANDLE,
+                )?;
+
+                let l2_cache_name = "l2-cache0";
+                let l2_cache_node = fdt.begin_node(l2_cache_name)?;
+                // PHANDLE is used to mark device node, and PHANDLE is unique. To avoid phandle
+                // conflicts with other device nodes, consider the previous CPU PHANDLE, so the
+                // CPU L2 cache PHANDLE must start from the largest CPU PHANDLE plus 1.
+                fdt.property_u32(
+                    "phandle",
+                    cpu_id as u32 + max_cpus + FIRST_VCPU_PHANDLE + L2_CACHE_PHANDLE,
+                )?;
+
+                fdt.property_string("compatible", "cache")?;
+                fdt.property_u32("cache-size", l2_cache_size)?;
+                fdt.property_u32("cache-line-size", l2_cache_line_size)?;
+                fdt.property_u32("cache-sets", l2_cache_sets)?;
+                fdt.property_u32("cache-level", 2)?;
+
+                if l3_cache_size != 0 && l3_cache_shared {
+                    let package_id: u32 = cpu_id as u32 / cores_per_package as u32;
+                    fdt.property_u32(
+                        "next-level-cache",
+                        package_id
+                            + num_cpus as u32
+                            + max_cpus
+                            + FIRST_VCPU_PHANDLE
+                            + L2_CACHE_PHANDLE
+                            + L3_CACHE_PHANDLE,
+                    )?;
+                }
+
+                fdt.end_node(l2_cache_node)?;
+            }
+            if l2_cache_size != 0 && l2_cache_shared {
+                warn!("L2 cache shared with other cpus");
+            }
+        }
+
         fdt.end_node(cpu_node)?;
+    }
+
+    if cache_exist && l3_cache_size != 0 && !l2_cache_shared && l3_cache_shared {
+        let mut i: u32 = 0;
+        while i < packages.into() {
+            let l3_cache_name = "l3-cache0";
+            let l3_cache_node = fdt.begin_node(l3_cache_name)?;
+            // ARM L3 cache is generally shared within the package (socket), so the
+            // L3 cache node pointed to by the CPU in the package has the same L3
+            // cache PHANDLE. The L3 cache phandle must start from the largest L2
+            // cache PHANDLE plus 1 to avoid duplication.
+            fdt.property_u32(
+                "phandle",
+                i + num_cpus as u32
+                    + max_cpus
+                    + FIRST_VCPU_PHANDLE
+                    + L2_CACHE_PHANDLE
+                    + L3_CACHE_PHANDLE,
+            )?;
+
+            fdt.property_string("compatible", "cache")?;
+            fdt.property_null("cache-unified")?;
+            fdt.property_u32("cache-size", l3_cache_size)?;
+            fdt.property_u32("cache-line-size", l3_cache_line_size)?;
+            fdt.property_u32("cache-sets", l3_cache_sets)?;
+            fdt.property_u32("cache-level", 3)?;
+            fdt.end_node(l3_cache_node)?;
+
+            i += 1;
+        }
     }
 
     if let Some(topology) = vcpu_topology {
@@ -260,32 +536,86 @@ fn create_memory_node(
             fdt.end_node(memory_node)?;
         }
     } else {
-        let last_addr = guest_mem.last_addr().raw_value();
-        if last_addr < super::layout::MEM_32BIT_RESERVED_START.raw_value() {
-            // Case 1: all RAM is under the hole
-            let mem_size = last_addr - super::layout::RAM_START.raw_value() + 1;
-            let mem_reg_prop = [super::layout::RAM_START.raw_value(), mem_size];
-            let memory_node = fdt.begin_node("memory")?;
-            fdt.property_string("device_type", "memory")?;
-            fdt.property_array_u64("reg", &mem_reg_prop)?;
-            fdt.end_node(memory_node)?;
-        } else {
-            // Case 2: RAM is split by the hole
-            // Region 1: RAM before the hole
-            let mem_size = super::layout::MEM_32BIT_RESERVED_START.raw_value()
-                - super::layout::RAM_START.raw_value();
-            let mem_reg_prop = [super::layout::RAM_START.raw_value(), mem_size];
-            let memory_node_name = format!("memory@{:x}", super::layout::RAM_START.raw_value());
+        // Note: memory regions from "GuestMemory" are sorted and non-zero sized.
+        let ram_regions = {
+            let mut ram_regions = Vec::new();
+            let mut current_start = guest_mem
+                .iter()
+                .next()
+                .map(GuestMemoryRegion::start_addr)
+                .expect("GuestMemory must have one memory region at least")
+                .raw_value();
+            let mut current_end = current_start;
+
+            for (start, size) in guest_mem
+                .iter()
+                .map(|m| (m.start_addr().raw_value(), m.len()))
+            {
+                if current_end == start {
+                    // This zone is continuous with the previous one.
+                    current_end += size;
+                } else {
+                    ram_regions.push((current_start, current_end));
+
+                    current_start = start;
+                    current_end = start + size;
+                }
+            }
+
+            ram_regions.push((current_start, current_end));
+
+            ram_regions
+        };
+
+        if ram_regions.len() > 2 {
+            panic!(
+                "There should be up to two non-continuous regions, devidided by the
+                    gap at the end of 32bit address space."
+            );
+        }
+
+        // Create the memory node for memory region before the gap
+        {
+            let (first_region_start, first_region_end) = ram_regions
+                .first()
+                .expect("There should be at last one memory region");
+            let ram_start = super::layout::RAM_START.raw_value();
+            let mem_32bit_reserved_start = super::layout::MEM_32BIT_RESERVED_START.raw_value();
+
+            if !((first_region_start <= &ram_start)
+                && (first_region_end > &ram_start)
+                && (first_region_end <= &mem_32bit_reserved_start))
+            {
+                panic!(
+                    "Unexpected first memory region layout: (start: 0x{:08x}, end: 0x{:08x}).
+                    ram_start: 0x{:08x}, mem_32bit_reserved_start: 0x{:08x}",
+                    first_region_start, first_region_end, ram_start, mem_32bit_reserved_start
+                );
+            }
+
+            let mem_size = first_region_end - ram_start;
+            let mem_reg_prop = [ram_start, mem_size];
+            let memory_node_name = format!("memory@{:x}", ram_start);
             let memory_node = fdt.begin_node(&memory_node_name)?;
             fdt.property_string("device_type", "memory")?;
             fdt.property_array_u64("reg", &mem_reg_prop)?;
             fdt.end_node(memory_node)?;
+        }
 
-            // Region 2: RAM after the hole
-            let mem_size = last_addr - super::layout::RAM_64BIT_START.raw_value() + 1;
-            let mem_reg_prop = [super::layout::RAM_64BIT_START.raw_value(), mem_size];
-            let memory_node_name =
-                format!("memory@{:x}", super::layout::RAM_64BIT_START.raw_value());
+        // Create the memory map entry for memory region after the gap if any
+        if let Some((second_region_start, second_region_end)) = ram_regions.get(1) {
+            let ram_64bit_start = super::layout::RAM_64BIT_START.raw_value();
+
+            if second_region_start != &ram_64bit_start {
+                panic!(
+                    "Unexpected second memory region layout: start: 0x{:08x}, ram_64bit_start: 0x{:08x}",
+                    second_region_start, ram_64bit_start
+                );
+            }
+
+            let mem_size = second_region_end - ram_64bit_start;
+            let mem_reg_prop = [ram_64bit_start, mem_size];
+            let memory_node_name = format!("memory@{:x}", ram_64bit_start);
             let memory_node = fdt.begin_node(&memory_node_name)?;
             fdt.property_string("device_type", "memory")?;
             fdt.property_array_u64("reg", &mem_reg_prop)?;
