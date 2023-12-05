@@ -213,7 +213,7 @@ impl PerformanceTest {
         let mut hashing_page_time: Vec<f64> = Vec::new();
         let mut hashing_page_count: Vec<f64> = Vec::new();
         let mut launch_command_time: Vec<f64> = Vec::new();
-        let mut res: Vec<f64> = Vec::new();
+        let mut res: Vec<f64>;
 
         for _ in 0..overrides
             .test_iterations
@@ -353,8 +353,8 @@ fn get_perf_attrb(
     let res: f64 = match perf_attrb {
         PerfAttrib::Mean => mean(data).unwrap(),
         PerfAttrib::StdDev => std_deviation(data).unwrap(),
-        PerfAttrib::Max => data.clone().into_iter().reduce(f64::max).unwrap(),
-        PerfAttrib::Min => data.clone().into_iter().reduce(f64::min).unwrap(),
+        PerfAttrib::Max => data.iter().cloned().max_by(|x, y| x.partial_cmp(y).unwrap()).unwrap(),
+        PerfAttrib::Min => data.iter().cloned().min_by(|x, y| x.partial_cmp(y).unwrap()).unwrap(),
     };
     match unit_adjuster {
         Some(f) => Some(f(res)),
