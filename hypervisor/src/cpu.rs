@@ -22,6 +22,14 @@ use thiserror::Error;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemoryAtomic;
+#[cfg(target_arch = "x86_64")]
+#[derive(Copy, Clone, Default)]
+pub enum CpuVendor {
+    #[default]
+    Unknown,
+    Intel,
+    AMD,
+}
 
 #[derive(Error, Debug)]
 ///
@@ -93,12 +101,12 @@ pub enum HypervisorCpuError {
     #[error("Failed to get Msr entries: {0}")]
     GetMsrEntries(#[source] anyhow::Error),
     ///
-    /// Setting MSR entries error
+    /// Setting multi-processing  state error
     ///
     #[error("Failed to set MP state: {0}")]
     SetMpState(#[source] anyhow::Error),
     ///
-    /// Getting Msr entries error
+    /// Getting multi-processing  state error
     ///
     #[error("Failed to get MP state: {0}")]
     GetMpState(#[source] anyhow::Error),
@@ -245,7 +253,7 @@ pub enum HypervisorCpuError {
     UnknownTdxVmCall,
     #[cfg(target_arch = "aarch64")]
     ///
-    /// Failed to intialize PMU
+    /// Failed to initialize PMU
     ///
     #[error("Failed to initialize PMU")]
     InitializePmu,
@@ -255,6 +263,26 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to get TSC frequency: {0}")]
     GetTscKhz(#[source] anyhow::Error),
+    ///
+    /// Error setting TSC frequency
+    ///
+    #[error("Failed to set TSC frequency: {0}")]
+    SetTscKhz(#[source] anyhow::Error),
+    ///
+    /// Error reading value at given GPA
+    ///
+    #[error("Failed to read from GPA: {0}")]
+    GpaRead(#[source] anyhow::Error),
+    ///
+    /// Error writing value at given GPA
+    ///
+    #[error("Failed to write to GPA: {0}")]
+    GpaWrite(#[source] anyhow::Error),
+    ///
+    /// Error getting CPUID leaf
+    ///
+    #[error("Failed to get CPUID entries: {0}")]
+    GetCpuidVales(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -455,6 +483,7 @@ pub trait Vcpu: Send + Sync {
     /// Return the list of initial MSR entries for a VCPU
     ///
     fn boot_msr_entries(&self) -> Vec<MsrEntry>;
+
     #[cfg(target_arch = "x86_64")]
     ///
     /// Get the frequency of the TSC if available
@@ -462,6 +491,17 @@ pub trait Vcpu: Send + Sync {
     fn tsc_khz(&self) -> Result<Option<u32>> {
         Ok(None)
     }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// Set the frequency of the TSC if available
+    ///
+    fn set_tsc_khz(&self, _freq: u32) -> Result<()> {
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    ///
+    /// X86 specific call to retrieve cpuid leaf
+    ///
     fn get_cpuid_values(
         &self,
         _function: u32,

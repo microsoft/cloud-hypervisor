@@ -28,11 +28,14 @@
 //!    response channel Receiver.
 //! 5. The thread handles the response and forwards potential errors.
 
+#[cfg(feature = "dbus_api")]
+pub mod dbus;
+pub mod http;
+
+#[cfg(feature = "dbus_api")]
+pub use self::dbus::start_dbus_thread;
 pub use self::http::start_http_fd_thread;
 pub use self::http::start_http_path_thread;
-
-pub mod http;
-pub mod http_endpoint;
 
 use crate::config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, UserDeviceConfig,
@@ -168,6 +171,7 @@ pub struct VmmPingResponse {
     pub build_version: String,
     pub version: String,
     pub pid: i64,
+    pub features: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]

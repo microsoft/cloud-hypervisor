@@ -24,7 +24,7 @@ use thiserror::Error;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::{Queue, QueueT};
-use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
@@ -197,7 +197,6 @@ impl Rng {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
 
-            //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             (avail_features, 0, false)
         };
 

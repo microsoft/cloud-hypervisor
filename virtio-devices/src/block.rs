@@ -19,8 +19,8 @@ use crate::thread_helper::spawn_virtio_thread;
 use crate::GuestMemoryMmap;
 use crate::VirtioInterrupt;
 use anyhow::anyhow;
-use block_util::{
-    async_io::AsyncIo, async_io::AsyncIoError, async_io::DiskFile, build_disk_image_id, Request,
+use block::{
+    async_io::AsyncIo, async_io::AsyncIoError, async_io::DiskFile, build_serial, Request,
     RequestType, VirtioBlockConfig,
 };
 use rate_limiter::{RateLimiter, TokenType};
@@ -63,11 +63,11 @@ const LATENCY_SCALE: u64 = 10000;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Failed to parse the request: {0}")]
-    RequestParsing(block_util::Error),
+    RequestParsing(block::Error),
     #[error("Failed to execute the request: {0}")]
-    RequestExecuting(block_util::ExecuteError),
+    RequestExecuting(block::ExecuteError),
     #[error("Failed to complete the request: {0}")]
-    RequestCompleting(block_util::Error),
+    RequestCompleting(block::Error),
     #[error("Missing the expected entry in the list of requests")]
     MissingEntryRequestList,
     #[error("The asynchronous request returned with failure")]
@@ -106,13 +106,13 @@ impl Default for BlockCounters {
             read_bytes: Arc::new(AtomicU64::new(0)),
             read_ops: Arc::new(AtomicU64::new(0)),
             read_latency_min: Arc::new(AtomicU64::new(u64::MAX)),
-            read_latency_max: Arc::new(AtomicU64::new(0)),
-            read_latency_avg: Arc::new(AtomicU64::new(0)),
+            read_latency_max: Arc::new(AtomicU64::new(u64::MAX)),
+            read_latency_avg: Arc::new(AtomicU64::new(u64::MAX)),
             write_bytes: Arc::new(AtomicU64::new(0)),
             write_ops: Arc::new(AtomicU64::new(0)),
             write_latency_min: Arc::new(AtomicU64::new(u64::MAX)),
-            write_latency_max: Arc::new(AtomicU64::new(0)),
-            write_latency_avg: Arc::new(AtomicU64::new(0)),
+            write_latency_max: Arc::new(AtomicU64::new(u64::MAX)),
+            write_latency_avg: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 }
@@ -124,7 +124,7 @@ struct BlockEpollHandler {
     disk_image: Box<dyn AsyncIo>,
     disk_nsectors: u64,
     interrupt_cb: Arc<dyn VirtioInterrupt>,
-    disk_image_id: Vec<u8>,
+    serial: Vec<u8>,
     kill_evt: EventFd,
     pause_evt: EventFd,
     writeback: Arc<AtomicBool>,
@@ -212,7 +212,7 @@ impl BlockEpollHandler {
                     desc_chain.memory(),
                     self.disk_nsectors,
                     self.disk_image.as_mut(),
-                    &self.disk_image_id,
+                    &self.serial,
                     desc_chain.head_index() as u64,
                     #[cfg(all(feature = "mshv", feature = "snp"))]
                     Some(&self.vm.clone()),
@@ -290,10 +290,12 @@ impl BlockEpollHandler {
             request.complete_async().map_err(Error::RequestCompleting)?;
 
             let latency = request.start.elapsed().as_micros() as u64;
-            let read_ops_last = self.counters.read_ops.load(Ordering::Relaxed) as i64;
-            let write_ops_last = self.counters.write_ops.load(Ordering::Relaxed) as i64;
-            let mut read_avg = self.counters.read_latency_avg.load(Ordering::Relaxed) as i64;
-            let mut write_avg = self.counters.write_latency_avg.load(Ordering::Relaxed) as i64;
+            let read_ops_last = self.counters.read_ops.load(Ordering::Relaxed);
+            let write_ops_last = self.counters.write_ops.load(Ordering::Relaxed);
+            let read_max = self.counters.read_latency_max.load(Ordering::Relaxed);
+            let write_max = self.counters.write_latency_max.load(Ordering::Relaxed);
+            let mut read_avg = self.counters.read_latency_avg.load(Ordering::Relaxed);
+            let mut write_avg = self.counters.write_latency_avg.load(Ordering::Relaxed);
             let (status, len) = if result >= 0 {
                 match request.request_type {
                     RequestType::In => {
@@ -306,14 +308,24 @@ impl BlockEpollHandler {
                                 .read_latency_min
                                 .store(latency, Ordering::Relaxed);
                         }
-                        if latency > self.counters.read_latency_max.load(Ordering::Relaxed) {
+                        if latency > read_max || read_max == u64::MAX {
                             self.counters
                                 .read_latency_max
                                 .store(latency, Ordering::Relaxed);
                         }
-                        read_avg = read_avg
-                            + ((latency * LATENCY_SCALE) as i64 - read_avg)
-                                / (read_ops_last + read_ops.0 as i64);
+
+                        // Special case the first real latency report
+                        read_avg = if read_avg == u64::MAX {
+                            latency * LATENCY_SCALE
+                        } else {
+                            // Cumulative average is guaranteed to be
+                            // positive if being calculated properly
+                            (read_avg as i64
+                                + ((latency * LATENCY_SCALE) as i64 - read_avg as i64)
+                                    / (read_ops_last + read_ops.0) as i64)
+                                .try_into()
+                                .unwrap()
+                        };
                     }
                     RequestType::Out => {
                         if !request.writeback {
@@ -328,25 +340,35 @@ impl BlockEpollHandler {
                                 .write_latency_min
                                 .store(latency, Ordering::Relaxed);
                         }
-                        if latency > self.counters.write_latency_max.load(Ordering::Relaxed) {
+                        if latency > write_max || write_max == u64::MAX {
                             self.counters
                                 .write_latency_max
                                 .store(latency, Ordering::Relaxed);
                         }
-                        write_avg = write_avg
-                            + ((latency * LATENCY_SCALE) as i64 - write_avg)
-                                / (write_ops_last + write_ops.0 as i64);
+
+                        // Special case the first real latency report
+                        write_avg = if write_avg == u64::MAX {
+                            latency * LATENCY_SCALE
+                        } else {
+                            // Cumulative average is guaranteed to be
+                            // positive if being calculated properly
+                            (write_avg as i64
+                                + ((latency * LATENCY_SCALE) as i64 - write_avg as i64)
+                                    / (write_ops_last + write_ops.0) as i64)
+                                .try_into()
+                                .unwrap()
+                        }
                     }
                     _ => {}
                 }
 
                 self.counters
                     .read_latency_avg
-                    .store(read_avg as u64, Ordering::Relaxed);
+                    .store(read_avg, Ordering::Relaxed);
 
                 self.counters
                     .write_latency_avg
-                    .store(write_avg as u64, Ordering::Relaxed);
+                    .store(write_avg, Ordering::Relaxed);
 
                 (VIRTIO_BLK_S_OK, result as u32)
             } else {
@@ -497,6 +519,7 @@ pub struct Block {
     rate_limiter_config: Option<RateLimiterConfig>,
     exit_evt: EventFd,
     read_only: bool,
+    serial: Vec<u8>,
     #[cfg(all(feature = "mshv", feature = "snp"))]
     vm: Arc<dyn hypervisor::Vm>,
 }
@@ -523,6 +546,7 @@ impl Block {
         iommu: bool,
         num_queues: usize,
         queue_size: u16,
+        serial: Option<String>,
         seccomp_action: SeccompAction,
         rate_limiter_config: Option<RateLimiterConfig>,
         exit_evt: EventFd,
@@ -604,6 +628,10 @@ impl Block {
                 (disk_nsectors, avail_features, 0, config, false)
             };
 
+        let serial = serial
+            .map(Vec::from)
+            .unwrap_or_else(|| build_serial(&disk_path));
+
         Ok(Block {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Block as u32,
@@ -626,6 +654,7 @@ impl Block {
             rate_limiter_config,
             exit_evt,
             read_only,
+            serial,
             #[cfg(all(feature = "mshv", feature = "snp"))]
             vm,
         })
@@ -724,7 +753,6 @@ impl VirtioDevice for Block {
     ) -> ActivateResult {
         self.common.activate(&queues, &interrupt_cb)?;
 
-        let disk_image_id = build_disk_image_id(&self.disk_path);
         self.update_writeback();
 
         let mut epoll_threads = Vec::new();
@@ -752,7 +780,7 @@ impl VirtioDevice for Block {
                     })?,
                 disk_nsectors: self.disk_nsectors,
                 interrupt_cb: interrupt_cb.clone(),
-                disk_image_id: disk_image_id.clone(),
+                serial: self.serial.clone(),
                 kill_evt,
                 pause_evt,
                 writeback: self.writeback.clone(),

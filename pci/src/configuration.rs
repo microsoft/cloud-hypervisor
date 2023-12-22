@@ -265,10 +265,10 @@ pub enum PciExpressCapabilityId {
     VendorSpecificExtendedCapability = 0x000b,
     ConfigurationAccessCorrelation = 0x000c,
     AccessControlServices = 0x000d,
-    AlternativeRoutingIdentificationIntepretation = 0x000e,
+    AlternativeRoutingIdentificationInterpretation = 0x000e,
     AddressTranslationServices = 0x000f,
     SingleRootIoVirtualization = 0x0010,
-    DeprecatedMultiRootIoVirtualzation = 0x0011,
+    DeprecatedMultiRootIoVirtualization = 0x0011,
     Multicast = 0x0012,
     PageRequestInterface = 0x0013,
     ReservedForAmd = 0x0014,
@@ -279,7 +279,7 @@ pub enum PciExpressCapabilityId {
     SecondaryPciExpress = 0x0019,
     ProtocolMultiplexing = 0x001a,
     ProcessAddressSpaceId = 0x001b,
-    LnRequestor = 0x001c,
+    LnRequester = 0x001c,
     DownstreamPortContainment = 0x001d,
     L1PmSubstates = 0x001e,
     PrecisionTimeMeasurement = 0x001f,
@@ -319,10 +319,10 @@ impl From<u16> for PciExpressCapabilityId {
             0x000b => PciExpressCapabilityId::VendorSpecificExtendedCapability,
             0x000c => PciExpressCapabilityId::ConfigurationAccessCorrelation,
             0x000d => PciExpressCapabilityId::AccessControlServices,
-            0x000e => PciExpressCapabilityId::AlternativeRoutingIdentificationIntepretation,
+            0x000e => PciExpressCapabilityId::AlternativeRoutingIdentificationInterpretation,
             0x000f => PciExpressCapabilityId::AddressTranslationServices,
             0x0010 => PciExpressCapabilityId::SingleRootIoVirtualization,
-            0x0011 => PciExpressCapabilityId::DeprecatedMultiRootIoVirtualzation,
+            0x0011 => PciExpressCapabilityId::DeprecatedMultiRootIoVirtualization,
             0x0012 => PciExpressCapabilityId::Multicast,
             0x0013 => PciExpressCapabilityId::PageRequestInterface,
             0x0014 => PciExpressCapabilityId::ReservedForAmd,
@@ -333,7 +333,7 @@ impl From<u16> for PciExpressCapabilityId {
             0x0019 => PciExpressCapabilityId::SecondaryPciExpress,
             0x001a => PciExpressCapabilityId::ProtocolMultiplexing,
             0x001b => PciExpressCapabilityId::ProcessAddressSpaceId,
-            0x001c => PciExpressCapabilityId::LnRequestor,
+            0x001c => PciExpressCapabilityId::LnRequester,
             0x001d => PciExpressCapabilityId::DownstreamPortContainment,
             0x001e => PciExpressCapabilityId::L1PmSubstates,
             0x001f => PciExpressCapabilityId::PrecisionTimeMeasurement,
@@ -452,10 +452,9 @@ impl From<PciBarType> for PciBarRegionType {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<PciBarType> for PciBarRegionType {
-    fn into(self) -> PciBarType {
-        match self {
+impl From<PciBarRegionType> for PciBarType {
+    fn from(val: PciBarRegionType) -> Self {
+        match val {
             PciBarRegionType::IoRegion => PciBarType::Io,
             PciBarRegionType::Memory32BitRegion => PciBarType::Mmio32,
             PciBarRegionType::Memory64BitRegion => PciBarType::Mmio64,
@@ -469,10 +468,9 @@ pub enum PciBarPrefetchable {
     Prefetchable = 0x08,
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<bool> for PciBarPrefetchable {
-    fn into(self) -> bool {
-        match self {
+impl From<PciBarPrefetchable> for bool {
+    fn from(val: PciBarPrefetchable) -> Self {
+        match val {
             PciBarPrefetchable::NotPrefetchable => false,
             PciBarPrefetchable::Prefetchable => true,
         }

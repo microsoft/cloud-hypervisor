@@ -14,12 +14,7 @@ fi
 WORKLOADS_DIR="$HOME/workloads"
 mkdir -p "$WORKLOADS_DIR"
 
-FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
-FW="$WORKLOADS_DIR/hypervisor-fw"
-pushd $WORKLOADS_DIR
-rm -f $FW
-time wget --quiet $FW_URL || exit 1
-popd
+download_hypervisor_fw
 
 JAMMY_OS_IMAGE_NAME="jammy-server-cloudimg-amd64-custom-20230119-0.qcow2"
 JAMMY_OS_IMAGE_URL="https://cloud-hypervisor.azureedge.net/$JAMMY_OS_IMAGE_NAME"
@@ -38,15 +33,12 @@ if [ ! -f "$JAMMY_OS_RAW_IMAGE" ]; then
     popd
 fi
 
-BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 CFLAGS=""
-TARGET_CC=""
 if [[ "${BUILD_TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-    TARGET_CC="musl-gcc"
     CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --no-default-features --features "kvm,mshv" --all --release --target $BUILD_TARGET
+cargo build --features mshv --all --release --target $BUILD_TARGET
 
 export RUST_BACKTRACE=1
 

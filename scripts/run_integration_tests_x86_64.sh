@@ -20,13 +20,7 @@ fi
 
 cp scripts/sha1sums-x86_64 $WORKLOADS_DIR
 
-FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
-FW="$WORKLOADS_DIR/hypervisor-fw"
-if [ ! -f "$FW" ]; then
-    pushd $WORKLOADS_DIR
-    time wget --quiet $FW_URL || exit 1
-    popd
-fi
+download_hypervisor_fw
 
 OVMF_FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/edk2/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
 OVMF_FW="$WORKLOADS_DIR/CLOUDHV.fd"
@@ -50,6 +44,14 @@ FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
 if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
     pushd $WORKLOADS_DIR
     time qemu-img convert -p -f qcow2 -O raw $FOCAL_OS_IMAGE_NAME $FOCAL_OS_RAW_IMAGE_NAME || exit 1
+    popd
+fi
+
+FOCAL_OS_QCOW_BACKING_FILE_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0-backing.qcow2"
+FOCAL_OS_QCOW_BACKING_FILE_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_QCOW_BACKING_FILE_IMAGE_NAME"
+if [ ! -f "$FOCAL_OS_QCOW_BACKING_FILE_IMAGE" ]; then
+    pushd $WORKLOADS_DIR
+    time qemu-img create -f qcow2 -b $FOCAL_OS_IMAGE -F qcow2 $FOCAL_OS_QCOW_BACKING_FILE_IMAGE_NAME
     popd
 fi
 
@@ -154,9 +156,7 @@ cp $FOCAL_OS_RAW_IMAGE $VFIO_DIR
 cp $FW $VFIO_DIR
 cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
 
-BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
-
-cargo build --no-default-features --features "kvm,mshv,igvm,snp" --all  --release --target $BUILD_TARGET
+cargo build --no-default-features --features "kvm,mshv" --all  --release --target $BUILD_TARGET
 
 # We always copy a fresh version of our binary for our L2 guest.
 cp target/$BUILD_TARGET/release/cloud-hypervisor $VFIO_DIR
@@ -189,6 +189,15 @@ RES=$?
 if [ $RES -eq 0 ]; then
     export RUST_BACKTRACE=1
     time cargo test $test_features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
+    RES=$?
+fi
+
+# Run tests on dbus_api
+if [ $RES -eq 0 ]; then
+    cargo build --features "mshv,dbus_api" --all  --release --target $BUILD_TARGET
+    export RUST_BACKTRACE=1
+    # integration tests now do not reply on build feature "dbus_api"
+    time cargo test $test_features "dbus_api::$test_filter" -- ${test_binary_args[*]}
     RES=$?
 fi
 

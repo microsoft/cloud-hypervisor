@@ -22,7 +22,7 @@ pipeline {
                     steps {
                         script {
                             runWorkers = false
-                            echo 'No changes requring a build'
+                            echo 'No changes requiring a build'
                         }
                     }
                 }
@@ -53,6 +53,9 @@ pipeline {
                             return runWorkers
                         }
                     }
+                    environment {
+                        AUTH_DOWNLOAD_TOKEN = credentials('8a26fd74-d40e-414c-9132-ff3f867806ef')
+                    }
                     stages {
                         stage('Checkout') {
                             steps {
@@ -62,11 +65,6 @@ pipeline {
                         stage('Prepare environment') {
                             steps {
                                 sh 'scripts/prepare_vdpa.sh'
-                            }
-                        }
-                        stage('Run OpenAPI tests') {
-                            steps {
-                                sh 'scripts/run_openapi_tests.sh'
                             }
                         }
                         stage('Run unit tests') {
@@ -117,6 +115,66 @@ pipeline {
                         }
                     }
                 }
+                stage('Worker build - AMD') {
+                    agent { node { label 'jammy-amd' } }
+                    when {
+                        beforeAgent true
+                        expression {
+                            return runWorkers
+                        }
+                    }
+                    environment {
+                        AUTH_DOWNLOAD_TOKEN = credentials('8a26fd74-d40e-414c-9132-ff3f867806ef')
+                    }
+                    stages {
+                        stage('Checkout') {
+                            steps {
+                                checkout scm
+                            }
+                        }
+                        stage('Prepare environment') {
+                            steps {
+                                sh 'scripts/prepare_vdpa.sh'
+                            }
+                        }
+                        stage('Run integration tests') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'sudo modprobe openvswitch'
+                                sh 'scripts/dev_cli.sh tests --integration -- -- --skip common_parallel::test_vfio'
+                            }
+                        }
+                        stage('Run live-migration integration tests') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'sudo modprobe openvswitch'
+                                sh 'scripts/dev_cli.sh tests --integration-live-migration'
+                            }
+                        }
+                        stage('Run integration tests for musl') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'sudo modprobe openvswitch'
+                                sh 'scripts/dev_cli.sh tests --integration --libc musl -- -- --skip common_parallel::test_vfio'
+                            }
+                        }
+                        stage('Run live-migration integration tests for musl') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'sudo modprobe openvswitch'
+                                sh 'scripts/dev_cli.sh tests --integration-live-migration --libc musl'
+                            }
+                        }
+                    }
+                }
                 stage('AArch64 worker build') {
                     agent { node { label 'bionic-arm64' } }
                     when {
@@ -150,7 +208,7 @@ pipeline {
                         }
                         stage('Install azure-cli') {
                             steps {
-                                installAzureCli('bionic', 'arm64')
+                                installAzureCli('focal', 'arm64')
                             }
                         }
                         stage('Download Windows image') {
@@ -192,52 +250,52 @@ pipeline {
                         }
                     }
                 }
-                // stage('Worker build - Windows guest') {
-                //     agent { node { label 'jammy' } }
-                //     when {
-                //         beforeAgent true
-                //         expression {
-                //             return runWorkers
-                //         }
-                //     }
-                //     environment {
-                //             AZURE_CONNECTION_STRING = credentials('46b4e7d6-315f-4cc1-8333-b58780863b9b')
-                //     }
-                //     stages {
-                //         stage('Checkout') {
-                //             steps {
-                //                 checkout scm
-                //             }
-                //         }
-                //         stage('Install azure-cli') {
-                //             steps {
-                //                 installAzureCli('jammy', 'amd64')
-                //             }
-                //         }
-                //         stage('Download assets') {
-                //             steps {
-                //                 sh "mkdir ${env.HOME}/workloads"
-                //                 sh 'az storage blob download --container-name private-images --file "$HOME/workloads/windows-server-2022-amd64-2.raw" --name windows-server-2022-amd64-2.raw --connection-string "$AZURE_CONNECTION_STRING"'
-                //             }
-                //         }
-                //         stage('Run Windows guest integration tests') {
-                //             options {
-                //                 timeout(time: 1, unit: 'HOURS')
-                //             }
-                //             steps {
-                //                 sh 'scripts/dev_cli.sh tests --integration-windows'
-                //             }
-                //         }
-                //         stage('Run Windows guest integration tests for musl') {
-                //             options {
-                //                 timeout(time: 1, unit: 'HOURS')
-                //             }
-                //             steps {
-                //                 sh 'scripts/dev_cli.sh tests --integration-windows --libc musl'
-                //             }
-                //         }
-                //     }
-                // }
+                stage('Worker build - Windows guest') {
+                    agent { node { label 'jammy' } }
+                    when {
+                        beforeAgent true
+                        expression {
+                            return runWorkers
+                        }
+                    }
+                    environment {
+                            AZURE_CONNECTION_STRING = credentials('46b4e7d6-315f-4cc1-8333-b58780863b9b')
+                    }
+                    stages {
+                        stage('Checkout') {
+                            steps {
+                                checkout scm
+                            }
+                        }
+                        stage('Install azure-cli') {
+                            steps {
+                                installAzureCli('jammy', 'amd64')
+                            }
+                        }
+                        stage('Download assets') {
+                            steps {
+                                sh "mkdir ${env.HOME}/workloads"
+                                sh 'az storage blob download --container-name private-images --file "$HOME/workloads/windows-server-2022-amd64-2.raw" --name windows-server-2022-amd64-2.raw --connection-string "$AZURE_CONNECTION_STRING"'
+                            }
+                        }
+                        stage('Run Windows guest integration tests') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'scripts/dev_cli.sh tests --integration-windows'
+                            }
+                        }
+                        stage('Run Windows guest integration tests for musl') {
+                            options {
+                                timeout(time: 1, unit: 'HOURS')
+                            }
+                            steps {
+                                sh 'scripts/dev_cli.sh tests --integration-windows --libc musl'
+                            }
+                        }
+                    }
+                }
                 stage('Worker build - Metrics') {
                     agent { node { label 'jammy-metrics' } }
                     when {
@@ -307,6 +365,9 @@ pipeline {
                             }
                         }
                     }
+                    environment {
+                        AUTH_DOWNLOAD_TOKEN = credentials('8a26fd74-d40e-414c-9132-ff3f867806ef')
+                    }
                     stages {
                         stage('Checkout') {
                             steps {
@@ -347,6 +408,9 @@ pipeline {
                                 return runWorkers
                             }
                         }
+                    }
+                    environment {
+                        AUTH_DOWNLOAD_TOKEN = credentials('8a26fd74-d40e-414c-9132-ff3f867806ef')
                     }
                     stages {
                         stage('Checkout') {
@@ -444,6 +508,20 @@ def boolean skipWorkerBuild() {
     if (sh(
         returnStatus: true,
         script: "git diff --name-only origin/${env.CHANGE_TARGET}... | grep -v -E '.github/'"
+    ) != 0) {
+        return true
+    }
+
+    if (sh(
+        returnStatus: true,
+        script: "git diff --name-only origin/${env.CHANGE_TARGET}... | grep -v '^\\.'"
+    ) != 0) {
+        return true
+    }
+
+    if (sh(
+        returnStatus: true,
+        script: "git diff --name-only origin/${env.CHANGE_TARGET}... | grep -v 'gitlint'"
     ) != 0) {
         return true
     }

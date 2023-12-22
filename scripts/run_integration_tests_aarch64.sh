@@ -11,12 +11,13 @@ build_spdk_nvme() {
     SPDK_DIR="$WORKLOADS_DIR/spdk"
     SPDK_REPO="https://github.com/spdk/spdk.git"
     SPDK_DEPLOY_DIR="/usr/local/bin/spdk-nvme"
-    checkout_repo "$SPDK_DIR" "$SPDK_REPO" master "6301f8915de32baed10dba1eebed556a6749211a"
+    checkout_repo "$SPDK_DIR" "$SPDK_REPO" master "ef8bcce58f3f02b79c0619a297e4f17e81e62b24"
 
     if [ ! -f "$SPDK_DIR/.built" ]; then
         pushd $SPDK_DIR
         git submodule update --init
         apt-get update
+        sed -i "/grpcio/d" scripts/pkgdep/debian.sh
         ./scripts/pkgdep.sh
         ./configure --with-vfio-user
         chmod +x /usr/local/lib/python3.8/dist-packages/ninja/data/bin/ninja
@@ -30,6 +31,7 @@ build_spdk_nvme() {
     cp "$WORKLOADS_DIR/spdk/build/bin/nvmf_tgt" $SPDK_DEPLOY_DIR/nvmf_tgt
     cp "$WORKLOADS_DIR/spdk/scripts/rpc.py" $SPDK_DEPLOY_DIR/rpc.py
     cp -r "$WORKLOADS_DIR/spdk/scripts/rpc" $SPDK_DEPLOY_DIR/rpc
+    cp -r "$WORKLOADS_DIR/spdk/python" $SPDK_DEPLOY_DIR/../
 }
 
 build_virtiofsd() {
@@ -40,7 +42,8 @@ build_virtiofsd() {
 
     if [ ! -f "$VIRTIOFSD_DIR/.built" ]; then
         pushd $VIRTIOFSD_DIR
-        time cargo build --release
+        rm -rf target/
+        time RUSTFLAGS="" TARGET_CC="" cargo build --release
         cp target/release/virtiofsd "$WORKLOADS_DIR/" || exit 1
         touch .built
         popd
@@ -92,6 +95,14 @@ update_workloads() {
     if [ ! -f "$FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE" ]; then
         pushd $WORKLOADS_DIR
         time wget --quiet $FOCAL_OS_QCOW2_IMAGE_UNCOMPRESSED_DOWNLOAD_URL || exit 1
+        popd
+    fi
+
+    FOCAL_OS_QCOW2_IMAGE_BACKING_FILE_NAME="focal-server-cloudimg-arm64-custom-20210929-0-backing.qcow2"
+    FOCAL_OS_QCOW2_BACKING_FILE_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_QCOW2_IMAGE_BACKING_FILE_NAME"
+    if [ ! -f "$FOCAL_OS_QCOW2_BACKING_FILE_IMAGE" ]; then
+        pushd $WORKLOADS_DIR
+        time qemu-img create -f qcow2 -b $FOCAL_OS_QCOW2_UNCOMPRESSED_IMAGE -F qcow2 $FOCAL_OS_QCOW2_IMAGE_BACKING_FILE_NAME
         popd
     fi
 
@@ -148,12 +159,25 @@ update_workloads() {
     popd
 
     # Download Cloud Hypervisor binary from its last stable release
-    LAST_RELEASE_VERSION="v30.0"
+    LAST_RELEASE_VERSION="v36.0"
     CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$LAST_RELEASE_VERSION/cloud-hypervisor-static-aarch64"
     CH_RELEASE_NAME="cloud-hypervisor-static-aarch64"
     pushd $WORKLOADS_DIR
-    time wget --quiet $CH_RELEASE_URL -O "$CH_RELEASE_NAME" || exit 1
-    chmod +x $CH_RELEASE_NAME
+    # Repeat a few times to workaround a random wget failure
+    WGET_RETRY_MAX=10
+    wget_retry=0
+
+    until [ "$wget_retry" -ge "$WGET_RETRY_MAX" ]
+    do
+        time wget $CH_RELEASE_URL -O "$CH_RELEASE_NAME" && break
+        wget_retry=$((wget_retry+1))
+    done
+
+    if [ $wget_retry -ge "$WGET_RETRY_MAX" ]; then
+        exit 1
+    else
+        chmod +x $CH_RELEASE_NAME
+    fi
     popd
 
     # Build custom kernel for guest VMs
@@ -223,12 +247,6 @@ if [ $RES -ne 0 ]; then
     exit 1
 fi
 
-BUILD_TARGET="aarch64-unknown-linux-${CH_LIBC}"
-if [[ "${BUILD_TARGET}" == "aarch64-unknown-linux-musl" ]]; then
-    export TARGET_CC="musl-gcc"
-    export RUSTFLAGS="-C link-arg=-lgcc -C link_arg=-specs -C link_arg=/usr/lib/aarch64-linux-musl/musl-gcc.specs"
-fi
-
 export RUST_BACKTRACE=1
 
 cargo build --all --release --target $BUILD_TARGET
@@ -279,6 +297,14 @@ if [ $RES -eq 0 ]; then
     RES=$?
 else
     exit $RES
+fi
+
+# Run tests on dbus_api
+if [ $RES -eq 0 ]; then
+    cargo build --features "dbus_api" --all --release --target $BUILD_TARGET
+    export RUST_BACKTRACE=1
+    time cargo test "dbus_api::$test_filter" --target $BUILD_TARGET -- ${test_binary_args[*]}
+    RES=$?
 fi
 
 exit $RES

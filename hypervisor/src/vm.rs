@@ -19,7 +19,7 @@ use crate::cpu::Vcpu;
 use crate::ClockData;
 use crate::UserMemoryRegion;
 use crate::{IoEventAddress, IrqRoutingEntry};
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 use igvm_defs::IGVM_VHS_SNP_ID_BLOCK;
 use std::any::Any;
 #[cfg(target_arch = "x86_64")]
@@ -192,6 +192,13 @@ pub enum HypervisorVmError {
     #[error("Failed to assert virtual Interrupt: {0}")]
     AsserttVirtualInterrupt(#[source] anyhow::Error),
 
+    #[cfg(feature = "sev_snp")]
+    ///
+    /// Error initializing SEV-SNP on the VM
+    ///
+    #[error("Failed to initialize SEV-SNP: {0}")]
+    InitializeSevSnp(#[source] std::io::Error),
+
     #[cfg(feature = "tdx")]
     ///
     /// Error initializing TDX on the VM
@@ -351,8 +358,13 @@ pub trait Vm: Send + Sync + Any {
     fn stop_dirty_log(&self) -> Result<()>;
     /// Get dirty pages bitmap
     fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
+    #[cfg(feature = "sev_snp")]
+    /// Initialize SEV-SNP on this VM
+    fn sev_snp_init(&self) -> Result<()> {
+        unimplemented!()
+    }
     #[cfg(feature = "tdx")]
-    /// Initalize TDX on this VM
+    /// Initialize TDX on this VM
     fn tdx_init(&self, _cpuid: &[CpuIdEntry], _max_vcpus: u32) -> Result<()> {
         unimplemented!()
     }
@@ -362,7 +374,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "tdx")]
-    /// Initalize a TDX memory region for this VM
+    /// Initialize a TDX memory region for this VM
     fn tdx_init_memory_region(
         &self,
         _host_address: u64,
@@ -374,6 +386,26 @@ pub trait Vm: Send + Sync + Any {
     }
     /// Downcast to the underlying hypervisor VM type
     fn as_any(&self) -> &dyn Any;
+    /// Import the isolated pages
+    #[cfg(feature = "sev_snp")]
+    fn import_isolated_pages(
+        &self,
+        _page_type: u32,
+        _page_size: u32,
+        _pages: &[u64],
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    /// Complete the isolated import
+    #[cfg(feature = "sev_snp")]
+    fn complete_isolated_import(
+        &self,
+        _snp_id_block: IGVM_VHS_SNP_ID_BLOCK,
+        _host_data: &[u8],
+        _id_block_enabled: u8,
+    ) -> Result<()> {
+        unimplemented!()
+    }
 
     #[cfg(feature = "snp")]
     /// Initialize SNP on this VM

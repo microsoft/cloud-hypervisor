@@ -12,6 +12,6 @@ snp = []
 [dependencies]
 cfg-if = "1.0.0"
 hypervisor = { path = "../hypervisor" }
-log = "0.4.17"
-virtio-queue = "0.7.1"
-vm-memory = { version = "0.10.0", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }
+log = "0.4.20"
+virtio-queue = "0.10.0"
+vm-memory = { version = "0.13.1", features = ["backend-mmap", "backend-atomic", "backend-bitmap"] }

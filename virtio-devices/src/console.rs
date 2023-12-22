@@ -28,7 +28,7 @@ use thiserror::Error;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::{Queue, QueueT};
-use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
@@ -59,6 +59,8 @@ enum Error {
     GuestMemoryRead(vm_memory::guest_memory::Error),
     #[error("Failed to write to guest memory: {0}")]
     GuestMemoryWrite(vm_memory::guest_memory::Error),
+    #[error("Failed to write_all output: {0}")]
+    OutputWriteAll(io::Error),
     #[error("Failed to flush output: {0}")]
     OutputFlush(io::Error),
     #[error("Failed to add used index: {0}")]
@@ -208,8 +210,6 @@ impl ConsoleEpollHandler {
             out,
             write_out,
             file_event_registered: false,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
-            vm,
         }
     }
 
@@ -232,6 +232,7 @@ impl ConsoleEpollHandler {
             let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
             let len = cmp::min(desc.len(), in_buffer.len() as u32);
             let source_slice = in_buffer.drain(..len as usize).collect::<Vec<u8>>();
+
             desc_chain
                 .memory()
                 .write_slice(
@@ -656,8 +657,6 @@ impl Console {
             )
         } else {
             let mut avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_CONSOLE_F_SIZE;
-
-            //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
@@ -681,6 +680,7 @@ impl Console {
         });
 
         resizer.update_console_size();
+
         Ok((
             Console {
                 common: VirtioCommon {

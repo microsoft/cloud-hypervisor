@@ -25,7 +25,8 @@ use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
-use arch::RegionType;
+#[cfg(feature = "dbus_api")]
+use api::dbus::{DBusApiOptions, DBusApiShutdownChannels};
 use libc::{tcsetattr, termios, EFD_NONBLOCK, SIGINT, SIGTERM, TCSANOW};
 use memory_manager::MemoryManagerSnapshotData;
 use pci::PciBdf;
@@ -42,6 +43,7 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -51,6 +53,7 @@ use tracer::trace_scoped;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use vm_memory::bitmap::AtomicBitmap;
+use vm_memory::{ReadVolatile, WriteVolatile};
 use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
@@ -117,6 +120,20 @@ pub enum Error {
     /// Cannot create HTTP thread
     #[error("Error spawning HTTP thread: {0}")]
     HttpThreadSpawn(#[source] io::Error),
+
+    /// Cannot create D-Bus thread
+    #[cfg(feature = "dbus_api")]
+    #[error("Error spawning D-Bus thread: {0}")]
+    DBusThreadSpawn(#[source] io::Error),
+
+    /// Cannot start D-Bus session
+    #[cfg(feature = "dbus_api")]
+    #[error("Error starting D-Bus session: {0}")]
+    CreateDBusSession(#[source] zbus::Error),
+
+    /// Cannot create `event-monitor` thread
+    #[error("Error spawning `event-monitor` thread: {0}")]
+    EventMonitorThreadSpawn(#[source] io::Error),
 
     /// Cannot handle the VM STDIN stream
     #[error("Error handling VM stdin: {0:?}")]
@@ -281,12 +298,87 @@ impl Serialize for PciDeviceInfo {
     }
 }
 
+pub fn feature_list() -> Vec<String> {
+    vec![
+        #[cfg(feature = "dbus_api")]
+        "dbus_api".to_string(),
+        #[cfg(feature = "dhat-heap")]
+        "dhat-heap".to_string(),
+        #[cfg(feature = "guest_debug")]
+        "guest_debug".to_string(),
+        #[cfg(feature = "igvm")]
+        "igvm".to_string(),
+        #[cfg(feature = "io_uring")]
+        "io_uring".to_string(),
+        #[cfg(feature = "kvm")]
+        "kvm".to_string(),
+        #[cfg(feature = "mshv")]
+        "mshv".to_string(),
+        #[cfg(feature = "sev_snp")]
+        "sev_snp".to_string(),
+        #[cfg(feature = "tdx")]
+        "tdx".to_string(),
+        #[cfg(feature = "tracing")]
+        "tracing".to_string(),
+    ]
+}
+
+pub fn start_event_monitor_thread(
+    mut monitor: event_monitor::Monitor,
+    seccomp_action: &SeccompAction,
+    hypervisor_type: hypervisor::HypervisorType,
+    exit_event: EventFd,
+) -> Result<thread::JoinHandle<Result<()>>> {
+    // Retrieve seccomp filter
+    let seccomp_filter = get_seccomp_filter(seccomp_action, Thread::EventMonitor, hypervisor_type)
+        .map_err(Error::CreateSeccompFilter)?;
+
+    thread::Builder::new()
+        .name("event-monitor".to_owned())
+        .spawn(move || {
+            // Apply seccomp filter
+            if !seccomp_filter.is_empty() {
+                apply_filter(&seccomp_filter)
+                    .map_err(Error::ApplySeccompFilter)
+                    .map_err(|e| {
+                        error!("Error applying seccomp filter: {:?}", e);
+                        exit_event.write(1).ok();
+                        e
+                    })?;
+            }
+
+            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                while let Ok(event) = monitor.rx.recv() {
+                    let event = Arc::new(event);
+
+                    if let Some(ref mut file) = monitor.file {
+                        file.write_all(event.as_bytes().as_ref()).ok();
+                        file.write_all(b"\n\n").ok();
+                    }
+
+                    for tx in monitor.broadcast.iter() {
+                        tx.send(event.clone()).ok();
+                    }
+                }
+            }))
+            .map_err(|_| {
+                error!("`event-monitor` thread panicked");
+                exit_event.write(1).ok();
+            })
+            .ok();
+
+            Ok(())
+        })
+        .map_err(Error::EventMonitorThreadSpawn)
+}
+
 #[allow(unused_variables)]
 #[allow(clippy::too_many_arguments)]
 pub fn start_vmm_thread(
     vmm_version: VmmVersionInfo,
     http_path: &Option<String>,
     http_fd: Option<RawFd>,
+    #[cfg(feature = "dbus_api")] dbus_options: Option<DBusApiOptions>,
     api_event: EventFd,
     api_sender: Sender<ApiRequest>,
     api_receiver: Receiver<ApiRequest>,
@@ -296,7 +388,7 @@ pub fn start_vmm_thread(
     exit_event: EventFd,
     seccomp_action: &SeccompAction,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
-) -> Result<thread::JoinHandle<Result<()>>> {
+) -> Result<VmmThreadHandle> {
     #[cfg(feature = "guest_debug")]
     let gdb_hw_breakpoints = hypervisor.get_guest_debug_hw_bps();
     #[cfg(feature = "guest_debug")]
@@ -306,7 +398,7 @@ pub fn start_vmm_thread(
     #[cfg(feature = "guest_debug")]
     let gdb_vm_debug_event = vm_debug_event.try_clone().map_err(Error::EventFdClone)?;
 
-    let http_api_event = api_event.try_clone().map_err(Error::EventFdClone)?;
+    let api_event_clone = api_event.try_clone().map_err(Error::EventFdClone)?;
     let hypervisor_type = hypervisor.hypervisor_type();
 
     // Retrieve seccomp filter
@@ -339,19 +431,36 @@ pub fn start_vmm_thread(
                 vmm.setup_signal_handler()?;
 
                 vmm.control_loop(
-                    Arc::new(api_receiver),
+                    Rc::new(api_receiver),
                     #[cfg(feature = "guest_debug")]
-                    Arc::new(gdb_receiver),
+                    Rc::new(gdb_receiver),
                 )
             })
             .map_err(Error::VmmThreadSpawn)?
     };
 
-    // The VMM thread is started, we can start serving HTTP requests
+    // The VMM thread is started, we can start the dbus thread
+    // and start serving HTTP requests
+    #[cfg(feature = "dbus_api")]
+    let dbus_shutdown_chs = match dbus_options {
+        Some(opts) => {
+            let (_, chs) = api::start_dbus_thread(
+                opts,
+                api_event_clone.try_clone().map_err(Error::EventFdClone)?,
+                api_sender.clone(),
+                seccomp_action,
+                exit_event.try_clone().map_err(Error::EventFdClone)?,
+                hypervisor_type,
+            )?;
+            Some(chs)
+        }
+        None => None,
+    };
+
     if let Some(http_path) = http_path {
         api::start_http_path_thread(
             http_path,
-            http_api_event,
+            api_event_clone,
             api_sender,
             seccomp_action,
             exit_event,
@@ -360,7 +469,7 @@ pub fn start_vmm_thread(
     } else if let Some(http_fd) = http_fd {
         api::start_http_fd_thread(
             http_fd,
-            http_api_event,
+            api_event_clone,
             api_sender,
             seccomp_action,
             exit_event,
@@ -382,7 +491,11 @@ pub fn start_vmm_thread(
             .map_err(Error::GdbThreadSpawn)?;
     }
 
-    Ok(thread)
+    Ok(VmmThreadHandle {
+        thread_handle: thread,
+        #[cfg(feature = "dbus_api")]
+        dbus_shutdown_chs,
+    })
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -406,6 +519,12 @@ impl VmmVersionInfo {
             version: version.to_owned(),
         }
     }
+}
+
+pub struct VmmThreadHandle {
+    pub thread_handle: thread::JoinHandle<Result<()>>,
+    #[cfg(feature = "dbus_api")]
+    pub dbus_shutdown_chs: Option<DBusApiShutdownChannels>,
 }
 
 pub struct Vmm {
@@ -842,6 +961,7 @@ impl Vmm {
             build_version,
             version,
             pid: std::process::id() as i64,
+            features: feature_list(),
         }
     }
 
@@ -989,13 +1109,20 @@ impl Vmm {
     fn vm_remove_device(&mut self, id: String) -> result::Result<(), VmError> {
         if let Some(ref mut vm) = self.vm {
             if let Err(e) = vm.remove_device(id) {
-                error!("Error when removing new device to the VM: {:?}", e);
+                error!("Error when removing device from the VM: {:?}", e);
                 Err(e)
             } else {
                 Ok(())
             }
+        } else if let Some(ref config) = self.vm_config {
+            let mut config = config.lock().unwrap();
+            if config.remove_device(&id) {
+                Ok(())
+            } else {
+                Err(VmError::NoDeviceToRemove(id))
+            }
         } else {
-            Err(VmError::VmNotRunning)
+            Err(VmError::VmNotCreated)
         }
     }
 
@@ -1216,7 +1343,7 @@ impl Vmm {
             &self.hypervisor,
             #[cfg(feature = "tdx")]
             false,
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             false,
             #[cfg(feature = "snp")]
             config.lock().unwrap().memory.total_size(),
@@ -1228,7 +1355,8 @@ impl Vmm {
             ))
         })?;
 
-        let phys_bits = vm::physical_bits(config.lock().unwrap().cpus.max_phys_bits);
+        let phys_bits =
+            vm::physical_bits(&self.hypervisor, config.lock().unwrap().cpus.max_phys_bits);
         #[cfg(not(feature = "snp"))]
         let snp_enabled = false;
         #[cfg(feature = "snp")]
@@ -1334,7 +1462,7 @@ impl Vmm {
         memory_manager: &mut MemoryManager,
     ) -> std::result::Result<(), MigratableError>
     where
-        T: Read + Write,
+        T: Read + ReadVolatile + Write,
     {
         // Read table
         let table = MemoryRangeTable::read_from(socket, req.length())?;
@@ -1493,7 +1621,7 @@ impl Vmm {
         socket: &mut T,
     ) -> result::Result<bool, MigratableError>
     where
-        T: Read + Write,
+        T: Read + Write + WriteVolatile,
     {
         // Send (dirty) memory table
         let table = vm.dirty_log()?;
@@ -1548,18 +1676,29 @@ impl Vmm {
         let vm_config = vm.get_config();
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let common_cpuid = {
-            let phys_bits = vm::physical_bits(vm_config.lock().unwrap().cpus.max_phys_bits);
+            #[cfg(feature = "tdx")]
+            if vm_config.lock().unwrap().is_tdx_enabled() {
+                return Err(MigratableError::MigrateSend(anyhow!(
+                    "Live Migration is not supported when TDX is enabled"
+                )));
+            };
+
+            let amx = vm_config.lock().unwrap().cpus.features.amx;
+            let phys_bits =
+                vm::physical_bits(&hypervisor, vm_config.lock().unwrap().cpus.max_phys_bits);
             arch::generate_common_cpuid(
                 &hypervisor,
-                None,
-                None,
-                phys_bits,
-                vm_config.lock().unwrap().cpus.kvm_hyperv,
-                #[cfg(feature = "tdx")]
-                vm_config.lock().unwrap().is_tdx_enabled(),
+                &arch::CpuidConfig {
+                    sgx_epc_sections: None,
+                    phys_bits,
+                    kvm_hyperv: vm_config.lock().unwrap().cpus.kvm_hyperv,
+                    #[cfg(feature = "tdx")]
+                    tdx: false,
+                    amx,
+                },
             )
             .map_err(|e| {
-                MigratableError::MigrateReceive(anyhow!("Error generating common cpuid': {:?}", e))
+                MigratableError::MigrateSend(anyhow!("Error generating common cpuid': {:?}", e))
             })?
         };
 
@@ -1733,20 +1872,29 @@ impl Vmm {
         src_vm_config: &Arc<Mutex<VmConfig>>,
         src_vm_cpuid: &[hypervisor::arch::x86::CpuIdEntry],
     ) -> result::Result<(), MigratableError> {
+        #[cfg(feature = "tdx")]
+        if src_vm_config.lock().unwrap().is_tdx_enabled() {
+            return Err(MigratableError::MigrateReceive(anyhow!(
+                "Live Migration is not supported when TDX is enabled"
+            )));
+        };
+
         // We check the `CPUID` compatibility of between the source vm and destination, which is
         // mostly about feature compatibility and "topology/sgx" leaves are not relevant.
         let dest_cpuid = &{
             let vm_config = &src_vm_config.lock().unwrap();
 
-            let phys_bits = vm::physical_bits(vm_config.cpus.max_phys_bits);
+            let phys_bits = vm::physical_bits(&self.hypervisor, vm_config.cpus.max_phys_bits);
             arch::generate_common_cpuid(
                 &self.hypervisor.clone(),
-                None,
-                None,
-                phys_bits,
-                vm_config.cpus.kvm_hyperv,
-                #[cfg(feature = "tdx")]
-                vm_config.is_tdx_enabled(),
+                &arch::CpuidConfig {
+                    sgx_epc_sections: None,
+                    phys_bits,
+                    kvm_hyperv: vm_config.cpus.kvm_hyperv,
+                    #[cfg(feature = "tdx")]
+                    tdx: false,
+                    amx: vm_config.cpus.features.amx,
+                },
             )
             .map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {:?}", e))
@@ -1762,8 +1910,8 @@ impl Vmm {
 
     fn control_loop(
         &mut self,
-        api_receiver: Arc<Receiver<ApiRequest>>,
-        #[cfg(feature = "guest_debug")] gdb_receiver: Arc<Receiver<gdb::GdbRequest>>,
+        api_receiver: Rc<Receiver<ApiRequest>>,
+        #[cfg(feature = "guest_debug")] gdb_receiver: Rc<Receiver<gdb::GdbRequest>>,
     ) -> Result<()> {
         const EPOLL_EVENTS_LEN: usize = 100;
 
@@ -2165,16 +2313,19 @@ mod unit_tests {
                 file: None,
                 mode: ConsoleOutputMode::Null,
                 iommu: false,
+                socket: None,
             },
             console: ConsoleConfig {
                 file: None,
                 mode: ConsoleOutputMode::Tty,
                 iommu: false,
+                socket: None,
             },
             devices: None,
             user_devices: None,
             vdpa: None,
             vsock: None,
+            pvpanic: false,
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,

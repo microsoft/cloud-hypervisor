@@ -109,7 +109,7 @@ impl GuestNetworkConfig {
                 epoll::Event::new(epoll::Events::EPOLLIN, 0),
             )
             .expect("Cannot add 'tcp_listener' event to epoll");
-            let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 1];
+            let mut events = [epoll::Event::new(epoll::Events::empty(), 0); 1];
             loop {
                 let num_events = match epoll::wait(epoll_fd, timeout * 1000_i32, &mut events[..]) {
                     Ok(num_events) => Ok(num_events),
@@ -148,13 +148,13 @@ impl GuestNetworkConfig {
             Err(e) => {
                 let duration = start.elapsed();
                 eprintln!(
-                    "\n\n==== Start 'wait_vm_boot' (FAILED) ====\n\n\
-                 duration =\"{duration:?}, timeout = {timeout}s\"\n\
-                 listen_addr=\"{listen_addr}\"\n\
-                 expected_guest_addr=\"{expected_guest_addr}\"\n\
-                 message=\"{s}\"\n\
-                 error=\"{e:?}\"\n\
-                 \n==== End 'wait_vm_boot' outout ====\n\n"
+                    "\n\n==== Start 'wait_vm_boot' (FAILED) ==== \
+                    \n\nduration =\"{duration:?}, timeout = {timeout}s\" \
+                    \nlisten_addr=\"{listen_addr}\" \
+                    \nexpected_guest_addr=\"{expected_guest_addr}\" \
+                    \nmessage=\"{s}\" \
+                    \nerror=\"{e:?}\" \
+                    \n\n==== End 'wait_vm_boot' outout ====\n\n"
                 );
 
                 Err(e)
@@ -250,9 +250,10 @@ impl DiskConfig for UbuntuDiskConfig {
             .unwrap()
             .join("test_data")
             .join("cloud-init")
-            .join("ubuntu");
+            .join("ubuntu")
+            .join("ci");
 
-        vec!["meta-data"].iter().for_each(|x| {
+        ["meta-data"].iter().for_each(|x| {
             rate_limited_copy(source_file_dir.join(x), cloud_init_directory.join(x))
                 .expect("Expect copying cloud-init meta-data to succeed");
         });
@@ -308,7 +309,7 @@ impl DiskConfig for UbuntuDiskConfig {
             .output()
             .expect("Expect creating disk image to succeed");
 
-        vec!["user-data", "meta-data", "network-config"]
+        ["user-data", "meta-data", "network-config"]
             .iter()
             .for_each(|x| {
                 std::process::Command::new("mcopy")
@@ -718,18 +719,77 @@ pub fn ssh_command_ip(
     )
 }
 
+pub fn exec_host_command_with_retries(command: &str, retries: u32, interval: Duration) -> bool {
+    for _ in 0..retries {
+        let s = exec_host_command_output(command).status;
+        if !s.success() {
+            eprintln!("\n\n==== retrying in {:?} ===\n\n", interval);
+            thread::sleep(interval);
+        } else {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn exec_host_command_status(command: &str) -> ExitStatus {
-    std::process::Command::new("bash")
-        .args(["-c", command])
-        .status()
-        .unwrap_or_else(|_| panic!("Expected '{command}' to run"))
+    exec_host_command_output(command).status
 }
 
 pub fn exec_host_command_output(command: &str) -> Output {
-    std::process::Command::new("bash")
+    let output = std::process::Command::new("bash")
         .args(["-c", command])
         .output()
-        .unwrap_or_else(|_| panic!("Expected '{command}' to run"))
+        .unwrap_or_else(|e| panic!("Expected '{command}' to run. Error: {:?}", e));
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "\n\n==== Start 'exec_host_command' failed ==== \
+            \n\n---stdout---\n{stdout}\n---stderr---{stderr} \
+            \n\n==== End 'exec_host_command' failed ====",
+        );
+    }
+
+    output
+}
+
+pub fn check_lines_count(input: &str, line_count: usize) -> bool {
+    if input.lines().count() == line_count {
+        true
+    } else {
+        eprintln!(
+            "\n\n==== Start 'check_lines_count' failed ==== \
+            \n\ninput = {input}\nline_count = {line_count} \
+            \n\n==== End 'check_lines_count' failed ====",
+        );
+
+        false
+    }
+}
+
+pub fn check_matched_lines_count(input: &str, keywords: Vec<&str>, line_count: usize) -> bool {
+    let mut matches = String::new();
+    for line in input.lines() {
+        if keywords.iter().all(|k| line.contains(k)) {
+            matches += line;
+        }
+    }
+
+    if matches.lines().count() == line_count {
+        true
+    } else {
+        eprintln!(
+            "\n\n==== Start 'check_matched_lines_count' failed ==== \
+            \nkeywords = {keywords:?}, line_count = {line_count} \
+            \n\ninput = {input} matches = {matches} \
+            \n\n==== End 'check_matched_lines_count' failed ====",
+        );
+
+        false
+    }
 }
 
 pub const PIPE_SIZE: i32 = 32 << 20;
@@ -1194,7 +1254,7 @@ impl ToString for VerbosityLevel {
         match self {
             Warn => "".to_string(),
             Info => "-v".to_string(),
-            Debug => "-v -v".to_string(),
+            Debug => "-vv".to_string(),
         }
     }
 }
@@ -1245,7 +1305,7 @@ impl<'a> GuestCommand<'a> {
                 self.command.arg("-v");
             }
             Debug => {
-                self.command.args(["-v", "-v"]);
+                self.command.args(["-vv"]);
             }
         };
 
@@ -1313,7 +1373,6 @@ impl<'a> GuestCommand<'a> {
                         .unwrap()
                 )
                 .as_str(),
-                "--disk",
                 format!(
                     "path={}",
                     self.guest.disk_config.disk(DiskType::CloudInit).unwrap()
@@ -1380,7 +1439,7 @@ pub fn parse_iperf3_output(output: &[u8], sender: bool, bandwidth: bool) -> Resu
     })
     .map_err(|_| {
         eprintln!(
-            "=============== iperf3 output ===============\n\n{}\n\n===========end============\n\n",
+            "==== Start iperf3 output ===\n\n{}\n\n=== End iperf3 output ===\n\n",
             String::from_utf8_lossy(output)
         );
         Error::Iperf3Parse
@@ -1458,9 +1517,7 @@ pub fn parse_fio_output(output: &str, fio_ops: &FioOps, num_jobs: u32) -> Result
         total_bps
     })
     .map_err(|_| {
-        eprintln!(
-            "=============== Fio output ===============\n\n{output}\n\n===========end============\n\n"
-        );
+        eprintln!("=== Start Fio output ===\n\n{output}\n\n=== End Fio output ===\n\n");
         Error::FioOutputParse
     })
 }
@@ -1513,9 +1570,7 @@ pub fn parse_fio_output_iops(output: &str, fio_ops: &FioOps, num_jobs: u32) -> R
         total_iops
     })
     .map_err(|_| {
-        eprintln!(
-            "=============== Fio output ===============\n\n{output}\n\n===========end============\n\n"
-        );
+        eprintln!("=== Start Fio output ===\n\n{output}\n\n=== End Fio output ===\n\n");
         Error::FioOutputParse
     })
 }
@@ -1648,7 +1703,7 @@ pub fn parse_ethr_latency_output(output: &[u8]) -> Result<Vec<f64>, Error> {
     })
     .map_err(|_| {
         eprintln!(
-            "=============== ethr output ===============\n\n{}\n\n===========end============\n\n",
+            "=== Start ethr output ===\n\n{}\n\n=== End ethr output ===\n\n",
             String::from_utf8_lossy(output)
         );
         Error::EthrLogParse

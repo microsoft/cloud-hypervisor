@@ -107,6 +107,7 @@ impl MsixConfig {
                             idx as InterruptIndex,
                             InterruptSourceConfig::MsiIrq(config),
                             state.masked,
+                            true,
                         )
                         .map_err(Error::UpdateInterruptRoute)?;
 
@@ -182,6 +183,7 @@ impl MsixConfig {
                         idx as InterruptIndex,
                         InterruptSourceConfig::MsiIrq(config),
                         table_entry.masked(),
+                        true,
                     ) {
                         error!("Failed updating vector: {:?}", e);
                     }
@@ -320,6 +322,7 @@ impl MsixConfig {
                 index as InterruptIndex,
                 InterruptSourceConfig::MsiIrq(config),
                 table_entry.masked(),
+                true,
             ) {
                 error!("Failed updating vector: {:?}", e);
             }
@@ -509,6 +512,16 @@ impl MsixCap {
 
     pub fn pba_offset(&self) -> u32 {
         self.pba & 0xffff_fff8
+    }
+
+    pub fn table_set_offset(&mut self, addr: u32) {
+        self.table &= 0x7;
+        self.table += addr;
+    }
+
+    pub fn pba_set_offset(&mut self, addr: u32) {
+        self.pba &= 0x7;
+        self.pba += addr;
     }
 
     pub fn table_bir(&self) -> u32 {

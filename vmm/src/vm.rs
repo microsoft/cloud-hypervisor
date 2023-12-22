@@ -28,6 +28,8 @@ use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
 use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayload};
 #[cfg(feature = "igvm")]
+use crate::igvm::igvm_loader;
+#[cfg(feature = "igvm")]
 use crate::igvm::*;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
@@ -94,8 +96,10 @@ use thiserror::Error;
 use tracer::trace_scoped;
 use vm_device::Bus;
 #[cfg(feature = "tdx")]
-use vm_memory::{Address, ByteValued, GuestMemory, GuestMemoryRegion};
-use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{Address, ByteValued, GuestMemoryRegion, ReadVolatile};
+use vm_memory::{
+    Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, WriteVolatile,
+};
 use vm_migration::protocol::{Request, Response, Status};
 use vm_migration::{
     protocol::MemoryRangeTable, snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot,
@@ -152,6 +156,9 @@ pub enum Error {
 
     #[error("Error from device manager: {0:?}")]
     DeviceManager(DeviceManagerError),
+
+    #[error("No device with id {0:?} to remove")]
+    NoDeviceToRemove(String),
 
     #[error("Cannot spawn a signal handler thread: {0}")]
     SignalHandlerSpawn(#[source] io::Error),
@@ -258,6 +265,10 @@ pub enum Error {
     #[error("Failed to copy firmware to memory: {0}")]
     FirmwareLoad(#[source] vm_memory::GuestMemoryError),
 
+    #[cfg(feature = "sev_snp")]
+    #[error("Error enabling SEV-SNP VM: {0}")]
+    InitializeSevSnpVm(#[source] hypervisor::HypervisorVmError),
+
     #[cfg(feature = "tdx")]
     #[error("Error performing I/O on TDX firmware file: {0}")]
     LoadTdvf(#[source] std::io::Error),
@@ -314,6 +325,14 @@ pub enum Error {
     #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
     #[error("Error coredumping VM: {0:?}")]
     Coredump(GuestDebuggableError),
+
+    #[cfg(feature = "igvm")]
+    #[error("Cannot open igvm file: {0}")]
+    IgvmFile(#[source] io::Error),
+
+    #[cfg(feature = "igvm")]
+    #[error("Cannot load the igvm into memory: {0}")]
+    IgvmLoad(#[source] igvm_loader::Error),
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -433,8 +452,8 @@ impl VmOps for VmOpsHandler {
     }
 }
 
-pub fn physical_bits(max_phys_bits: u8) -> u8 {
-    let host_phys_bits = get_host_cpu_phys_bits();
+pub fn physical_bits(hypervisor: &Arc<dyn hypervisor::Hypervisor>, max_phys_bits: u8) -> u8 {
+    let host_phys_bits = get_host_cpu_phys_bits(hypervisor);
 
     cmp::min(host_phys_bits, max_phys_bits)
 }
@@ -491,6 +510,13 @@ impl Vm {
             .validate()
             .map_err(Error::ConfigValidation)?;
 
+        #[cfg(not(feature = "igvm"))]
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(&memory_manager, &config)?
+        } else {
+            None
+        };
+
         info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
@@ -499,6 +525,8 @@ impl Vm {
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
+        #[cfg(feature = "sev_snp")]
+        let sev_snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
         #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
@@ -557,6 +585,19 @@ impl Vm {
             )
             .map_err(Error::CpuManager)?;
 
+        // Loading the igvm file is pushed down here because
+        // igvm parser needs cpu_manager to retrieve cpuid leaf.
+        // For the regular case, we can start loading early, but for
+        // igvm case we have to wait until cpu_manager is created.
+        // Currently, Microsoft Hypervisor does not provide any
+        // Hypervisor specific common cpuid, we need to call get_cpuid_values
+        // per cpuid through cpu_manager.
+        #[cfg(feature = "igvm")]
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(&memory_manager, &config, &cpu_manager)?
+        } else {
+            None
+        };
         // The initial TDX configuration must be done before the vCPUs are
         // created
         #[cfg(feature = "tdx")]
@@ -572,6 +613,14 @@ impl Vm {
             .unwrap()
             .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
             .map_err(Error::CpuManager)?;
+
+        // This initial SEV-SNP configuration must be done immediately after
+        // vCPUs are created. As part of this initialization we are
+        // transitioning the guest into secure state.
+        #[cfg(feature = "sev_snp")]
+        if sev_snp_enabled {
+            vm.sev_snp_init().map_err(Error::InitializeSevSnpVm)?;
+        }
 
         let load_payload_handle = if snapshot.is_none() {
             Self::load_payload_async(
@@ -714,6 +763,10 @@ impl Vm {
                     node.cpus.extend(cpus);
                 }
 
+                if let Some(pci_segments) = &config.pci_segments {
+                    node.pci_segments.extend(pci_segments);
+                }
+
                 if let Some(distances) = &config.distances {
                     for distance in distances.iter() {
                         let dest = distance.destination;
@@ -786,26 +839,24 @@ impl Vm {
             vm_config.lock().unwrap().is_tdx_enabled()
         };
 
-        #[cfg(not(feature = "snp"))]
-        let snp_enabled = false;
-        #[cfg(feature = "snp")]
-        let snp_enabled = if snapshot.is_some() {
+        #[cfg(feature = "sev_snp")]
+        let sev_snp_enabled = if snapshot.is_some() {
             false
         } else {
-            vm_config.lock().unwrap().is_snp_enabled()
+            vm_config.lock().unwrap().is_sev_snp_enabled()
         };
 
         let vm = Self::create_hypervisor_vm(
             &hypervisor,
             #[cfg(feature = "tdx")]
             tdx_enabled,
-            #[cfg(feature = "snp")]
-            snp_enabled,
+            #[cfg(feature = "sev_snp")]
+            sev_snp_enabled,
             #[cfg(feature = "snp")]
             vm_config.lock().unwrap().memory.total_size(),
         )?;
 
-        let phys_bits = physical_bits(vm_config.lock().unwrap().cpus.max_phys_bits);
+        let phys_bits = physical_bits(&hypervisor, vm_config.lock().unwrap().cpus.max_phys_bits);
 
         let memory_manager = if let Some(snapshot) =
             snapshot_from_id(snapshot.as_ref(), MEMORY_MANAGER_SNAPSHOT_ID)
@@ -862,25 +913,25 @@ impl Vm {
     pub fn create_hypervisor_vm(
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
-        #[cfg(feature = "snp")] snp_enabled: bool,
+        #[cfg(feature = "sev_snp")] sev_snp_enabled: bool,
         #[cfg(feature = "snp")] mem_size: u64,
     ) -> Result<Arc<dyn hypervisor::Vm>> {
         hypervisor.check_required_extensions().unwrap();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "tdx")] {
+                // Passing KVM_X86_TDX_VM: 1 if tdx_enabled is true
+                // Otherwise KVM_X86_LEGACY_VM: 0
+                // value of tdx_enabled is mapped to KVM_X86_TDX_VM or KVM_X86_LEGACY_VM
                 let vm = hypervisor
-                    .create_vm_with_type(if tdx_enabled {
-                        2 // KVM_X86_TDX_VM
-                    } else {
-                        0 // KVM_X86_LEGACY_VM
-                    })
+                    .create_vm_with_type(u64::from(tdx_enabled))
                     .unwrap();
-            } else if #[cfg(feature = "snp")] {
-                // 1 - SNP_ENABLED
-                // 0 - SNP_DISABLED
+            } else if #[cfg(feature = "sev_snp")] {
+                // Passing SEV_SNP_ENABLED: 1 if sev_snp_enabled is true
+                // Otherwise SEV_SNP_DISABLED: 0
+                // value of sev_snp_enabled is mapped to SEV_SNP_ENABLED for true or SEV_SNP_DISABLED for false
                 let vm = hypervisor
-                    .create_vm_with_type(u64::from(snp_enabled), mem_size)
+                    .create_vm_with_type(u64::from(sev_snp_enabled))
                     .unwrap();
             } else {
                 let vm = hypervisor.create_vm().unwrap();
@@ -899,7 +950,7 @@ impl Vm {
     }
 
     fn load_initramfs(&mut self, guest_mem: &GuestMemoryMmap) -> Result<arch::InitramfsConfig> {
-        let mut initramfs = self.initramfs.as_ref().unwrap();
+        let initramfs = self.initramfs.as_mut().unwrap();
         let size: usize = initramfs
             .seek(SeekFrom::End(0))
             .map_err(|_| Error::InitramfsLoad)?
@@ -912,7 +963,7 @@ impl Vm {
         let address = GuestAddress(address);
 
         guest_mem
-            .read_from(address, &mut initramfs, size)
+            .read_volatile_from(address, initramfs, size)
             .map_err(|_| Error::InitramfsLoad)?;
 
         info!("Initramfs loaded: address = 0x{:x}", address.0);
@@ -1152,8 +1203,8 @@ impl Vm {
 
     fn load_payload_async(
         memory_manager: &Arc<Mutex<MemoryManager>>,
-        #[cfg(feature = "igvm")] cpu_manager: &Arc<Mutex<CpuManager>>,
         config: &Arc<Mutex<VmConfig>>,
+        #[cfg(feature = "igvm")] cpu_manager: &Arc<Mutex<cpu::CpuManager>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1168,9 +1219,9 @@ impl Vm {
             .as_ref()
             .map(|payload| {
                 let memory_manager = memory_manager.clone();
+                let payload = payload.clone();
                 #[cfg(feature = "igvm")]
                 let cpu_manager = cpu_manager.clone();
-                let payload = payload.clone();
 
                 std::thread::Builder::new()
                     .name("payload_loader".into())
@@ -1277,9 +1328,9 @@ impl Vm {
             let pci_space = PciSpaceInfo {
                 pci_segment_id: pci_segment.id,
                 mmio_config_address: pci_segment.mmio_config_address,
-                pci_device_space_start: pci_segment.start_of_device_area,
-                pci_device_space_size: pci_segment.end_of_device_area
-                    - pci_segment.start_of_device_area
+                pci_device_space_start: pci_segment.start_of_mem64_area,
+                pci_device_space_size: pci_segment.end_of_mem64_area
+                    - pci_segment.start_of_mem64_area
                     + 1,
             };
             pci_space_info.push(pci_space);
@@ -1903,7 +1954,7 @@ impl Vm {
                     firmware_file
                         .seek(SeekFrom::Start(section.data_offset as u64))
                         .map_err(Error::LoadTdvf)?;
-                    mem.read_from(
+                    mem.read_volatile_from(
                         GuestAddress(section.address),
                         &mut firmware_file,
                         section.data_size as usize,
@@ -1925,13 +1976,8 @@ impl Vm {
                             .map_err(Error::LoadPayload)?;
 
                         let mut payload_header = linux_loader::bootparam::setup_header::default();
-                        payload_header
-                            .as_bytes()
-                            .read_from(
-                                0,
-                                payload_file,
-                                mem::size_of::<linux_loader::bootparam::setup_header>(),
-                            )
+                        payload_file
+                            .read_volatile(&mut payload_header.as_bytes())
                             .unwrap();
 
                         if payload_header.header != 0x5372_6448 {
@@ -1945,7 +1991,7 @@ impl Vm {
                         }
 
                         payload_file.rewind().map_err(Error::LoadPayload)?;
-                        mem.read_from(
+                        mem.read_volatile_from(
                             GuestAddress(section.address),
                             payload_file,
                             payload_size as usize,
@@ -2181,16 +2227,27 @@ impl Vm {
         #[cfg(target_arch = "aarch64")]
         let rsdp_addr = self.create_acpi_tables();
 
-        if !self.snp_enabled {
-            // Configure shared state based on loaded kernel
-            entry_point
-                .map(|_| {
-                    // Safe to unwrap rsdp_addr as we know it can't be None when
-                    // the entry_point is Some.
-                    self.configure_system(rsdp_addr.unwrap())
-                })
-                .transpose()?;
-        }
+        // Configure shared state based on loaded kernel
+        entry_point
+            .map(|_| {
+                // Safe to unwrap rsdp_addr as we know it can't be None when
+                // the entry_point is Some.
+                self.configure_system(rsdp_addr.unwrap())
+            })
+            .transpose()?;
+
+        #[cfg(target_arch = "x86_64")]
+        // Note: For x86, always call this function before invoking start boot vcpus.
+        // Otherwise guest would fail to boot because we haven't created the
+        // userspace mappings to update the hypervisor about the memory mappings.
+        // These mappings must be created before we start the vCPU threads for
+        // the very first time.
+        self.memory_manager
+            .lock()
+            .unwrap()
+            .allocate_address_space()
+            .map_err(Error::MemoryManager)?;
+
         #[cfg(feature = "tdx")]
         if let Some(hob_address) = hob_address {
             // With the HOB address extracted the vCPUs can have
@@ -2321,7 +2378,7 @@ impl Vm {
         fd: &mut F,
     ) -> std::result::Result<(), MigratableError>
     where
-        F: Write,
+        F: WriteVolatile,
     {
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
@@ -2335,7 +2392,7 @@ impl Vm {
             // see: https://github.com/rust-vmm/vm-memory/issues/174
             loop {
                 let bytes_written = mem
-                    .write_to(
+                    .write_volatile_to(
                         GuestAddress(range.gpa + offset),
                         fd,
                         (range.length - offset) as usize,
@@ -2583,11 +2640,8 @@ impl Snapshottable for Vm {
         event!("vm", "snapshotting");
 
         #[cfg(feature = "tdx")]
-        let tdx_enabled = self.config.lock().unwrap().is_tdx_enabled();
-
-        #[cfg(feature = "tdx")]
         {
-            if tdx_enabled {
+            if self.config.lock().unwrap().is_tdx_enabled() {
                 return Err(MigratableError::Snapshot(anyhow!(
                     "Snapshot not possible with TDX VM"
                 )));
@@ -2603,15 +2657,21 @@ impl Snapshottable for Vm {
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let common_cpuid = {
-            let phys_bits = physical_bits(self.config.lock().unwrap().cpus.max_phys_bits);
+            let amx = self.config.lock().unwrap().cpus.features.amx;
+            let phys_bits = physical_bits(
+                &self.hypervisor,
+                self.config.lock().unwrap().cpus.max_phys_bits,
+            );
             arch::generate_common_cpuid(
                 &self.hypervisor,
-                None,
-                None,
-                phys_bits,
-                self.config.lock().unwrap().cpus.kvm_hyperv,
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
+                &arch::CpuidConfig {
+                    sgx_epc_sections: None,
+                    phys_bits,
+                    kvm_hyperv: self.config.lock().unwrap().cpus.kvm_hyperv,
+                    #[cfg(feature = "tdx")]
+                    tdx: false,
+                    amx,
+                },
             )
             .map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!("Error generating common cpuid: {:?}", e))
@@ -2833,6 +2893,8 @@ impl GuestDebuggable for Vm {
     fn coredump(&mut self, destination_url: &str) -> std::result::Result<(), GuestDebuggableError> {
         event!("vm", "coredumping");
 
+        let mut resume = false;
+
         #[cfg(feature = "tdx")]
         {
             if let Some(ref platform) = self.config.lock().unwrap().platform {
@@ -2844,11 +2906,17 @@ impl GuestDebuggable for Vm {
             }
         }
 
-        let current_state = self.get_state().unwrap();
-        if current_state != VmState::Paused {
-            return Err(GuestDebuggableError::Coredump(anyhow!(
-                "Trying to coredump while VM is running"
-            )));
+        match self.get_state().unwrap() {
+            VmState::Running => {
+                self.pause().map_err(GuestDebuggableError::Pause)?;
+                resume = true;
+            }
+            VmState::Paused => {}
+            _ => {
+                return Err(GuestDebuggableError::Coredump(anyhow!(
+                    "Trying to coredump while VM is not running or paused"
+                )));
+            }
         }
 
         let coredump_state = self.get_dump_state(destination_url)?;
@@ -2869,7 +2937,13 @@ impl GuestDebuggable for Vm {
         self.memory_manager
             .lock()
             .unwrap()
-            .coredump_iterate_save_mem(&coredump_state)
+            .coredump_iterate_save_mem(&coredump_state)?;
+
+        if resume {
+            self.resume().map_err(GuestDebuggableError::Resume)?;
+        }
+
+        Ok(())
     }
 }
 
