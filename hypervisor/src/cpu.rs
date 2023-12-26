@@ -88,11 +88,6 @@ pub enum HypervisorCpuError {
     ///
     /// Setting MSR entries error
     ///
-    #[error("Failed to set CPUID entries: {0}")]
-    GetCpuidVales(#[source] anyhow::Error),
-    ///
-    /// Setting MSR entries error
-    ///
     #[error("Failed to set Msr entries: {0}")]
     SetMsrEntries(#[source] anyhow::Error),
     ///
