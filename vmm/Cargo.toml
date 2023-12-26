@@ -15,12 +15,10 @@ mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 sev_snp = ["arch/sev_snp", "hypervisor/sev_snp"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 tracing = ["tracer/tracing"]
-igvm = ["hex", "igvm_parser", "igvm_defs", "arch/igvm", "mshv-bindings", "range_map_vec"]
 
 [dependencies]
 acpi_tables = { git = "https://github.com/rust-vmm/acpi_tables", branch = "main"  }
 anyhow = "1.0.75"
-cfg-if = "1.0.0"
 arc-swap = "1.5.1"
 arch = { path = "../arch" }
 bitflags = "2.4.1"
