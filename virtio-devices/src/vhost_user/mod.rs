@@ -231,7 +231,7 @@ impl<S: VhostUserFrontendReqHandler> VhostUserEpollHandler<S> {
                             *i,
                             vm_virtio::clone_queue(
                                 q,
-                                #[cfg(all(feature = "mshv", feature = "snp"))]
+                                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                                 None,
                             ),
                             e.try_clone().unwrap(),
@@ -348,7 +348,7 @@ impl VhostUserCommon {
                             *i,
                             vm_virtio::clone_queue(
                                 q,
-                                #[cfg(all(feature = "mshv", feature = "snp"))]
+                                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                                 None,
                             ),
                             e.try_clone().unwrap(),

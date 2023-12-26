@@ -84,7 +84,7 @@ use vm_memory::ByteValued;
 #[cfg(feature = "guest_debug")]
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::{
     snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable,
@@ -170,7 +170,7 @@ pub enum Error {
     #[error("Error initializing TDX: {0}")]
     InitializeTdx(#[source] hypervisor::HypervisorCpuError),
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     #[error("Error initializing SNP: {0}")]
     InitializeSnp(#[source] hypervisor::HypervisorVmError),
 
@@ -448,7 +448,7 @@ impl Vcpu {
         self.vcpu.run(guest_memory)
     }
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     pub fn set_sev_control_register(&self, vmsa_pfn: u64) -> Result<()> {
         self.vcpu.set_sev_control_register(vmsa_pfn).unwrap();
         Ok(())
@@ -831,14 +831,14 @@ impl CpuManager {
         vcpu: Arc<Mutex<Vcpu>>,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(feature = "igvm")] vmsa: Option<SevVmsa>,
-        #[cfg(feature = "snp")] vmsa_pfn: u64,
+        #[cfg(feature = "sev_snp")] vmsa_pfn: u64,
     ) -> Result<()> {
         let mut vcpu = vcpu.lock().unwrap();
 
         #[cfg(target_arch = "x86_64")]
         assert!(!self.cpuid.is_empty());
 
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         if self.snp_enabled {
             vcpu.set_sev_control_register(vmsa_pfn)?;
         }
@@ -1137,7 +1137,7 @@ impl CpuManager {
                                             unreachable!("Couldn't get a mutable reference from Arc<dyn Vcpu> as there are multiple instances");
                                         }
                                     }
-                                    #[cfg(feature = "snp")]
+                                    #[cfg(feature = "sev_snp")]
                                     VmExit::GpaModify(base_gpa, gpa_count) => {
                                         info!("VmExit::GpaModify");
                                         let mut gpa_list = Vec::new();
@@ -1285,7 +1285,7 @@ impl CpuManager {
         let ret = self.create_vcpus(self.boot_vcpus(), snapshot);
 
         if self.snp_enabled {
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             self.vm.snp_init().map_err(Error::InitializeSnp)?;
         }
 
@@ -1339,7 +1339,7 @@ impl CpuManager {
                         None,
                         #[cfg(feature = "igvm")]
                         None,
-                        #[cfg(feature = "snp")]
+                        #[cfg(feature = "sev_snp")]
                         0,
                     )?
                 }

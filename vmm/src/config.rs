@@ -403,7 +403,7 @@ pub struct VmParams<'a> {
     pub tpm: Option<&'a str>,
     #[cfg(feature = "igvm")]
     pub igvm: Option<&'a str>,
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     pub host_data: Option<&'a str>,
 }
 
@@ -2309,7 +2309,7 @@ impl VmConfig {
                 firmware: vm_params.firmware.map(PathBuf::from),
                 #[cfg(feature = "igvm")]
                 igvm: vm_params.igvm.map(PathBuf::from),
-                #[cfg(feature = "snp")]
+                #[cfg(feature = "sev_snp")]
                 host_data: vm_params.host_data.map(|s| s.to_string()),
             })
         } else {

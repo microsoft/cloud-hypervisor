@@ -111,7 +111,7 @@ impl VsockPacket {
     pub fn from_tx_virtq_head<M>(
         desc_chain: &mut DescriptorChain<M>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self>
     where
         M: Clone + Deref,
@@ -136,7 +136,7 @@ impl VsockPacket {
                 head.addr().translate_gva_with_vmfd(
                     access_platform,
                     head.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     Some(&vm.clone()),
                 ),
                 VSOCK_PKT_HDR_SIZE,
@@ -178,7 +178,7 @@ impl VsockPacket {
                 buf_desc.addr().translate_gva_with_vmfd(
                     access_platform,
                     buf_desc.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     Some(&vm.clone()),
                 ),
                 pkt.buf_size,
@@ -197,7 +197,7 @@ impl VsockPacket {
     pub fn from_rx_virtq_head<M>(
         desc_chain: &mut DescriptorChain<M>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self>
     where
         M: Clone + Deref,
@@ -229,7 +229,7 @@ impl VsockPacket {
                 head.addr().translate_gva_with_vmfd(
                     access_platform,
                     head.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     Some(&vm.clone()),
                 ),
                 VSOCK_PKT_HDR_SIZE,
@@ -241,7 +241,7 @@ impl VsockPacket {
                     buf_desc.addr().translate_gva_with_vmfd(
                         access_platform,
                         buf_desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                         Some(&vm.clone()),
                     ),
                     buf_size,
@@ -400,7 +400,7 @@ impl VsockPacket {
 
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks)]
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 mod tests {
     use super::super::tests::TestContext;
     use super::*;
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_packet_hdr_accessors() {
         const SRC_CID: u64 = 1;
         const DST_CID: u64 = 2;
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_packet_buf() {
         create_context!(test_ctx, handler_ctx);
         let mut pkt = VsockPacket::from_rx_virtq_head(

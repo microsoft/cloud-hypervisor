@@ -7409,7 +7409,7 @@ mod common_parallel {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
-    #[cfg(all(feature = "mshv", feature = "igvm", feature = "snp"))]
+    #[cfg(all(feature = "mshv", feature = "igvm", feature = "sev_snp"))]
     fn test_sev_snp_boot_without_host_data() {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));

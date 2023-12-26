@@ -91,20 +91,20 @@ pub enum VirtioDeviceType {
  * Virtio Spec: https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html
  *
  */
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 const VRING_DESC_ELEMENT_SIZE: usize = 16;
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 const VRING_AVAIL_ELEMENT_SIZE: usize = 2;
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 const VRING_USED_ELEMENT_SIZE: usize = 8;
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 pub enum VringType {
     Desc,
     Avail,
     Used,
 }
 
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 pub fn get_vring_size(t: VringType, queue_size: u16) -> usize {
     let (length_except_ring, element_size) = match t {
         VringType::Desc => (0, VRING_DESC_ELEMENT_SIZE),
@@ -178,7 +178,7 @@ pub trait Translatable {
         &self,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
         len: usize,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Self;
 }
 
@@ -193,12 +193,12 @@ impl Translatable for GuestAddress {
         &self,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
         len: usize,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Self {
         GuestAddress(self.0.translate_gva_with_vmfd(
             access_platform,
             len,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             vm,
         ))
     }
@@ -223,10 +223,10 @@ impl Translatable for u64 {
         &self,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
         len: usize,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Self {
         cfg_if::cfg_if! {
-            if #[cfg(all(feature = "mshv", feature = "snp"))] {
+            if #[cfg(all(feature = "mshv", feature = "sev_snp"))] {
                 if let Some(_vm) = vm {
                     _vm.gain_page_access(*self, len  as u32).unwrap();
                 }
@@ -249,7 +249,7 @@ impl Translatable for u64 {
 /// Helper for cloning a Queue since QueueState doesn't derive Clone
 pub fn clone_queue(
     queue: &Queue,
-    #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
 ) -> Queue {
     let mut q = Queue::new(queue.max_size()).unwrap();
 
@@ -259,7 +259,7 @@ pub fn clone_queue(
     q.set_size(queue.size());
     q.set_ready(queue.ready());
 
-    #[cfg(all(feature = "mshv", feature = "snp"))]
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
     if let Some(_vm) = vm {
         let desc_a = GuestAddress(queue.desc_table());
         let avail_a = GuestAddress(queue.avail_ring());

@@ -407,12 +407,12 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     /// Initialize SNP on this VM
     fn snp_init(&self) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn import_isolated_pages(
         &self,
         _page_type: u32,
@@ -421,7 +421,7 @@ pub trait Vm: Send + Sync + Any {
     ) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn modify_gpa_host_access(
         &self,
         _host_access: u32,
@@ -431,15 +431,15 @@ pub trait Vm: Send + Sync + Any {
     ) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn psp_issue_guest_request(&self, _req_gpa: u64, _rsp_gpa: u64) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn complete_isolated_import(
         &self,
         _snp_id_block: IGVM_VHS_SNP_ID_BLOCK,
@@ -448,7 +448,7 @@ pub trait Vm: Send + Sync + Any {
     ) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     /// Remove a gpa from ache of pages that host has access to
     fn remove_gpa_from_host_acess_cache(&self, _gpa: u64) -> Result<()> {
         unimplemented!()

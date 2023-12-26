@@ -63,7 +63,7 @@ pub struct Net {
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
     iommu: bool,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
     vm: Arc<dyn hypervisor::Vm>,
 }
 
@@ -83,7 +83,7 @@ impl Net {
         offload_tso: bool,
         offload_ufo: bool,
         offload_csum: bool,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Net> {
         let mut num_queues = vu_cfg.num_queues;
 
@@ -233,7 +233,7 @@ impl Net {
             seccomp_action,
             exit_evt,
             iommu,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             vm,
         })
     }
@@ -326,7 +326,7 @@ impl VirtioDevice for Net {
                 access_platform: None,
                 interrupt_cb: interrupt_cb.clone(),
                 queue_index: ctrl_queue_index as u16,
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 vm: self.vm.clone(),
             };
 

@@ -529,13 +529,13 @@ impl Vm {
         let sev_snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
-        #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
+        #[cfg(all(not(feature = "tdx"), not(feature = "sev_snp")))]
         let force_iommu = false;
-        #[cfg(not(feature = "snp"))]
+        #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let snp_enabled = config.lock().unwrap().is_snp_enabled();
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let force_iommu = snp_enabled;
 
         #[cfg(feature = "guest_debug")]
@@ -852,7 +852,7 @@ impl Vm {
             tdx_enabled,
             #[cfg(feature = "sev_snp")]
             sev_snp_enabled,
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             vm_config.lock().unwrap().memory.total_size(),
         )?;
 
@@ -914,7 +914,7 @@ impl Vm {
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         #[cfg(feature = "sev_snp")] sev_snp_enabled: bool,
-        #[cfg(feature = "snp")] mem_size: u64,
+        #[cfg(feature = "sev_snp")] mem_size: u64,
     ) -> Result<Arc<dyn hypervisor::Vm>> {
         hypervisor.check_required_extensions().unwrap();
 
@@ -1039,7 +1039,7 @@ impl Vm {
         igvm: File,
         memory_manager: Arc<Mutex<MemoryManager>>,
         cpu_manager: Arc<Mutex<CpuManager>>,
-        #[cfg(feature = "snp")] host_data: &str,
+        #[cfg(feature = "sev_snp")] host_data: &str,
     ) -> Result<EntryPoint> {
         /*
         BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
@@ -1081,7 +1081,7 @@ impl Vm {
             arch_mem_regions,
             num_cpus,
             "",
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             host_data,
         )
         .map_err(Error::IgvmLoad)?;
@@ -1090,7 +1090,7 @@ impl Vm {
             entry_addr: Some(vm_memory::GuestAddress(res.vmsa.rip)),
             #[cfg(feature = "igvm")]
             vmsa: Some(res.vmsa),
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             vmsa_pfn: res.vmsa_gpa / 4096,
         })
     }
@@ -1127,7 +1127,7 @@ impl Vm {
                 entry_addr: Some(entry_addr),
                 #[cfg(feature = "igvm")]
                 vmsa: None,
-                #[cfg(feature = "snp")]
+                #[cfg(feature = "sev_snp")]
                 vmsa_pfn: 0,
             })
         } else {
@@ -1148,7 +1148,7 @@ impl Vm {
         let igvm: Option<std::path::PathBuf> = None;
         #[cfg(feature = "igvm")]
         let igvm = &payload.igvm;
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let host_data = &payload.host_data;
         #[cfg(feature = "igvm")]
         {
@@ -1168,7 +1168,7 @@ impl Vm {
             #[cfg(feature = "igvm")]
             {
                 let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
-                #[cfg(feature = "snp")]
+                #[cfg(feature = "sev_snp")]
                 {
                     if let Some(host_data_str) = host_data {
                         return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
@@ -1176,7 +1176,7 @@ impl Vm {
                         return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
                     }
                 }
-                #[cfg(not(feature = "snp"))]
+                #[cfg(not(feature = "sev_snp"))]
                 return Self::load_igvm(igvm, memory_manager, cpu_manager);
             }
         }
@@ -2157,7 +2157,7 @@ impl Vm {
         // Do earlier to parallelise with loading kernel
         #[cfg(target_arch = "x86_64")]
         cfg_if::cfg_if! {
-            if #[cfg(feature = "snp")] {
+            if #[cfg(feature = "sev_snp")] {
                 let rsdp_addr =  if self.snp_enabled {
                     None
                 } else {
@@ -2171,13 +2171,13 @@ impl Vm {
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
         let entry_point = self.entry_point()?;
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let vmsa = if self.snp_enabled {
             entry_point.unwrap().vmsa
         } else {
             None
         };
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let vmsa_pfn = if self.snp_enabled {
             entry_point.unwrap().vmsa_pfn
         } else {
@@ -2200,7 +2200,7 @@ impl Vm {
                     boot_setup,
                     #[cfg(feature = "igvm")]
                     vmsa,
-                    #[cfg(feature = "snp")]
+                    #[cfg(feature = "sev_snp")]
                     vmsa_pfn,
                 )
                 .map_err(Error::CpuManager)?;
@@ -3293,7 +3293,7 @@ mod tests {
 }
 
 #[test]
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 pub fn test_vm() {
     use hypervisor::VmExit;
     use vm_memory::{Address, GuestMemory, GuestMemoryRegion};

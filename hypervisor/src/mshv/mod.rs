@@ -13,7 +13,7 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
@@ -56,9 +56,9 @@ use crate::arch::x86::{
     CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters, StandardRegisters,
 };
 
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 mod bitmap;
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 use bitmap::SimpleAtomicBitmap;
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
@@ -243,7 +243,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     fn create_vm_with_type(
         &self,
         vm_type: u64,
-        #[cfg(feature = "snp")] _mem_size: u64,
+        #[cfg(feature = "sev_snp")] _mem_size: u64,
     ) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
@@ -329,7 +329,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         }
         let vm_fd = Arc::new(fd);
 
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let mem_size_for_bitmap = if _mem_size as usize > 3 * ONE_GB {
             _mem_size as usize + ONE_GB
         } else {
@@ -340,7 +340,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             host_access_pages: Arc::new(SimpleAtomicBitmap::new_with_bytes(
                 mem_size_for_bitmap,
                 HV_PAGE_SIZE as usize,
@@ -362,12 +362,12 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// ```
     fn create_vm(
         &self,
-        #[cfg(feature = "snp")] mem_size: u64,
+        #[cfg(feature = "sev_snp")] mem_size: u64,
     ) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
         self.create_vm_with_type(
             vm_type,
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             mem_size,
         )
     }
@@ -1312,7 +1312,7 @@ impl cpu::Vcpu for MshvVcpu {
         ]
         .to_vec()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn set_sev_control_register(&self, vmsa_pfn: u64) -> cpu::Result<()> {
         let sev_control_reg = snp::get_sev_control_register(vmsa_pfn);
 
@@ -1516,7 +1516,7 @@ pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     host_access_pages: Arc<SimpleAtomicBitmap>,
     snp_enabled: bool,
 }
@@ -1618,7 +1618,7 @@ impl vm::Vm for MshvVm {
             vm_ops,
             #[cfg(feature = "sev_snp")]
             vm_fd: self.fd.clone(),
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             host_access_pages: self.host_access_pages.clone(),
         };
         Ok(Arc::new(vcpu))
@@ -1897,7 +1897,7 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::ImportIsolatedPages(e.into()))
     }
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn modify_gpa_host_access(
         &self,
         host_access: u32,
@@ -1908,7 +1908,7 @@ impl vm::Vm for MshvVm {
         _modify_gpa_host_access(self.fd.clone(), host_access, flags, acquire, gpas)
     }
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn complete_isolated_import(
         &self,
         snp_id_block: IGVM_VHS_SNP_ID_BLOCK,
@@ -1955,7 +1955,7 @@ impl vm::Vm for MshvVm {
             .complete_isolated_import(&data)
             .map_err(|e| vm::HypervisorVmError::CompleteIsolatedImport(e.into()))
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn gain_page_access(&self, gpa: u64, size: u32) -> vm::Result<()> {
         if !self.snp_enabled {
             return Ok(());
@@ -1986,7 +1986,7 @@ impl vm::Vm for MshvVm {
 
         Ok(())
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn remove_gpa_from_host_acess_cache(&self, gpa: u64) -> vm::Result<()> {
         let pfn = gpa >> PAGE_SHIFT;
         self.host_access_pages.reset_bit(pfn as usize);
@@ -1994,7 +1994,7 @@ impl vm::Vm for MshvVm {
     }
 }
 
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 fn _modify_gpa_host_access(
     fd: Arc<VmFd>,
     host_access: u32,
@@ -2020,7 +2020,7 @@ fn _modify_gpa_host_access(
         .map_err(|e| vm::HypervisorVmError::ModifyGpaHostAccess(e.into()))
 }
 
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Result<()> {
     let req = mshv_issue_psp_guest_request { req_gpa, rsp_gpa };
 
@@ -2028,7 +2028,7 @@ fn _psp_issue_guest_request(fd: Arc<VmFd>, req_gpa: u64, rsp_gpa: u64) -> vm::Re
         .map_err(|e| vm::HypervisorVmError::PspIssueGuestRequest(e.into()))
 }
 
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 fn _snp_start_vcpu(fd: Arc<VmFd>, apic_id: u64, vmsa_gpa: u64) -> vm::Result<()> {
     let req = mshv_sev_snp_ap_create {
         vp_id: apic_id,

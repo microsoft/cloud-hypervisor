@@ -15,7 +15,7 @@ use versionize_derive::Versionize;
 use virtio_queue::{Queue, QueueT};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, VersionMapped};
 use vm_virtio::AccessPlatform;
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 use vm_virtio::{get_vring_size, VringType};
 
 pub const VIRTIO_PCI_COMMON_CONFIG_ID: &str = "virtio_pci_common_config";
@@ -33,7 +33,7 @@ pub struct VirtioPciCommonConfigState {
 
 impl VersionMapped for VirtioPciCommonConfigState {}
 
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 #[derive(Clone, Debug, Default)]
 struct QueueAdresses {
     pub desc_table_address: u64,
@@ -43,7 +43,7 @@ struct QueueAdresses {
     pub used_ring_address: u64,
     pub used_size: u32,
 }
-#[cfg(all(feature = "mshv", feature = "snp"))]
+#[cfg(all(feature = "mshv", feature = "sev_snp"))]
 impl QueueAdresses {
     pub fn new() -> QueueAdresses {
         QueueAdresses::default()
@@ -119,9 +119,9 @@ pub struct VirtioPciCommonConfig {
     pub queue_select: u16,
     pub msix_config: Arc<AtomicU16>,
     pub msix_queues: Arc<Mutex<Vec<u16>>>,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
     vm: Arc<dyn hypervisor::Vm>,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
     queue_addresses: QueueAdresses,
 }
 
@@ -129,7 +129,7 @@ impl VirtioPciCommonConfig {
     pub fn new(
         state: VirtioPciCommonConfigState,
         access_platform: Option<Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Self {
         VirtioPciCommonConfig {
             access_platform,
@@ -140,9 +140,9 @@ impl VirtioPciCommonConfig {
             queue_select: state.queue_select,
             msix_config: Arc::new(AtomicU16::new(state.msix_config)),
             msix_queues: Arc::new(Mutex::new(state.msix_queues)),
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             vm,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             queue_addresses: QueueAdresses::new(),
         }
     }
@@ -308,7 +308,7 @@ impl VirtioPciCommonConfig {
         queues: &mut [Queue],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
-        #[cfg(all(feature = "mshv", feature = "snp"))]
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
         // Asumption: All the queues have the same size
         let qs = queues[0].size();
 
@@ -329,7 +329,7 @@ impl VirtioPciCommonConfig {
             }
             0x20 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(Some(value), None));
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 {
                     self.queue_addresses
                         .set_desc_table_address(Some(value), None, None);
@@ -338,7 +338,7 @@ impl VirtioPciCommonConfig {
             0x24 => {
                 self.with_queue_mut(queues, |q| q.set_desc_table_address(None, Some(value)));
 
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 {
                     self.queue_addresses
                         .set_desc_table_address(None, Some(value), None);
@@ -352,13 +352,13 @@ impl VirtioPciCommonConfig {
             }
             0x28 => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(Some(value), None));
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 self.queue_addresses
                     .set_avail_ring_address(Some(value), None, None);
             }
             0x2c => {
                 self.with_queue_mut(queues, |q| q.set_avail_ring_address(None, Some(value)));
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 {
                     self.queue_addresses
                         .set_avail_ring_address(None, Some(value), None);
@@ -372,13 +372,13 @@ impl VirtioPciCommonConfig {
             }
             0x30 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(Some(value), None));
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 self.queue_addresses
                     .set_used_ring_address(Some(value), None, None);
             }
             0x34 => {
                 self.with_queue_mut(queues, |q| q.set_used_ring_address(None, Some(value)));
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 {
                     self.queue_addresses
                         .set_used_ring_address(None, Some(value), None);
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "snp"))]
+    #[cfg(not(feature = "sev_snp"))]
     fn write_base_regs() {
         let mut regs = VirtioPciCommonConfig {
             access_platform: None,

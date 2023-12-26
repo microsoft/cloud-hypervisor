@@ -42,7 +42,7 @@ impl TxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut retry_write = false;
         let mut rate_limit_reached = false;
@@ -60,7 +60,7 @@ impl TxVirtio {
                 let desc_addr = desc.addr().translate_gva_with_vmfd(
                     access_platform,
                     desc.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     vm,
                 );
                 if !desc.is_write_only() && desc.len() > 0 {
@@ -172,7 +172,7 @@ impl RxVirtio {
         queue: &mut Queue,
         rate_limiter: &mut Option<RateLimiter>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut exhausted_descs = true;
         let mut rate_limit_reached = false;
@@ -194,7 +194,7 @@ impl RxVirtio {
                     desc.addr().translate_gva_with_vmfd(
                         access_platform,
                         desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                         vm,
                     ),
                     10,
@@ -207,7 +207,7 @@ impl RxVirtio {
                 let desc_addr = desc.addr().translate_gva_with_vmfd(
                     access_platform,
                     desc.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     vm,
                 );
                 if desc.is_write_only() && desc.len() > 0 {
@@ -366,7 +366,7 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         let tx_tap_retry = self.tx.process_desc_chain(
             mem,
@@ -374,7 +374,7 @@ impl NetQueuePair {
             queue,
             &mut self.tx_rate_limiter,
             self.access_platform.as_ref(),
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             vm,
         )?;
 
@@ -419,7 +419,7 @@ impl NetQueuePair {
         &mut self,
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<bool, NetQueuePairError> {
         self.rx_desc_avail = !self.rx.process_desc_chain(
             mem,
@@ -427,7 +427,7 @@ impl NetQueuePair {
             queue,
             &mut self.rx_rate_limiter,
             self.access_platform.as_ref(),
-            #[cfg(all(feature = "mshv", feature = "snp"))]
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
             vm,
         )?;
         let rate_limit_reached = self

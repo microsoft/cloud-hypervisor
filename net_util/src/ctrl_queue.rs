@@ -61,7 +61,7 @@ impl CtrlQueue {
         mem: &GuestMemoryMmap,
         queue: &mut Queue,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
-        #[cfg(feature = "snp")] vm: Option<&Arc<dyn hypervisor::Vm>>,
+        #[cfg(feature = "sev_snp")] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> Result<()> {
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(mem) {
             let ctrl_desc = desc_chain.next().ok_or(Error::NoControlHeaderDescriptor)?;
@@ -71,7 +71,7 @@ impl CtrlQueue {
                 .read_obj(ctrl_desc.addr().translate_gva_with_vmfd(
                     access_platform,
                     ctrl_desc.len() as usize,
-                    #[cfg(all(feature = "mshv", feature = "snp"))]
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                     vm,
                 ))
                 .map_err(Error::GuestMemory)?;
@@ -80,7 +80,7 @@ impl CtrlQueue {
             let data_desc_addr = data_desc.addr().translate_gva_with_vmfd(
                 access_platform,
                 data_desc.len() as usize,
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 vm,
             );
 
@@ -140,7 +140,7 @@ impl CtrlQueue {
                     status_desc.addr().translate_gva_with_vmfd(
                         access_platform,
                         status_desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                         vm,
                     ),
                 )

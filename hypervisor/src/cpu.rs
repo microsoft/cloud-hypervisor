@@ -298,7 +298,7 @@ pub enum VmExit<'a> {
     Tdx,
     #[cfg(feature = "kvm")]
     Debug,
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     GpaModify(u64 /* base_gpa */, u64 /* gpa_count */),
 }
 
@@ -506,7 +506,7 @@ pub trait Vcpu: Send + Sync {
     ) -> Result<[u32; 4]> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn set_sev_control_register(&self, _reg: u64) -> Result<()> {
         unimplemented!()
     }
