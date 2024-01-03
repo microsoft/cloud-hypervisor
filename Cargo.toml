@@ -58,6 +58,13 @@ zbus = { version = "3.11.1", optional = true }
 kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branch = "ch-v0.7.0" }
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch-0.1.6" }
 
+[patch."https://github.com/rust-vmm/mshv"]
+mshv-bindings = { path = "../mshv/mshv-bindings", optional = true }
+mshv-ioctls = { path = "../mshv/mshv-ioctls", optional = true}
+
+[patch."https://github.com/rust-vmm/vfio"]
+vfio-ioctls = { path = "../vfio/crates/vfio-ioctls" }
+
 [dev-dependencies]
 dirs = "5.0.0"
 net_util = { path = "net_util" }
