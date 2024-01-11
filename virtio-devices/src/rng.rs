@@ -77,13 +77,9 @@ impl RngEpollHandler {
             // Fill the read with data from the random device on the host.
             let len = desc_chain
                 .memory()
-                .read_from(
-                    desc.addr().translate_gva_with_vmfd(
-                        self.access_platform.as_ref(),
-                        desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                        Some(&self.vm.clone()),
-                    ),
+                .read_volatile_from(
+                    desc.addr()
+                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
                     &mut self.random_file,
                     desc.len() as usize,
                 )

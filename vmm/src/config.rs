@@ -460,6 +460,8 @@ impl<'a> VmParams<'a> {
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
         #[cfg(feature = "igvm")]
         let igvm = args.get_one::<String>("igvm").map(|x| x as &str);
+        #[cfg(feature = "sev_snp")]
+        let host_data = args.get_one::<String>("host_data").map(|x| x as &str);
         VmParams {
             cpus,
             memory,
@@ -491,6 +493,8 @@ impl<'a> VmParams<'a> {
             tpm,
             #[cfg(feature = "igvm")]
             igvm,
+            #[cfg(feature = "sev_snp")]
+            host_data,
         }
     }
 }

@@ -854,29 +854,27 @@ pub fn configure_vcpu(
 
     regs::setup_msrs(vcpu).map_err(Error::MsrsConfiguration)?;
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
-        if let Some(entry_addr) = kernel_entry_point.entry_addr {
-            // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(
-                vcpu,
-                entry_addr.raw_value(),
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
-            .map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(
-                vcpu,
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
-            .map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(
-                &guest_memory.memory(),
-                vcpu,
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
-            .map_err(Error::SregsConfiguration)?;
-        }
+	    // Safe to unwrap because this method is called after the VM is configured
+	    regs::setup_regs(
+		vcpu,
+		kernel_entry_point.entry_addr.raw_value(),
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::RegsConfiguration)?;
+	    regs::setup_fpu(
+		vcpu,
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::FpuConfiguration)?;
+	    regs::setup_sregs(
+		&guest_memory.memory(),
+		vcpu,
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::SregsConfiguration)?;
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
     Ok(())

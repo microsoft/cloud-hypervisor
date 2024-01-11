@@ -413,15 +413,6 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "sev_snp")]
-    fn import_isolated_pages(
-        &self,
-        _page_type: u32,
-        _page_size: u32,
-        _pages: &[u64],
-    ) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "sev_snp")]
     fn modify_gpa_host_access(
         &self,
         _host_access: u32,
@@ -437,15 +428,6 @@ pub trait Vm: Send + Sync + Any {
     }
     #[cfg(feature = "sev_snp")]
     fn psp_issue_guest_request(&self, _req_gpa: u64, _rsp_gpa: u64) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "sev_snp")]
-    fn complete_isolated_import(
-        &self,
-        _snp_id_block: IGVM_VHS_SNP_ID_BLOCK,
-        _host_data: &[u8],
-        _id_block_enabled: u8,
-    ) -> Result<()> {
         unimplemented!()
     }
     #[cfg(feature = "sev_snp")]

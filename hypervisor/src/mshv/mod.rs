@@ -516,18 +516,6 @@ impl cpu::Vcpu for MshvVcpu {
             .map_err(|e| cpu::HypervisorCpuError::SetMsrEntries(e.into()))
     }
 
-    fn get_cpuid_values(
-        &self,
-        function: u32,
-        index: u32,
-        xfem: u64,
-        xss: u64,
-    ) -> cpu::Result<[u32; 4]> {
-        self.fd
-            .get_cpuid_values(function, index, xfem, xss)
-            .map_err(|e| cpu::HypervisorCpuError::GetCpuidVales(e.into()))
-    }
-
     #[cfg(target_arch = "x86_64")]
     ///
     /// X86 specific call to enable HyperV SynIC
@@ -1897,17 +1885,10 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::ImportIsolatedPages(e.into()))
     }
 
-    #[cfg(feature = "sev_snp")]
-    fn modify_gpa_host_access(
-        &self,
-        host_access: u32,
-        flags: u32,
-        acquire: u8,
-        gpas: &[u64],
-    ) -> vm::Result<()> {
-        _modify_gpa_host_access(self.fd.clone(), host_access, flags, acquire, gpas)
-    }
-
+    ///
+    /// Complete isolated import, telling the hypervisor that
+    /// importing the pages to guest memory is complete.
+    ///
     #[cfg(feature = "sev_snp")]
     fn complete_isolated_import(
         &self,

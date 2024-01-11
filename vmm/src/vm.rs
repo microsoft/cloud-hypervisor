@@ -111,19 +111,11 @@ use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 /// Errors associated with VM management
 #[derive(Debug, Error)]
 pub enum Error {
-    #[cfg(feature = "igvm")]
-    #[error("Cannot open igvm file: {0}")]
-    IgvmFile(#[source] io::Error),
-
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
     #[error("Cannot open initramfs file: {0}")]
     InitramfsFile(#[source] io::Error),
-
-    #[cfg(feature = "igvm")]
-    #[error("Cannot load the igvm into memory: {0}")]
-    IgvmLoad(#[source] igvm_loader::Error),
 
     #[error("Cannot load the kernel into memory: {0}")]
     KernelLoad(#[source] linux_loader::loader::Error),
@@ -885,7 +877,7 @@ impl Vm {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc_config,
-                snp_enabled,
+                sev_snp_enabled,
             )
             .map_err(Error::MemoryManager)?
         };
