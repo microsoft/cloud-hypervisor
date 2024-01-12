@@ -134,8 +134,6 @@ struct BlockEpollHandler {
     rate_limiter: Option<RateLimiter>,
     access_platform: Option<Arc<dyn AccessPlatform>>,
     read_only: bool,
-    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl BlockEpollHandler {
@@ -145,13 +143,8 @@ impl BlockEpollHandler {
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = queue.pop_descriptor_chain(self.mem.memory()) {
-            let mut request = Request::parse(
-                &mut desc_chain,
-                self.access_platform.as_ref(),
-                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                Some(&self.vm.clone()),
-            )
-            .map_err(Error::RequestParsing)?;
+            let mut request = Request::parse(&mut desc_chain, self.access_platform.as_ref())
+                .map_err(Error::RequestParsing)?;
 
             // For virtio spec compliance
             // "A device MUST set the status byte to VIRTIO_BLK_S_IOERR for a write request
@@ -214,8 +207,6 @@ impl BlockEpollHandler {
                     self.disk_image.as_mut(),
                     &self.serial,
                     desc_chain.head_index() as u64,
-                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                    Some(&self.vm.clone()),
                 )
                 .map_err(Error::RequestExecuting)?
             {
@@ -520,8 +511,6 @@ pub struct Block {
     exit_evt: EventFd,
     read_only: bool,
     serial: Vec<u8>,
-    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -551,7 +540,6 @@ impl Block {
         rate_limiter_config: Option<RateLimiterConfig>,
         exit_evt: EventFd,
         state: Option<BlockState>,
-        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Self> {
         let (disk_nsectors, avail_features, acked_features, config, paused) =
             if let Some(state) = state {
@@ -655,8 +643,6 @@ impl Block {
             exit_evt,
             read_only,
             serial,
-            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-            vm,
         })
     }
 
@@ -793,8 +779,6 @@ impl VirtioDevice for Block {
                 rate_limiter,
                 access_platform: self.common.access_platform.clone(),
                 read_only: self.read_only,
-                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();

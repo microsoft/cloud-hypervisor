@@ -643,7 +643,6 @@ impl Console {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<ConsoleState>,
-        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<(Console, Arc<ConsoleResizer>)> {
         let (avail_features, acked_features, config, in_buffer, paused) = if let Some(state) = state
         {
@@ -701,8 +700,6 @@ impl Console {
                 seccomp_action,
                 in_buffer: Arc::new(Mutex::new(in_buffer)),
                 exit_evt,
-                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                vm,
             },
             resizer,
         ))

@@ -99,8 +99,6 @@ pub struct VsockEpollHandler<B: VsockBackend> {
     pub interrupt_cb: Arc<dyn VirtioInterrupt>,
     pub backend: Arc<RwLock<B>>,
     pub access_platform: Option<Arc<dyn AccessPlatform>>,
-    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-    pub vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl<B> VsockEpollHandler<B>
@@ -133,8 +131,6 @@ where
             let used_len = match VsockPacket::from_rx_virtq_head(
                 &mut desc_chain,
                 self.access_platform.as_ref(),
-                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                self.vm.clone(),
             ) {
                 Ok(mut pkt) => {
                     if self.backend.write().unwrap().recv_pkt(&mut pkt).is_ok() {
@@ -169,14 +165,14 @@ where
     /// the backend for processing.
     ///
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
+        debug!("vsock: epoll_handler::process_tx()");
+
         let mut used_descs = false;
 
         while let Some(mut desc_chain) = self.queues[1].pop_descriptor_chain(self.mem.memory()) {
             let pkt = match VsockPacket::from_tx_virtq_head(
                 &mut desc_chain,
                 self.access_platform.as_ref(),
-                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-                self.vm.clone(),
             ) {
                 Ok(pkt) => pkt,
                 Err(e) => {
@@ -325,8 +321,6 @@ pub struct Vsock<B: VsockBackend> {
     path: PathBuf,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
-    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -353,7 +347,6 @@ where
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<VsockState>,
-        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Vsock<B>> {
         let (avail_features, acked_features, paused) = if let Some(state) = state {
             info!("Restoring virtio-vsock {}", id);
@@ -384,8 +377,6 @@ where
             path,
             seccomp_action,
             exit_evt,
-            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-            vm,
         })
     }
 
@@ -470,8 +461,6 @@ where
             interrupt_cb,
             backend: self.backend.clone(),
             access_platform: self.common.access_platform.clone(),
-            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
-            vm: self.vm.clone(),
         };
 
         let paused = self.common.paused.clone();
