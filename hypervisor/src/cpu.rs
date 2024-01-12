@@ -441,7 +441,6 @@ pub trait Vcpu: Send + Sync {
     ///
     fn run(
         &self,
-        guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
     ) -> std::result::Result<VmExit, HypervisorCpuError>;
     #[cfg(target_arch = "x86_64")]
     ///

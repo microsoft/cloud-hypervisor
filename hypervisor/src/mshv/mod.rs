@@ -528,7 +528,6 @@ impl cpu::Vcpu for MshvVcpu {
     #[allow(non_upper_case_globals)]
     fn run(
         &self,
-        _guest_memory: &GuestMemoryAtomic<vm_memory::GuestMemoryMmap<AtomicBitmap>>,
     ) -> std::result::Result<cpu::VmExit, cpu::HypervisorCpuError> {
         let hv_message: hv_message = hv_message::default();
         match self.fd.run(hv_message) {
