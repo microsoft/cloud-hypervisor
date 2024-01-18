@@ -488,6 +488,7 @@ pub struct CpuManager {
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
+    sev_snp_enabled: bool,
 }
 
 const CPU_ENABLE_FLAG: usize = 0;
@@ -636,6 +637,7 @@ impl CpuManager {
         vm_ops: Arc<dyn VmOps>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         numa_nodes: &NumaNodes,
+        sev_snp_enabled: bool,
     ) -> Result<Arc<Mutex<CpuManager>>> {
         if u32::from(config.max_vcpus) > hypervisor.get_max_vcpus() {
             return Err(Error::MaximumVcpusExceeded);
@@ -728,6 +730,7 @@ impl CpuManager {
             affinity,
             dynamic,
             hypervisor: hypervisor.clone(),
+            sev_snp_enabled: bool,
         })))
     }
 

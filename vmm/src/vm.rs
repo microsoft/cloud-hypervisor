@@ -526,7 +526,7 @@ impl Vm {
         #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
         #[cfg(feature = "sev_snp")]
-        let snp_enabled = config.lock().unwrap().is_snp_enabled();
+        let snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "sev_snp")]
         let force_iommu = snp_enabled;
 
