@@ -5,8 +5,6 @@ source $HOME/.cargo/env
 source $(dirname "$0")/test-util.sh
 
 export TEST_ARCH=$(uname -m)
-export BUILD_TARGET=${BUILD_TARGET-${TEST_ARCH}-unknown-linux-gnu}
-
 
 WORKLOADS_DIR="$HOME/workloads"
 mkdir -p "$WORKLOADS_DIR"
@@ -82,31 +80,18 @@ if [ ${TEST_ARCH} == "aarch64" ]; then
 fi
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
-VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
-if [ ! -f "$VMLINUX_IMAGE" ]; then
-    build_custom_linux
-fi
+build_custom_linux
 
-BUILD_TARGET="${TEST_ARCH}-unknown-linux-${CH_LIBC}"
 CFLAGS=""
-TARGET_CC=""
 if [[ "${BUILD_TARGET}" == "${TEST_ARCH}-unknown-linux-musl" ]]; then
-    TARGET_CC="musl-gcc"
     CFLAGS="-I /usr/include/${TEST_ARCH}-linux-musl/ -idirafter /usr/include/"
 fi
 
 cargo build --no-default-features --features "kvm,mshv,igvm,snp" --all --release --target $BUILD_TARGET
 
-# Get the total memory in gb
-TOTAL_MEM_GB=$(free -g | grep Mem | awk '{print $2}')
-
 # setup hugepages
 HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`
-if [ "$TOTAL_MEM_GB" -lt 256 ]; then
-    PAGE_NUM=`echo $((12288 * 1024 / $HUGEPAGESIZE))`
-else
-    PAGE_NUM=`echo $((128 * 1024 * 1024 / $HUGEPAGESIZE))`
-fi
+PAGE_NUM=`echo $((12288 * 1024 / $HUGEPAGESIZE))`
 echo $PAGE_NUM | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 

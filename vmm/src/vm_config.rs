@@ -89,9 +89,9 @@ pub struct PlatformConfig {
     #[cfg(feature = "tdx")]
     #[serde(default)]
     pub tdx: bool,
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     #[serde(default)]
-    pub snp: bool,
+    pub sev_snp: bool,
 }
 
 impl Default for PlatformConfig {
@@ -104,8 +104,8 @@ impl Default for PlatformConfig {
             oem_strings: None,
             #[cfg(feature = "tdx")]
             tdx: false,
-            #[cfg(feature = "snp")]
-            snp: false,
+            #[cfg(feature = "sev_snp")]
+            sev_snp: false,
         }
     }
 }
@@ -218,8 +218,13 @@ pub struct DiskConfig {
     // For testing use only. Not exposed in API.
     #[serde(default)]
     pub disable_io_uring: bool,
+    // For testing use only. Not exposed in API.
+    #[serde(default)]
+    pub disable_aio: bool,
     #[serde(default)]
     pub pci_segment: u16,
+    #[serde(default)]
+    pub serial: Option<String>,
 }
 
 pub const DEFAULT_DISK_NUM_QUEUES: usize = 1;
@@ -247,8 +252,10 @@ impl Default for DiskConfig {
             vhost_socket: None,
             id: None,
             disable_io_uring: false,
+            disable_aio: false,
             rate_limiter_config: None,
             pci_segment: 0,
+            serial: None,
         }
     }
 }
@@ -437,6 +444,7 @@ pub enum ConsoleOutputMode {
     Pty,
     Tty,
     File,
+    Socket,
     Null,
 }
 
@@ -447,6 +455,7 @@ pub struct ConsoleConfig {
     pub mode: ConsoleOutputMode,
     #[serde(default)]
     pub iommu: bool,
+    pub socket: Option<PathBuf>,
 }
 
 pub fn default_consoleconfig_file() -> Option<PathBuf> {
@@ -533,6 +542,8 @@ pub struct NumaConfig {
     #[cfg(target_arch = "x86_64")]
     #[serde(default)]
     pub sgx_epc_sections: Option<Vec<String>>,
+    #[serde(default)]
+    pub pci_segments: Option<Vec<u16>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -548,9 +559,6 @@ pub struct PayloadConfig {
     #[cfg(feature = "igvm")]
     #[serde(default)]
     pub igvm: Option<PathBuf>,
-    #[cfg(feature = "snp")]
-    #[serde(default)]
-    pub host_data: Option<String>,
 }
 
 pub fn default_serial() -> ConsoleConfig {
@@ -558,6 +566,7 @@ pub fn default_serial() -> ConsoleConfig {
         file: None,
         mode: ConsoleOutputMode::Null,
         iommu: false,
+        socket: None,
     }
 }
 
@@ -566,6 +575,7 @@ pub fn default_console() -> ConsoleConfig {
         file: None,
         mode: ConsoleOutputMode::Tty,
         iommu: false,
+        socket: None,
     }
 }
 
@@ -597,6 +607,8 @@ pub struct VmConfig {
     pub vdpa: Option<Vec<VdpaConfig>>,
     pub vsock: Option<VsockConfig>,
     #[serde(default)]
+    pub pvpanic: bool,
+    #[serde(default)]
     pub iommu: bool,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<SgxEpcConfig>>,
@@ -604,12 +616,13 @@ pub struct VmConfig {
     #[serde(default)]
     pub watchdog: bool,
     #[cfg(feature = "guest_debug")]
+    #[serde(default)]
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
     pub tpm: Option<TpmConfig>,
-    // Preseved FDs are the ones that share the same life-time as its holding
+    // Preserved FDs are the ones that share the same life-time as its holding
     // VmConfig instance, such as FDs for creating TAP devices.
-    // Perserved FDs will stay open as long as the holding VmConfig instance is
+    // Preserved FDs will stay open as long as the holding VmConfig instance is
     // valid, and will be closed when the holding VmConfig instance is destroyed.
     #[serde(skip)]
     pub preserved_fds: Option<Vec<i32>>,

@@ -91,8 +91,9 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
     arch_memory_regions, configure_system, configure_vcpu, generate_common_cpuid,
-    get_host_cpu_phys_bits, initramfs_load_addr, layout, layout::CMDLINE_MAX_SIZE,
-    layout::CMDLINE_START, regs, CpuidFeatureEntry, EntryPoint, _NSIG,
+    generate_ram_ranges, get_host_cpu_phys_bits, initramfs_load_addr, layout,
+    layout::CMDLINE_MAX_SIZE, layout::CMDLINE_START, regs, CpuidConfig, CpuidFeatureEntry,
+    EntryPoint, _NSIG,
 };
 
 /// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
@@ -108,6 +109,7 @@ pub struct NumaNode {
     pub memory_regions: Vec<Arc<GuestRegionMmap>>,
     pub hotplug_regions: Vec<Arc<GuestRegionMmap>>,
     pub cpus: Vec<u8>,
+    pub pci_segments: Vec<u16>,
     pub distances: BTreeMap<u32, u8>,
     pub memory_zones: Vec<String>,
     #[cfg(target_arch = "x86_64")]

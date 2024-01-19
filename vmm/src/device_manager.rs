@@ -34,11 +34,13 @@ use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
 use arch::NumaNodes;
 #[cfg(target_arch = "aarch64")]
 use arch::{DeviceType, MmioDeviceInfo};
-use block_util::{
-    async_io::DiskFile, block_io_uring_is_supported, detect_image_type,
-    fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
-    raw_async::RawFileDisk, raw_sync::RawFileDiskSync, vhdx_sync::VhdxDiskSync, ImageType,
+use block::{
+    async_io::DiskFile, block_aio_is_supported, block_io_uring_is_supported, detect_image_type,
+    fixed_vhd_sync::FixedVhdDiskSync, qcow, qcow_sync::QcowDiskSync, raw_async_aio::RawFileDiskAio,
+    raw_sync::RawFileDiskSync, vhdx, vhdx_sync::VhdxDiskSync, ImageType,
 };
+#[cfg(feature = "io_uring")]
+use block::{fixed_vhd_async::FixedVhdDiskAsync, raw_async::RawFileDisk};
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
@@ -114,6 +116,7 @@ const RNG_DEVICE_NAME: &str = "__rng";
 const IOMMU_DEVICE_NAME: &str = "__iommu";
 const BALLOON_DEVICE_NAME: &str = "__balloon";
 const CONSOLE_DEVICE_NAME: &str = "__console";
+const PVPANIC_DEVICE_NAME: &str = "__pvpanic";
 
 // Devices that the user may name and for which we generate
 // identifiers if the user doesn't give one
@@ -392,6 +395,9 @@ pub enum DeviceManagerError {
     /// No support for device passthrough
     NoDevicePassthroughSupport,
 
+    /// No socket option support for console device
+    NoSocketOptionSupportForConsoleDevice,
+
     /// Failed to resize virtio-balloon
     VirtioBalloonResize(virtio_devices::balloon::Error),
 
@@ -421,7 +427,7 @@ pub enum DeviceManagerError {
     CreateQcowDiskSync(qcow::Error),
 
     /// Failed to create FixedVhdxDiskSync
-    CreateFixedVhdxDiskSync(vhdx::vhdx::VhdxError),
+    CreateFixedVhdxDiskSync(vhdx::VhdxError),
 
     /// Failed to add DMA mapping handler to virtio-mem device.
     AddDmaMappingHandlerVirtioMem(virtio_devices::mem::Error),
@@ -470,6 +476,9 @@ pub enum DeviceManagerError {
 
     /// Failed retrieving device state from snapshot
     RestoreGetState(MigratableError),
+
+    /// Cannot create a PvPanic device
+    PvPanicCreate(devices::pvpanic::PvPanicError),
 }
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
 
@@ -505,7 +514,7 @@ pub fn create_pty() -> io::Result<(File, File, PathBuf)> {
     // SAFETY: FFI call into libc, trivially safe
     unsafe { libc::ioctl(main.as_raw_fd(), TIOCSPTLCK as _, &mut unlock) };
 
-    // SAFETY: FFI call into libc, trivally safe
+    // SAFETY: FFI call into libc, trivially safe
     let sub_fd = unsafe {
         libc::ioctl(
             main.as_raw_fd(),
@@ -552,7 +561,8 @@ pub(crate) struct AddressManager {
     pub(crate) mmio_bus: Arc<Bus>,
     pub(crate) vm: Arc<dyn hypervisor::Vm>,
     device_tree: Arc<Mutex<DeviceTree>>,
-    pci_mmio_allocators: Vec<Arc<Mutex<AddressAllocator>>>,
+    pci_mmio32_allocators: Vec<Arc<Mutex<AddressAllocator>>>,
+    pci_mmio64_allocators: Vec<Arc<Mutex<AddressAllocator>>>,
 }
 
 impl DeviceRelocation for AddressManager {
@@ -595,56 +605,35 @@ impl DeviceRelocation for AddressManager {
                 error!("I/O region is not supported");
             }
             PciBarRegionType::Memory32BitRegion | PciBarRegionType::Memory64BitRegion => {
-                // Update system allocator
-                if region_type == PciBarRegionType::Memory32BitRegion {
-                    self.allocator
-                        .lock()
-                        .unwrap()
-                        .free_mmio_hole_addresses(GuestAddress(old_base), len as GuestUsize);
-
-                    self.allocator
-                        .lock()
-                        .unwrap()
-                        .allocate_mmio_hole_addresses(
-                            Some(GuestAddress(new_base)),
-                            len as GuestUsize,
-                            Some(len),
-                        )
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::Other,
-                                "failed allocating new 32 bits MMIO range",
-                            )
-                        })?;
+                let allocators = if region_type == PciBarRegionType::Memory32BitRegion {
+                    &self.pci_mmio32_allocators
                 } else {
-                    // Find the specific allocator that this BAR was allocated from and use it for new one
-                    for allocator in &self.pci_mmio_allocators {
-                        let allocator_base = allocator.lock().unwrap().base();
-                        let allocator_end = allocator.lock().unwrap().end();
+                    &self.pci_mmio64_allocators
+                };
 
-                        if old_base >= allocator_base.0 && old_base <= allocator_end.0 {
-                            allocator
-                                .lock()
-                                .unwrap()
-                                .free(GuestAddress(old_base), len as GuestUsize);
+                // Find the specific allocator that this BAR was allocated from and use it for new one
+                for allocator in allocators {
+                    let allocator_base = allocator.lock().unwrap().base();
+                    let allocator_end = allocator.lock().unwrap().end();
 
-                            allocator
-                                .lock()
-                                .unwrap()
-                                .allocate(
-                                    Some(GuestAddress(new_base)),
-                                    len as GuestUsize,
-                                    Some(len),
+                    if old_base >= allocator_base.0 && old_base <= allocator_end.0 {
+                        allocator
+                            .lock()
+                            .unwrap()
+                            .free(GuestAddress(old_base), len as GuestUsize);
+
+                        allocator
+                            .lock()
+                            .unwrap()
+                            .allocate(Some(GuestAddress(new_base)), len as GuestUsize, Some(len))
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::Other,
+                                    "failed allocating new MMIO range",
                                 )
-                                .ok_or_else(|| {
-                                    io::Error::new(
-                                        io::ErrorKind::Other,
-                                        "failed allocating new 64 bits MMIO range",
-                                    )
-                                })?;
+                            })?;
 
-                            break;
-                        }
+                        break;
                     }
                 }
 
@@ -931,11 +920,17 @@ pub struct DeviceManager {
     // GPIO device for AArch64
     gpio_device: Option<Arc<Mutex<devices::legacy::Gpio>>>,
 
+    // pvpanic device
+    pvpanic_device: Option<Arc<Mutex<devices::PvPanicDevice>>>,
+
     // Flag to force setting the iommu on virtio devices
     force_iommu: bool,
 
     // io_uring availability if detected
     io_uring_supported: Option<bool>,
+
+    // aio availability if detected
+    aio_supported: Option<bool>,
 
     // List of unique identifiers provided at boot through the configuration.
     boot_id_list: BTreeSet<String>,
@@ -974,6 +969,7 @@ impl DeviceManager {
         dynamic: bool,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         trace_scoped!("DeviceManager::new");
+
         let (device_tree, device_id_cnt) = if let Some(snapshot) = snapshot.as_ref() {
             let state: DeviceManagerState = snapshot.to_state().unwrap();
             (
@@ -991,32 +987,40 @@ impl DeviceManager {
                 1
             };
 
-        // HACK: Allocate address space after 1 TB for PCI segments.
-        // The idea is here is to make sure that bar address space do not collide
-        // with guest address. Most likely we are not going to launch guest with
-        // 1 TB memory and if in future if we decide to do then we need to revisit
-        // this hack. Or remove this hack once we have a way to dynamically
-        // inject ACPI tables. Currently we are assuming that each segments gets 4G
-        // and we are supporting 10 segs only so we are saying that end of the device
-        // area is 40G.
-        let start_of_device_area = 0x10000000000;
-        let end_of_device_area = 0x10000000000 + (num_pci_segments as u64 * (4 << 30)) - 1;
+        let create_mmio_allocators = |start, end, num_pci_segments, alignment| {
+            // Start each PCI segment mmio range on an aligned boundary
+            let pci_segment_mmio_size =
+                (end - start + 1) / (alignment * num_pci_segments as u64) * alignment;
 
-        assert!(num_pci_segments <= 10);
+            let mut mmio_allocators = vec![];
+            for i in 0..num_pci_segments as u64 {
+                let mmio_start = start + i * pci_segment_mmio_size;
+                let allocator = Arc::new(Mutex::new(
+                    AddressAllocator::new(GuestAddress(mmio_start), pci_segment_mmio_size).unwrap(),
+                ));
+                mmio_allocators.push(allocator)
+            }
 
-        // Start each PCI segment range on a 4GiB boundary
-        let pci_segment_size = (end_of_device_area - start_of_device_area + 1)
-            / ((4 << 30) * num_pci_segments as u64)
-            * (4 << 30);
+            mmio_allocators
+        };
 
-        let mut pci_mmio_allocators = vec![];
-        for i in 0..num_pci_segments as u64 {
-            let mmio_start = start_of_device_area + i * pci_segment_size;
-            let allocator = Arc::new(Mutex::new(
-                AddressAllocator::new(GuestAddress(mmio_start), pci_segment_size).unwrap(),
-            ));
-            pci_mmio_allocators.push(allocator)
-        }
+        let start_of_mmio32_area = layout::MEM_32BIT_DEVICES_START.0;
+        let end_of_mmio32_area = layout::MEM_32BIT_DEVICES_START.0 + layout::MEM_32BIT_DEVICES_SIZE;
+        let pci_mmio32_allocators = create_mmio_allocators(
+            start_of_mmio32_area,
+            end_of_mmio32_area,
+            num_pci_segments,
+            4 << 10,
+        );
+
+        let start_of_mmio64_area = memory_manager.lock().unwrap().start_of_device_area().0;
+        let end_of_mmio64_area = memory_manager.lock().unwrap().end_of_device_area().0;
+        let pci_mmio64_allocators = create_mmio_allocators(
+            start_of_mmio64_area,
+            end_of_mmio64_area,
+            num_pci_segments,
+            4 << 30,
+        );
 
         let address_manager = Arc::new(AddressManager {
             allocator: memory_manager.lock().unwrap().allocator(),
@@ -1025,7 +1029,8 @@ impl DeviceManager {
             mmio_bus,
             vm: vm.clone(),
             device_tree: Arc::clone(&device_tree),
-            pci_mmio_allocators,
+            pci_mmio32_allocators,
+            pci_mmio64_allocators,
         });
 
         // First we create the MSI interrupt manager, the legacy one is created
@@ -1055,15 +1060,18 @@ impl DeviceManager {
 
         let mut pci_segments = vec![PciSegment::new_default_segment(
             &address_manager,
-            Arc::clone(&address_manager.pci_mmio_allocators[0]),
+            Arc::clone(&address_manager.pci_mmio32_allocators[0]),
+            Arc::clone(&address_manager.pci_mmio64_allocators[0]),
             &pci_irq_slots,
         )?];
 
         for i in 1..num_pci_segments as usize {
             pci_segments.push(PciSegment::new(
                 i as u16,
+                numa_node_id_from_pci_segment_id(&numa_nodes, i as u16),
                 &address_manager,
-                Arc::clone(&address_manager.pci_mmio_allocators[i]),
+                Arc::clone(&address_manager.pci_mmio32_allocators[i]),
+                Arc::clone(&address_manager.pci_mmio64_allocators[i]),
                 &pci_irq_slots,
             )?);
         }
@@ -1131,8 +1139,10 @@ impl DeviceManager {
             virtio_mem_devices: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             gpio_device: None,
+            pvpanic_device: None,
             force_iommu,
             io_uring_supported: None,
+            aio_supported: None,
             boot_id_list,
             timestamp,
             pending_activations: Arc::new(Mutex::new(Vec::default())),
@@ -1253,6 +1263,10 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
 
         self.virtio_devices = virtio_devices;
+
+        if self.config.clone().lock().unwrap().pvpanic {
+            self.pvpanic_device = self.add_pvpanic_device()?;
+        }
 
         Ok(())
     }
@@ -1480,8 +1494,16 @@ impl DeviceManager {
         reset_evt: EventFd,
         exit_evt: EventFd,
     ) -> DeviceManagerResult<Option<Arc<Mutex<devices::AcpiGedDevice>>>> {
+        let vcpus_kill_signalled = self
+            .cpu_manager
+            .lock()
+            .unwrap()
+            .vcpus_kill_signalled()
+            .clone();
         let shutdown_device = Arc::new(Mutex::new(devices::AcpiShutdownDevice::new(
-            exit_evt, reset_evt,
+            exit_evt,
+            reset_evt,
+            vcpus_kill_signalled,
         )));
 
         self.bus_devices
@@ -1580,9 +1602,16 @@ impl DeviceManager {
 
     #[cfg(target_arch = "x86_64")]
     fn add_legacy_devices(&mut self, reset_evt: EventFd) -> DeviceManagerResult<()> {
+        let vcpus_kill_signalled = self
+            .cpu_manager
+            .lock()
+            .unwrap()
+            .vcpus_kill_signalled()
+            .clone();
         // Add a shutdown device (i8042)
         let i8042 = Arc::new(Mutex::new(devices::legacy::I8042Device::new(
             reset_evt.try_clone().unwrap(),
+            vcpus_kill_signalled.clone(),
         )));
 
         self.bus_devices
@@ -1610,6 +1639,7 @@ impl DeviceManager {
                 mem_below_4g,
                 mem_above_4g,
                 reset_evt,
+                Some(vcpus_kill_signalled),
             )));
 
             self.bus_devices
@@ -1884,7 +1914,7 @@ impl DeviceManager {
         Ok(())
     }
 
-    fn set_raw_mode(&mut self, f: &mut dyn AsRawFd) -> vmm_sys_util::errno::Result<()> {
+    fn set_raw_mode(&mut self, f: &dyn AsRawFd) -> vmm_sys_util::errno::Result<()> {
         // SAFETY: FFI call. Variable t is guaranteed to be a valid termios from modify_mode.
         self.modify_mode(f.as_raw_fd(), |t| unsafe { cfmakeraw(t) })
     }
@@ -1924,9 +1954,9 @@ impl DeviceManager {
                     self.console_resize_pipe = resize_pipe.map(Arc::new);
                     Endpoint::PtyPair(file.try_clone().unwrap(), file)
                 } else {
-                    let (main, mut sub, path) =
+                    let (main, sub, path) =
                         create_pty().map_err(DeviceManagerError::ConsolePtyOpen)?;
-                    self.set_raw_mode(&mut sub)
+                    self.set_raw_mode(&sub)
                         .map_err(DeviceManagerError::SetPtyRaw)?;
                     self.config.lock().unwrap().console.file = Some(path.clone());
                     let file = main.try_clone().unwrap();
@@ -1946,10 +1976,10 @@ impl DeviceManager {
                     return vmm_sys_util::errno::errno_result().map_err(DeviceManagerError::DupFd);
                 }
                 // SAFETY: stdout is valid and owned solely by us.
-                let mut stdout = unsafe { File::from_raw_fd(stdout) };
+                let stdout = unsafe { File::from_raw_fd(stdout) };
 
                 // Make sure stdout is in raw mode, if it's a terminal.
-                let _ = self.set_raw_mode(&mut stdout);
+                let _ = self.set_raw_mode(&stdout);
 
                 // SAFETY: FFI call. Trivially safe.
                 if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
@@ -1974,6 +2004,9 @@ impl DeviceManager {
                     Endpoint::File(stdout)
                 }
             }
+            ConsoleOutputMode::Socket => {
+                return Err(DeviceManagerError::NoSocketOptionSupportForConsoleDevice);
+            }
             ConsoleOutputMode::Null => Endpoint::Null,
             ConsoleOutputMode::Off => return Ok(None),
         };
@@ -1992,8 +2025,6 @@ impl DeviceManager {
                 .map_err(DeviceManagerError::EventFd)?,
             versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
                 .map_err(DeviceManagerError::RestoreGetState)?,
-            #[cfg(feature = "snp")]
-            self.address_manager.vm.clone(),
         )
         .map_err(DeviceManagerError::CreateVirtioConsole)?;
         let virtio_console_device = Arc::new(Mutex::new(virtio_console_device));
@@ -2188,8 +2219,6 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 ) {
                     Ok(vub_device) => vub_device,
                     Err(e) => {
@@ -2289,8 +2318,6 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioBlock)?,
             ));
@@ -2377,8 +2404,6 @@ impl DeviceManager {
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 ) {
                     Ok(vun_device) => vun_device,
                     Err(e) => {
@@ -2419,8 +2444,6 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
-                        #[cfg(feature = "snp")]
-                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2441,8 +2464,6 @@ impl DeviceManager {
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioNet)?;
 
@@ -2474,8 +2495,6 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
-                        #[cfg(feature = "snp")]
-                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2538,8 +2557,6 @@ impl DeviceManager {
                         .map_err(DeviceManagerError::EventFd)?,
                     versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
                         .map_err(DeviceManagerError::RestoreGetState)?,
-                    #[cfg(feature = "snp")]
-                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioRng)?,
             ));
@@ -2852,8 +2869,6 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::EventFd)?,
                 versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
                     .map_err(DeviceManagerError::RestoreGetState)?,
-                #[cfg(feature = "snp")]
-                self.address_manager.vm.clone(),
             )
             .map_err(DeviceManagerError::CreateVirtioVsock)?,
         ));
@@ -3334,10 +3349,6 @@ impl DeviceManager {
 
         self.bus_devices.push(Arc::clone(&bus_device));
 
-        for b in bars.iter() {
-            info!("{:x?} {:x?}", b.addr(), b.size());
-        }
-
         pci_bus
             .register_mapping(
                 bus_device,
@@ -3604,8 +3615,6 @@ impl DeviceManager {
                 dma_handler,
                 self.pending_activations.clone(),
                 vm_migration::snapshot_from_id(self.snapshot.as_ref(), id.as_str()),
-                #[cfg(all(feature = "mshv", feature = "snp"))]
-                self.address_manager.vm.clone(),
             )
             .map_err(DeviceManagerError::VirtioDevice)?,
         ));

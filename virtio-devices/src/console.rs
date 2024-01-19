@@ -28,7 +28,7 @@ use thiserror::Error;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::{Queue, QueueT};
-use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{ByteValued, Bytes, GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
@@ -59,6 +59,8 @@ enum Error {
     GuestMemoryRead(vm_memory::guest_memory::Error),
     #[error("Failed to write to guest memory: {0}")]
     GuestMemoryWrite(vm_memory::guest_memory::Error),
+    #[error("Failed to write_all output: {0}")]
+    OutputWriteAll(io::Error),
     #[error("Failed to flush output: {0}")]
     OutputFlush(io::Error),
     #[error("Failed to add used index: {0}")]
@@ -106,8 +108,6 @@ struct ConsoleEpollHandler {
     out: Option<Box<dyn Write + Send>>,
     write_out: Option<Arc<AtomicBool>>,
     file_event_registered: bool,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 pub enum Endpoint {
@@ -173,7 +173,6 @@ impl ConsoleEpollHandler {
         kill_evt: EventFd,
         pause_evt: EventFd,
         access_platform: Option<Arc<dyn AccessPlatform>>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Self {
         let out_file = endpoint.out_file();
         let (out, write_out) = if let Some(out_file) = out_file {
@@ -208,8 +207,6 @@ impl ConsoleEpollHandler {
             out,
             write_out,
             file_event_registered: false,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
-            vm,
         }
     }
 
@@ -232,16 +229,13 @@ impl ConsoleEpollHandler {
             let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
             let len = cmp::min(desc.len(), in_buffer.len() as u32);
             let source_slice = in_buffer.drain(..len as usize).collect::<Vec<u8>>();
+
             desc_chain
                 .memory()
                 .write_slice(
                     &source_slice[..],
-                    desc.addr().translate_gva_with_vmfd(
-                        self.access_platform.as_ref(),
-                        desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
-                        Some(&self.vm.clone()),
-                    ),
+                    desc.addr()
+                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
                 )
                 .map_err(Error::GuestMemoryWrite)?;
 
@@ -272,19 +266,18 @@ impl ConsoleEpollHandler {
         while let Some(mut desc_chain) = trans_queue.pop_descriptor_chain(self.mem.memory()) {
             let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
             if let Some(out) = &mut self.out {
+                let mut buf: Vec<u8> = Vec::new();
                 desc_chain
                     .memory()
-                    .write_to(
-                        desc.addr().translate_gva_with_vmfd(
-                            self.access_platform.as_ref(),
-                            desc.len() as usize,
-                            #[cfg(all(feature = "mshv", feature = "snp"))]
-                            Some(&self.vm.clone()),
-                        ),
-                        out,
+                    .write_volatile_to(
+                        desc.addr()
+                            .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                        &mut buf,
                         desc.len() as usize,
                     )
                     .map_err(Error::GuestMemoryRead)?;
+
+                out.write_all(&buf).map_err(Error::OutputWriteAll)?;
                 out.flush().map_err(Error::OutputFlush)?;
             }
             trans_queue
@@ -598,8 +591,6 @@ pub struct Console {
     seccomp_action: SeccompAction,
     in_buffer: Arc<Mutex<VecDeque<u8>>>,
     exit_evt: EventFd,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -632,7 +623,6 @@ fn get_win_size(tty: &dyn AsRawFd) -> (u16, u16) {
 impl VersionMapped for ConsoleState {}
 
 impl Console {
-    #[allow(clippy::too_many_arguments)]
     /// Create a new virtio console device
     pub fn new(
         id: String,
@@ -642,7 +632,6 @@ impl Console {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<ConsoleState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<(Console, Arc<ConsoleResizer>)> {
         let (avail_features, acked_features, config, in_buffer, paused) = if let Some(state) = state
         {
@@ -656,8 +645,6 @@ impl Console {
             )
         } else {
             let mut avail_features = 1u64 << VIRTIO_F_VERSION_1 | 1u64 << VIRTIO_CONSOLE_F_SIZE;
-
-            //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
@@ -681,6 +668,7 @@ impl Console {
         });
 
         resizer.update_console_size();
+
         Ok((
             Console {
                 common: VirtioCommon {
@@ -701,8 +689,6 @@ impl Console {
                 seccomp_action,
                 in_buffer: Arc::new(Mutex::new(in_buffer)),
                 exit_evt,
-                #[cfg(all(feature = "mshv", feature = "snp"))]
-                vm,
             },
             resizer,
         ))
@@ -791,8 +777,6 @@ impl VirtioDevice for Console {
             kill_evt,
             pause_evt,
             self.common.access_platform.clone(),
-            #[cfg(all(feature = "mshv", feature = "snp"))]
-            self.vm.clone(),
         );
 
         let paused = self.common.paused.clone();

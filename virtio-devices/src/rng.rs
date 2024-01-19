@@ -24,7 +24,7 @@ use thiserror::Error;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_queue::{Queue, QueueT};
-use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic};
+use vm_memory::{GuestAddressSpace, GuestMemory, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vm_virtio::{AccessPlatform, Translatable};
@@ -57,8 +57,6 @@ struct RngEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     access_platform: Option<Arc<dyn AccessPlatform>>,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl RngEpollHandler {
@@ -77,13 +75,9 @@ impl RngEpollHandler {
             // Fill the read with data from the random device on the host.
             let len = desc_chain
                 .memory()
-                .read_from(
-                    desc.addr().translate_gva_with_vmfd(
-                        self.access_platform.as_ref(),
-                        desc.len() as usize,
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
-                        Some(&self.vm.clone()),
-                    ),
+                .read_volatile_from(
+                    desc.addr()
+                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
                     &mut self.random_file,
                     desc.len() as usize,
                 )
@@ -162,8 +156,6 @@ pub struct Rng {
     random_file: Option<File>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
-    #[cfg(all(feature = "mshv", feature = "snp"))]
-    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -183,7 +175,6 @@ impl Rng {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<RngState>,
-        #[cfg(all(feature = "mshv", feature = "snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Rng> {
         let random_file = File::open(path)?;
 
@@ -197,7 +188,6 @@ impl Rng {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             }
 
-            //avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
             (avail_features, 0, false)
         };
 
@@ -216,8 +206,6 @@ impl Rng {
             random_file: Some(random_file),
             seccomp_action,
             exit_evt,
-            #[cfg(all(feature = "mshv", feature = "snp"))]
-            vm,
         })
     }
 
@@ -287,8 +275,6 @@ impl VirtioDevice for Rng {
                 kill_evt,
                 pause_evt,
                 access_platform: self.common.access_platform.clone(),
-                #[cfg(all(feature = "mshv", feature = "snp"))]
-                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();

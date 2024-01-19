@@ -7,14 +7,15 @@
 CLI_NAME="Cloud Hypervisor"
 
 CTR_IMAGE_TAG="ghcr.io/cloud-hypervisor/cloud-hypervisor"
-CTR_IMAGE_VERSION="20230316-0"
-CTR_IMAGE="${CTR_IMAGE_TAG}:${CTR_IMAGE_VERSION}"
+CTR_IMAGE_VERSION="20231108-0"
+: "${CTR_IMAGE:=${CTR_IMAGE_TAG}:${CTR_IMAGE_VERSION}}"
 
 DOCKER_RUNTIME="docker"
 
 # Host paths
 CLH_SCRIPTS_DIR=$(cd "$(dirname "$0")" && pwd)
 CLH_ROOT_DIR=$(cd "${CLH_SCRIPTS_DIR}/.." && pwd)
+IGVM_PARSER_ROOT_DIR=$(cd "${CLH_ROOT_DIR}/../igvm-parser" && pwd)
 CLH_BUILD_DIR="${CLH_ROOT_DIR}/build"
 CLH_CARGO_TARGET="${CLH_BUILD_DIR}/cargo_target"
 CLH_DOCKERFILE="${CLH_SCRIPTS_DIR}/../resources/Dockerfile"
@@ -30,6 +31,7 @@ VMLINUX_PATH="${VMLINUX_PATH:-${USE_MS_GUEST_KERNEL:+${MS_CLH_FILES_PATH}/vmlinu
 
 # Container paths
 CTR_CLH_ROOT_DIR="/cloud-hypervisor"
+CTR_IGVM_PARSER_ROOT_DIR="/igvm-parser"
 CTR_CLH_CARGO_BUILT_DIR="${CTR_CLH_ROOT_DIR}/build"
 CTR_CLH_CARGO_TARGET="${CTR_CLH_CARGO_BUILT_DIR}/cargo_target"
 CTR_CLH_INTEGRATION_WORKLOADS="/root/workloads"
@@ -152,6 +154,7 @@ fix_dir_perms() {
         --rm \
         --volume /dev:/dev \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+	    --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
         "$CTR_IMAGE" \
         chown -R "$(id -u):$(id -g)" "$CTR_CLH_ROOT_DIR"
 
@@ -304,10 +307,10 @@ cmd_build() {
     [ $build = "release" ] && cargo_args+=("--release")
     cargo_args+=(--target "$target")
 
-    rustflags=""
+    rustflags="$RUSTFLAGS"
     target_cc=""
     if [ "$(uname -m)" = "aarch64" ] && [ "$libc" = "musl" ]; then
-        rustflags="-C link-arg=-lgcc -C link_arg=-specs -C link_arg=/usr/lib/aarch64-linux-musl/musl-gcc.specs"
+        rustflags="$rustflags -C link-arg=-lgcc -C link_arg=-specs -C link_arg=/usr/lib/aarch64-linux-musl/musl-gcc.specs"
         target_cc="musl-gcc"
     fi
 
@@ -317,6 +320,7 @@ cmd_build() {
         --rm \
         --volume $exported_device \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+	    --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
         --env RUSTFLAGS="$rustflags" \
         --env TARGET_CC="$target_cc" \
         "$CTR_IMAGE" \
@@ -336,6 +340,7 @@ cmd_clean() {
         --workdir "$CTR_CLH_ROOT_DIR" \
         --rm \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+	    --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
         "$CTR_IMAGE" \
         cargo clean \
         --target-dir "$CTR_CLH_CARGO_TARGET" \
@@ -418,6 +423,13 @@ cmd_tests() {
     process_volumes_args
     target="$(uname -m)-unknown-linux-${libc}"
 
+    rustflags="$RUSTFLAGS"
+    target_cc=""
+    if [ "$(uname -m)" = "aarch64" ] && [ "$libc" = "musl" ]; then
+        rustflags="$rustflags -C link-arg=-lgcc -C link_arg=-specs -C link_arg=/usr/lib/aarch64-linux-musl/musl-gcc.specs"
+        target_cc="musl-gcc"
+    fi
+
     if [[ "$unit" = true ]]; then
         say "Running unit tests for $target..."
         $DOCKER_RUNTIME run \
@@ -427,7 +439,10 @@ cmd_tests() {
             --device /dev/net/tun \
             --cap-add net_admin \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
             "$CTR_IMAGE" \
             ./scripts/run_unit_tests.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -461,12 +476,15 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --volume "$DEST_IGVM_FILES_PATH:$CTR_IGVM_FILES_PATH" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
-            --env GUEST_VM_TYPE="${GUEST_VM_TYPE}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
-            ./scripts/run_integration_tests_"$(uname -m)".sh "$@" || fix_dir_perms $? || exit $?
+            dbus-run-session ./scripts/run_integration_tests_"$(uname -m)".sh "$@" || fix_dir_perms $? || exit $?
     fi
 
     if [ "$integration_sgx" = true ]; then
@@ -482,8 +500,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_integration_tests_sgx.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -501,8 +523,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_integration_tests_vfio.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -520,8 +546,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_integration_tests_windows_"$(uname -m)".sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -539,8 +569,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_integration_tests_live_migration.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -558,8 +592,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --env USER="root" \
-            --env CH_LIBC="${libc}" \
+            --env BUILD_TARGET="$target" \
+            --env RUSTFLAGS="$rustflags" \
+            --env TARGET_CC="$target_cc" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_integration_tests_rate_limiter.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -584,11 +622,12 @@ cmd_tests() {
             --volume /dev:/dev \
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	        --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
             --volume "$DEST_IGVM_FILES_PATH:$CTR_IGVM_FILES_PATH" \
             --env USER="root" \
             --env CH_LIBC="${libc}" \
             --env RUST_BACKTRACE="${RUST_BACKTRACE}" \
-            --env GUEST_VM_TYPE="${GUEST_VM_TYPE}" \
+            --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
             "$CTR_IMAGE" \
             ./scripts/run_metrics.sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -673,6 +712,7 @@ cmd_shell() {
         --volume /dev:/dev \
         --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" $exported_volumes \
         --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+	    --volume "$IGVM_PARSER_ROOT_DIR:$CTR_IGVM_PARSER_ROOT_DIR" \
         --env USER="root" \
         --entrypoint bash \
         "$CTR_IMAGE"

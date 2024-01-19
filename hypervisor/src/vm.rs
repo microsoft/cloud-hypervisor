@@ -19,7 +19,7 @@ use crate::cpu::Vcpu;
 use crate::ClockData;
 use crate::UserMemoryRegion;
 use crate::{IoEventAddress, IrqRoutingEntry};
-#[cfg(feature = "snp")]
+#[cfg(feature = "sev_snp")]
 use igvm_defs::IGVM_VHS_SNP_ID_BLOCK;
 use std::any::Any;
 #[cfg(target_arch = "x86_64")]
@@ -192,6 +192,13 @@ pub enum HypervisorVmError {
     #[error("Failed to assert virtual Interrupt: {0}")]
     AsserttVirtualInterrupt(#[source] anyhow::Error),
 
+    #[cfg(feature = "sev_snp")]
+    ///
+    /// Error initializing SEV-SNP on the VM
+    ///
+    #[error("Failed to initialize SEV-SNP: {0}")]
+    InitializeSevSnp(#[source] std::io::Error),
+
     #[cfg(feature = "tdx")]
     ///
     /// Error initializing TDX on the VM
@@ -216,30 +223,14 @@ pub enum HypervisorVmError {
     #[error("Failed to create Vgic: {0}")]
     CreateVgic(#[source] anyhow::Error),
     ///
-    /// Initialize SNP error
-    ///
-    #[error("Failed to initialize SNP: {0}")]
-    SnpInit(#[source] anyhow::Error),
-    ///
     /// Import isolated pages error
     ///
     #[error("Failed to import isolated pages: {0}")]
     ImportIsolatedPages(#[source] anyhow::Error),
-    ///
-    /// Modify GPA host access error
-    ///
-    #[error("Failed to modify GPA host access: {0}")]
-    ModifyGpaHostAccess(#[source] anyhow::Error),
-    ///
     /// Failed to complete isolated import
     ///
     #[error("Failed to complete isolated import: {0}")]
     CompleteIsolatedImport(#[source] anyhow::Error),
-    ///
-    /// PSP issue guest request error
-    ///
-    #[error("Failed to issue PSP guest request: {0}")]
-    PspIssueGuestRequest(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -351,8 +342,13 @@ pub trait Vm: Send + Sync + Any {
     fn stop_dirty_log(&self) -> Result<()>;
     /// Get dirty pages bitmap
     fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
+    #[cfg(feature = "sev_snp")]
+    /// Initialize SEV-SNP on this VM
+    fn sev_snp_init(&self) -> Result<()> {
+        unimplemented!()
+    }
     #[cfg(feature = "tdx")]
-    /// Initalize TDX on this VM
+    /// Initialize TDX on this VM
     fn tdx_init(&self, _cpuid: &[CpuIdEntry], _max_vcpus: u32) -> Result<()> {
         unimplemented!()
     }
@@ -362,7 +358,7 @@ pub trait Vm: Send + Sync + Any {
         unimplemented!()
     }
     #[cfg(feature = "tdx")]
-    /// Initalize a TDX memory region for this VM
+    /// Initialize a TDX memory region for this VM
     fn tdx_init_memory_region(
         &self,
         _host_address: u64,
@@ -374,13 +370,8 @@ pub trait Vm: Send + Sync + Any {
     }
     /// Downcast to the underlying hypervisor VM type
     fn as_any(&self) -> &dyn Any;
-
-    #[cfg(feature = "snp")]
-    /// Initialize SNP on this VM
-    fn snp_init(&self) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "snp")]
+    /// Import the isolated pages
+    #[cfg(feature = "sev_snp")]
     fn import_isolated_pages(
         &self,
         _page_type: u32,
@@ -389,36 +380,14 @@ pub trait Vm: Send + Sync + Any {
     ) -> Result<()> {
         unimplemented!()
     }
-    #[cfg(feature = "snp")]
-    fn modify_gpa_host_access(
-        &self,
-        _host_access: u32,
-        _flags: u32,
-        _acquire: u8,
-        _gpas: &[u64],
-    ) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "snp")]
-    fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "snp")]
-    fn psp_issue_guest_request(&self, _req_gpa: u64, _rsp_gpa: u64) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "snp")]
+    /// Complete the isolated import
+    #[cfg(feature = "sev_snp")]
     fn complete_isolated_import(
         &self,
         _snp_id_block: IGVM_VHS_SNP_ID_BLOCK,
         _host_data: &[u8],
         _id_block_enabled: u8,
     ) -> Result<()> {
-        unimplemented!()
-    }
-    #[cfg(feature = "snp")]
-    /// Remove a gpa from ache of pages that host has access to
-    fn remove_gpa_from_host_acess_cache(&self, _gpa: u64) -> Result<()> {
         unimplemented!()
     }
 }

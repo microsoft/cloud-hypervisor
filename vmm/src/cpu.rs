@@ -56,6 +56,8 @@ use hypervisor::kvm::kvm_bindings;
 use hypervisor::kvm::kvm_ioctls::Cap;
 #[cfg(feature = "tdx")]
 use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
+#[cfg(target_arch = "x86_64")]
+use hypervisor::CpuVendor;
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
 #[cfg(feature = "igvm")]
 use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
@@ -82,8 +84,6 @@ use vm_memory::ByteValued;
 #[cfg(feature = "guest_debug")]
 use vm_memory::{Bytes, GuestAddressSpace};
 use vm_memory::{GuestAddress, GuestMemoryAtomic};
-#[cfg(feature = "snp")]
-use vm_memory::{GuestAddressSpace, GuestMemory};
 use vm_migration::{
     snapshot_from_id, Migratable, MigratableError, Pausable, Snapshot, SnapshotData, Snapshottable,
     Transportable,
@@ -91,7 +91,6 @@ use vm_migration::{
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::{register_signal_handler, SIGRTMIN};
 use zerocopy::AsBytes;
-
 #[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
 /// Extract the specified bits of a 64-bit integer.
 /// For example, to extrace 2 bits from offset 1 (zero based) of `6u64`,
@@ -101,6 +100,13 @@ use zerocopy::AsBytes;
 macro_rules! extract_bits_64 {
     ($value: tt, $offset: tt, $length: tt) => {
         ($value >> $offset) & (!0u64 >> (64 - $length))
+    };
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "guest_debug"))]
+macro_rules! extract_bits_64_without_offset {
+    ($value: tt, $length: tt) => {
+        $value & (!0u64 >> (64 - $length))
     };
 }
 
@@ -122,6 +128,9 @@ pub enum Error {
 
     #[error("Error configuring vCPU: {0}")]
     VcpuConfiguration(#[source] arch::Error),
+
+    #[error("Still pending removed vcpu")]
+    VcpuPendingRemovedVcpu,
 
     #[cfg(target_arch = "aarch64")]
     #[error("Error fetching preferred target: {0}")]
@@ -159,7 +168,7 @@ pub enum Error {
     #[error("Error initializing TDX: {0}")]
     InitializeTdx(#[source] hypervisor::HypervisorCpuError),
 
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     #[error("Error initializing SNP: {0}")]
     InitializeSnp(#[source] hypervisor::HypervisorVmError),
 
@@ -188,12 +197,13 @@ pub type Result<T> = result::Result<T, Error>;
 #[allow(dead_code)]
 #[repr(packed)]
 #[derive(AsBytes)]
-struct LocalApic {
+struct LocalX2Apic {
     pub r#type: u8,
     pub length: u8,
-    pub processor_id: u8,
-    pub apic_id: u8,
+    pub _reserved: u16,
+    pub apic_id: u32,
     pub flags: u32,
+    pub processor_id: u32,
 }
 
 #[allow(dead_code)]
@@ -314,6 +324,8 @@ pub struct Vcpu {
     #[cfg(target_arch = "aarch64")]
     mpidr: u64,
     saved_state: Option<CpuState>,
+    #[cfg(target_arch = "x86_64")]
+    vendor: CpuVendor,
 }
 
 impl Vcpu {
@@ -324,10 +336,12 @@ impl Vcpu {
     /// * `id` - Represents the CPU number between [0, max vcpus).
     /// * `vm` - The virtual machine this vcpu will get attached to.
     /// * `vm_ops` - Optional object for exit handling.
+    /// * `cpu_vendor` - CPU vendor as reported by __cpuid(0x0)
     pub fn new(
         id: u8,
         vm: &Arc<dyn hypervisor::Vm>,
         vm_ops: Option<Arc<dyn VmOps>>,
+        #[cfg(target_arch = "x86_64")] cpu_vendor: CpuVendor,
     ) -> Result<Self> {
         let vcpu = vm
             .create_vcpu(id, vm_ops)
@@ -339,6 +353,8 @@ impl Vcpu {
             #[cfg(target_arch = "aarch64")]
             mpidr: 0,
             saved_state: None,
+            #[cfg(target_arch = "x86_64")]
+            vendor: cpu_vendor,
         })
     }
 
@@ -355,7 +371,7 @@ impl Vcpu {
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
         #[cfg(target_arch = "x86_64")] cpuid: Vec<CpuIdEntry>,
         #[cfg(target_arch = "x86_64")] kvm_hyperv: bool,
-        #[cfg(feature = "igvm")] vmsa: Option<SevVmsa>,
+        #[cfg(target_arch = "x86_64")] topology: Option<(u8, u8, u8)>,
     ) -> Result<()> {
         #[cfg(target_arch = "aarch64")]
         {
@@ -371,8 +387,8 @@ impl Vcpu {
             boot_setup,
             cpuid,
             kvm_hyperv,
-            #[cfg(feature = "igvm")]
-            vmsa,
+            self.vendor,
+            topology,
         )
         .map_err(Error::VcpuConfiguration)?;
 
@@ -420,17 +436,8 @@ impl Vcpu {
     ///
     /// Note that the state of the VCPU and associated VM must be setup first for this to do
     /// anything useful.
-    pub fn run(
-        &self,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> std::result::Result<VmExit, HypervisorCpuError> {
-        self.vcpu.run(guest_memory)
-    }
-
-    #[cfg(feature = "snp")]
-    pub fn set_sev_control_register(&self, vmsa_pfn: u64) -> Result<()> {
-        self.vcpu.set_sev_control_register(vmsa_pfn).unwrap();
-        Ok(())
+    pub fn run(&self) -> std::result::Result<VmExit, HypervisorCpuError> {
+        self.vcpu.run()
     }
 }
 
@@ -444,7 +451,7 @@ impl Snapshottable for Vcpu {
         let saved_state = self
             .vcpu
             .state()
-            .map_err(|e| MigratableError::Pause(anyhow!("Could not get vCPU state {:?}", e)))?;
+            .map_err(|e| MigratableError::Snapshot(anyhow!("Could not get vCPU state {:?}", e)))?;
 
         self.saved_state = Some(saved_state.clone());
 
@@ -480,6 +487,7 @@ pub struct CpuManager {
     proximity_domain_per_cpu: BTreeMap<u8, u32>,
     affinity: BTreeMap<u8, Vec<u8>>,
     dynamic: bool,
+    hypervisor: Arc<dyn hypervisor::Hypervisor>,
     snp_enabled: bool,
 }
 
@@ -570,9 +578,11 @@ impl BusDevice for CpuManager {
 struct VcpuState {
     inserting: bool,
     removing: bool,
+    pending_removal: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
     kill: Arc<AtomicBool>,
     vcpu_run_interrupted: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 }
 
 impl VcpuState {
@@ -636,6 +646,8 @@ impl CpuManager {
         let mut vcpu_states = Vec::with_capacity(usize::from(config.max_vcpus));
         vcpu_states.resize_with(usize::from(config.max_vcpus), VcpuState::default);
         let hypervisor_type = hypervisor.hypervisor_type();
+        #[cfg(target_arch = "x86_64")]
+        let cpu_vendor = hypervisor.get_cpu_vendor();
 
         #[cfg(target_arch = "x86_64")]
         if config.features.amx {
@@ -644,7 +656,7 @@ impl CpuManager {
             const XFEATURE_XTILEDATA: usize = 18;
             const XFEATURE_XTILEDATA_MASK: usize = 1 << XFEATURE_XTILEDATA;
 
-            // SAFETY: the syscall is only modifing kernel internal
+            // SAFETY: the syscall is only modifying kernel internal
             // data structures that the kernel is itself expected to safeguard.
             let amx_tile = unsafe {
                 libc::syscall(
@@ -717,6 +729,7 @@ impl CpuManager {
             proximity_domain_per_cpu,
             affinity,
             dynamic,
+            hypervisor: hypervisor.clone(),
             snp_enabled,
         })))
     }
@@ -726,7 +739,7 @@ impl CpuManager {
         &mut self,
         memory_manager: &Arc<Mutex<MemoryManager>>,
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
-        #[cfg(feature = "tdx")] tdx_enabled: bool,
+        #[cfg(feature = "tdx")] tdx: bool,
     ) -> Result<()> {
         let sgx_epc_sections = memory_manager
             .lock()
@@ -735,27 +748,18 @@ impl CpuManager {
             .as_ref()
             .map(|sgx_epc_region| sgx_epc_region.epc_sections().values().cloned().collect());
 
-        let topology = self.config.topology.clone().map_or_else(
-            || {
-                #[cfg(feature = "mshv")]
-                if matches!(hypervisor.hypervisor_type(), HypervisorType::Mshv) {
-                    return Some((1, self.boot_vcpus(), 1));
-                }
-                None
-            },
-            |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
-        );
-
         self.cpuid = {
-            let phys_bits = physical_bits(self.config.max_phys_bits);
+            let phys_bits = physical_bits(hypervisor, self.config.max_phys_bits);
             arch::generate_common_cpuid(
                 hypervisor,
-                topology,
-                sgx_epc_sections,
-                phys_bits,
-                self.config.kvm_hyperv,
-                #[cfg(feature = "tdx")]
-                tdx_enabled,
+                &arch::CpuidConfig {
+                    sgx_epc_sections,
+                    phys_bits,
+                    kvm_hyperv: self.config.kvm_hyperv,
+                    #[cfg(feature = "tdx")]
+                    tdx,
+                    amx: self.config.features.amx,
+                },
             )
             .map_err(Error::CommonCpuId)?
         };
@@ -766,7 +770,13 @@ impl CpuManager {
     fn create_vcpu(&mut self, cpu_id: u8, snapshot: Option<Snapshot>) -> Result<Arc<Mutex<Vcpu>>> {
         info!("Creating vCPU: cpu_id = {}", cpu_id);
 
-        let mut vcpu = Vcpu::new(cpu_id, &self.vm, Some(self.vm_ops.clone()))?;
+        let mut vcpu = Vcpu::new(
+            cpu_id,
+            &self.vm,
+            Some(self.vm_ops.clone()),
+            #[cfg(target_arch = "x86_64")]
+            self.hypervisor.get_cpu_vendor(),
+        )?;
 
         if let Some(snapshot) = snapshot {
             // AArch64 vCPUs should be initialized after created.
@@ -795,28 +805,31 @@ impl CpuManager {
         &self,
         vcpu: Arc<Mutex<Vcpu>>,
         boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
-        #[cfg(feature = "igvm")] vmsa: Option<SevVmsa>,
-        #[cfg(feature = "snp")] vmsa_pfn: u64,
     ) -> Result<()> {
         let mut vcpu = vcpu.lock().unwrap();
 
-        #[cfg(feature = "snp")]
-        if self.snp_enabled {
-            vcpu.set_sev_control_register(vmsa_pfn)?;
-        }
+        #[cfg(target_arch = "x86_64")]
+        assert!(!self.cpuid.is_empty());
 
         #[cfg(target_arch = "x86_64")]
-        if !self.snp_enabled {
-            assert!(!self.cpuid.is_empty());
+        let topology = self.config.topology.clone().map_or_else(
+            || {
+                #[cfg(feature = "mshv")]
+                if matches!(self.hypervisor.hypervisor_type(), HypervisorType::Mshv) {
+                    return Some((1, self.boot_vcpus(), 1));
+                }
+                None
+            },
+            |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
+        );
+        #[cfg(target_arch = "x86_64")]
+        vcpu.configure(
+            boot_setup,
+            self.cpuid.clone(),
+            self.config.kvm_hyperv,
+            topology,
+        )?;
 
-            vcpu.configure(
-                boot_setup,
-                self.cpuid.clone(),
-                self.config.kvm_hyperv,
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )?;
-        }
         #[cfg(target_arch = "aarch64")]
         vcpu.configure(&self.vm, boot_setup)?;
 
@@ -884,24 +897,23 @@ impl CpuManager {
         vcpu_id: u8,
         vcpu_thread_barrier: Arc<Barrier>,
         inserting: bool,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         let reset_evt = self.reset_evt.try_clone().unwrap();
         let exit_evt = self.exit_evt.try_clone().unwrap();
         #[cfg(feature = "kvm")]
-        let hypervisor_type = self.hypervisor_type;
+        let hypervisor_type = self.hypervisor.hypervisor_type();
         #[cfg(feature = "guest_debug")]
         let vm_debug_evt = self.vm_debug_evt.try_clone().unwrap();
         let panic_exit_evt = self.exit_evt.try_clone().unwrap();
         let vcpu_kill_signalled = self.vcpus_kill_signalled.clone();
         let vcpu_pause_signalled = self.vcpus_pause_signalled.clone();
-        let gm = guest_memory.clone();
 
         let vcpu_kill = self.vcpu_states[usize::from(vcpu_id)].kill.clone();
         let vcpu_run_interrupted = self.vcpu_states[usize::from(vcpu_id)]
             .vcpu_run_interrupted
             .clone();
         let panic_vcpu_run_interrupted = vcpu_run_interrupted.clone();
+        let vcpu_paused = self.vcpu_states[usize::from(vcpu_id)].paused.clone();
 
         // Prepare the CPU set the current vCPU is expected to run onto.
         let cpuset = self.affinity.get(&vcpu_id).map(|host_cpus| {
@@ -917,9 +929,12 @@ impl CpuManager {
         });
 
         // Retrieve seccomp filter for vcpu thread
-        let vcpu_seccomp_filter =
-            get_seccomp_filter(&self.seccomp_action, Thread::Vcpu, self.hypervisor_type)
-                .map_err(Error::CreateSeccompFilter)?;
+        let vcpu_seccomp_filter = get_seccomp_filter(
+            &self.seccomp_action,
+            Thread::Vcpu,
+            self.hypervisor.hypervisor_type(),
+        )
+        .map_err(Error::CreateSeccompFilter)?;
 
         #[cfg(target_arch = "x86_64")]
         let interrupt_controller_clone = self.interrupt_controller.as_ref().cloned();
@@ -1000,7 +1015,7 @@ impl CpuManager {
                                 #[cfg(feature = "kvm")]
                                 if matches!(hypervisor_type, HypervisorType::Kvm) {
                                     vcpu.lock().as_ref().unwrap().vcpu.set_immediate_exit(true);
-                                    if !matches!(vcpu.lock().unwrap().run(&gm), Ok(VmExit::Ignore)) {
+                                    if !matches!(vcpu.lock().unwrap().run(), Ok(VmExit::Ignore)) {
                                         error!("Unexpected VM exit on \"immediate_exit\" run");
                                         break;
                                     }
@@ -1008,6 +1023,8 @@ impl CpuManager {
                                 }
 
                                 vcpu_run_interrupted.store(true, Ordering::SeqCst);
+
+                                vcpu_paused.store(true, Ordering::SeqCst);
                                 while vcpu_pause_signalled.load(Ordering::SeqCst) {
                                     thread::park();
                                 }
@@ -1027,7 +1044,7 @@ impl CpuManager {
                             #[cfg(not(feature = "tdx"))]
                             let vcpu = vcpu.lock().unwrap();
                             // vcpu.run() returns false on a triple-fault so trigger a reset
-                            match vcpu.run(&gm) {
+                            match vcpu.run() {
                                 Ok(run) => match run {
                                     #[cfg(feature = "kvm")]
                                     VmExit::Debug => {
@@ -1084,17 +1101,6 @@ impl CpuManager {
                                             unreachable!("Couldn't get a mutable reference from Arc<dyn Vcpu> as there are multiple instances");
                                         }
                                     }
-                                    #[cfg(feature = "snp")]
-                                    VmExit::GpaModify(base_gpa, gpa_count) => {
-                                        info!("VmExit::GpaModify");
-                                        let mut gpa_list = Vec::new();
-                                        for i in 0..gpa_count {
-                                            let gpa = gm.clone().memory().get_host_address(GuestAddress(base_gpa + i * HV_PAGE_SIZE)).unwrap() as u64;
-                                            gpa_list.push(gpa);
-                                        }
-                                        //vm.modify_gpa_host_access(0, 0, false as u8, gpa_list.as_slice()).unwrap();
-                                        break;
-                                    }
                                     _ => {
                                         error!(
                                             "VCPU generated error: {:?}",
@@ -1147,7 +1153,6 @@ impl CpuManager {
         desired_vcpus: u8,
         inserting: bool,
         paused: Option<bool>,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> Result<()> {
         if desired_vcpus > self.config.max_vcpus {
             return Err(Error::DesiredVCpuCountExceedsMax);
@@ -1172,13 +1177,7 @@ impl CpuManager {
         // This reuses any inactive vCPUs as well as any that were newly created
         for vcpu_id in self.present_vcpus()..desired_vcpus {
             let vcpu = Arc::clone(&self.vcpus[vcpu_id as usize]);
-            self.start_vcpu(
-                vcpu,
-                vcpu_id,
-                vcpu_thread_barrier.clone(),
-                inserting,
-                guest_memory,
-            )?;
+            self.start_vcpu(vcpu, vcpu_id, vcpu_thread_barrier.clone(), inserting)?;
         }
 
         // Unblock all CPU threads.
@@ -1190,12 +1189,24 @@ impl CpuManager {
         // Mark vCPUs for removal, actual removal happens on ejection
         for cpu_id in desired_vcpus..self.present_vcpus() {
             self.vcpu_states[usize::from(cpu_id)].removing = true;
+            self.vcpu_states[usize::from(cpu_id)]
+                .pending_removal
+                .store(true, Ordering::SeqCst);
         }
+    }
+
+    pub fn check_pending_removed_vcpu(&mut self) -> bool {
+        for state in self.vcpu_states.iter() {
+            if state.active() && state.pending_removal.load(Ordering::SeqCst) {
+                return true;
+            }
+        }
+        false
     }
 
     fn remove_vcpu(&mut self, cpu_id: u8) -> Result<()> {
         info!("Removing vCPU: cpu_id = {}", cpu_id);
-        let mut state = &mut self.vcpu_states[usize::from(cpu_id)];
+        let state = &mut self.vcpu_states[usize::from(cpu_id)];
         state.kill.store(true, Ordering::SeqCst);
         state.signal_thread();
         state.join_thread()?;
@@ -1203,6 +1214,7 @@ impl CpuManager {
 
         // Once the thread has exited, clear the "kill" so that it can reused
         state.kill.store(false, Ordering::SeqCst);
+        state.pending_removal.store(false, Ordering::SeqCst);
 
         Ok(())
     }
@@ -1227,19 +1239,12 @@ impl CpuManager {
     }
 
     // Starts all the vCPUs that the VM is booting with. Blocks until all vCPUs are running.
-    pub fn start_boot_vcpus(
-        &mut self,
-        paused: bool,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Result<()> {
-        self.activate_vcpus(self.boot_vcpus(), false, Some(paused), guest_memory)
+    pub fn start_boot_vcpus(&mut self, paused: bool) -> Result<()> {
+        self.activate_vcpus(self.boot_vcpus(), false, Some(paused))
     }
 
-    pub fn start_restored_vcpus(
-        &mut self,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Result<()> {
-        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true), guest_memory)
+    pub fn start_restored_vcpus(&mut self) -> Result<()> {
+        self.activate_vcpus(self.vcpus.len() as u8, false, Some(true))
             .map_err(|e| {
                 Error::StartRestoreVcpu(anyhow!("Failed to start restored vCPUs: {:#?}", e))
             })?;
@@ -1247,17 +1252,17 @@ impl CpuManager {
         Ok(())
     }
 
-    pub fn resize(
-        &mut self,
-        desired_vcpus: u8,
-        guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> Result<bool> {
+    pub fn resize(&mut self, desired_vcpus: u8) -> Result<bool> {
         if desired_vcpus.cmp(&self.present_vcpus()) == cmp::Ordering::Equal {
             return Ok(false);
         }
 
         if !self.dynamic {
             return Ok(false);
+        }
+
+        if self.check_pending_removed_vcpu() {
+            return Err(Error::VcpuPendingRemovedVcpu);
         }
 
         match desired_vcpus.cmp(&self.present_vcpus()) {
@@ -1273,7 +1278,7 @@ impl CpuManager {
                         0,
                     )?
                 }
-                self.activate_vcpus(desired_vcpus, true, None, guest_memory)?;
+                self.activate_vcpus(desired_vcpus, true, None)?;
                 Ok(true)
             }
             cmp::Ordering::Less => {
@@ -1378,16 +1383,17 @@ impl CpuManager {
             madt.write(36, arch::layout::APIC_START.0);
 
             for cpu in 0..self.config.max_vcpus {
-                let lapic = LocalApic {
-                    r#type: acpi::ACPI_APIC_PROCESSOR,
-                    length: 8,
-                    processor_id: cpu,
-                    apic_id: cpu,
+                let lapic = LocalX2Apic {
+                    r#type: acpi::ACPI_X2APIC_PROCESSOR,
+                    length: 16,
+                    processor_id: cpu.into(),
+                    apic_id: cpu.into(),
                     flags: if cpu < self.config.boot_vcpus {
                         1 << MADT_CPU_ENABLE_FLAG
                     } else {
                         0
                     } | 1 << MADT_CPU_ONLINE_CAPABLE_FLAG,
+                    _reserved: 0,
                 };
                 madt.append(lapic);
             }
@@ -1704,7 +1710,7 @@ impl CpuManager {
         // PA or IPA size is determined
         let tcr_ips = extract_bits_64!(tcr_el1, 32, 3);
         #[allow(clippy::identity_op)]
-        let pa_range = extract_bits_64!(id_aa64mmfr0_el1, 0, 4);
+        let pa_range = extract_bits_64_without_offset!(id_aa64mmfr0_el1, 4);
         // The IPA size in TCR_BL1 and PA Range in ID_AA64MMFR0_EL1 should match.
         // To be safe, we use the minimum value if they are different.
         let pa_range = std::cmp::min(tcr_ips, pa_range);
@@ -1737,10 +1743,10 @@ impl CpuManager {
         let descaddrmask = descaddrmask & !indexmask_grainsize;
 
         // Translation table base address
-        #[allow(clippy::identity_op)]
-        let mut descaddr: u64 = extract_bits_64!(ttbr1_el1, 0, 48);
+        #[allow(clippy::identity_op)]	
+        let pa_range = extract_bits_64_without_offset!(id_aa64mmfr0_el1, 4);
         // In the case of FEAT_LPA and FEAT_LPA2, the initial translation table
-        // addresss bits [48:51] comes from TTBR1_EL1 bits [2:5].
+        // address bits [48:51] comes from TTBR1_EL1 bits [2:5].
         if pa_size == 52 {
             descaddr |= extract_bits_64!(ttbr1_el1, 2, 4) << 48;
         }
@@ -1807,7 +1813,12 @@ impl CpuManager {
         self.interrupt_controller = Some(interrupt_controller);
     }
 
-    pub fn get_cpuid_leaf(
+    pub(crate) fn vcpus_kill_signalled(&self) -> &Arc<AtomicBool> {
+        &self.vcpus_kill_signalled
+    }
+
+    #[cfg(feature = "igvm")]
+    pub(crate) fn get_cpuid_leaf(
         &self,
         cpu_id: u8,
         eax: u32,
@@ -1840,18 +1851,18 @@ const MADT_CPU_ONLINE_CAPABLE_FLAG: usize = 1;
 impl Cpu {
     #[cfg(target_arch = "x86_64")]
     fn generate_mat(&self) -> Vec<u8> {
-        let lapic = LocalApic {
-            r#type: 0,
-            length: 8,
-            processor_id: self.cpu_id,
-            apic_id: self.cpu_id,
+        let lapic = LocalX2Apic {
+            r#type: crate::acpi::ACPI_X2APIC_PROCESSOR,
+            length: 16,
+            processor_id: self.cpu_id.into(),
+            apic_id: self.cpu_id.into(),
             flags: 1 << MADT_CPU_ENABLE_FLAG,
+            _reserved: 0,
         };
 
-        let mut mat_data: Vec<u8> = Vec::new();
-        mat_data.resize(std::mem::size_of_val(&lapic), 0);
+        let mut mat_data: Vec<u8> = vec![0; std::mem::size_of_val(&lapic)];
         // SAFETY: mat_data is large enough to hold lapic
-        unsafe { *(mat_data.as_mut_ptr() as *mut LocalApic) = lapic };
+        unsafe { *(mat_data.as_mut_ptr() as *mut LocalX2Apic) = lapic };
 
         mat_data
     }
@@ -1864,7 +1875,7 @@ impl Aml for Cpu {
         #[allow(clippy::if_same_then_else)]
         if self.dynamic {
             aml::Device::new(
-                format!("C{:03}", self.cpu_id).as_str().into(),
+                format!("C{:03X}", self.cpu_id).as_str().into(),
                 vec![
                     &aml::Name::new("_HID".into(), &"ACPI0007"),
                     &aml::Name::new("_UID".into(), &self.cpu_id),
@@ -1914,7 +1925,7 @@ impl Aml for Cpu {
             .to_aml_bytes(sink);
         } else {
             aml::Device::new(
-                format!("C{:03}", self.cpu_id).as_str().into(),
+                format!("C{:03X}", self.cpu_id).as_str().into(),
                 vec![
                     &aml::Name::new("_HID".into(), &"ACPI0007"),
                     &aml::Name::new("_UID".into(), &self.cpu_id),
@@ -1950,7 +1961,7 @@ struct CpuNotify {
 
 impl Aml for CpuNotify {
     fn to_aml_bytes(&self, sink: &mut dyn acpi_tables::AmlSink) {
-        let object = aml::Path::new(&format!("C{:03}", self.cpu_id));
+        let object = aml::Path::new(&format!("C{:03X}", self.cpu_id));
         aml::If::new(
             &aml::Equal::new(&aml::Arg(0), &self.cpu_id),
             vec![&aml::Notify::new(&object, &aml::Arg(1))],
@@ -2092,10 +2103,11 @@ impl Aml for CpuManager {
                     &aml::Name::new(
                         "_CRS".into(),
                         &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                            aml::AddressSpaceCachable::NotCacheable,
+                            aml::AddressSpaceCacheable::NotCacheable,
                             true,
                             acpi_address.0,
                             acpi_address.0 + CPU_MANAGER_ACPI_SIZE as u64 - 1,
+                            None,
                         )]),
                     ),
                     // OpRegion and Fields map MMIO range into individual field values
@@ -2192,6 +2204,17 @@ impl Pausable for CpuManager {
             }
         }
 
+        // The vCPU thread will change its paused state before parking, wait here for each
+        // activated vCPU change their state to ensure they have parked.
+        for state in self.vcpu_states.iter() {
+            if state.active() {
+                while !state.paused.load(Ordering::SeqCst) {
+                    // To avoid a priority inversion with the vCPU thread
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2208,6 +2231,7 @@ impl Pausable for CpuManager {
         // boolean. Since it'll be set to false, they will exit their pause loop
         // and go back to vmx root.
         for state in self.vcpu_states.iter() {
+            state.paused.store(false, Ordering::SeqCst);
             state.unpark_thread();
         }
         Ok(())

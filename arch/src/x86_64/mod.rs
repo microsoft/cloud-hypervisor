@@ -16,7 +16,7 @@ use crate::GuestMemoryMmap;
 use crate::InitramfsConfig;
 use crate::RegionType;
 use hypervisor::arch::x86::{CpuIdEntry, CPUID_FLAG_VALID_INDEX};
-use hypervisor::{HypervisorCpuError, HypervisorError};
+use hypervisor::{CpuVendor, HypervisorCpuError, HypervisorError};
 use linux_loader::loader::bootparam::boot_params;
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
@@ -39,6 +39,9 @@ const TSC_DEADLINE_TIMER_ECX_BIT: u8 = 24; // tsc deadline timer ecx bit.
 const HYPERVISOR_ECX_BIT: u8 = 31; // Hypervisor ecx bit.
 const MTRR_EDX_BIT: u8 = 12; // Hypervisor ecx bit.
 const INVARIANT_TSC_EDX_BIT: u8 = 8; // Invariant TSC bit on 0x8000_0007 EDX
+const AMX_BF16: u8 = 22; // AMX tile computation on bfloat16 numbers
+const AMX_TILE: u8 = 24; // AMX tile load/store instructions
+const AMX_INT8: u8 = 25; // AMX tile computation on 8-bit integers
 
 // KVM feature bits
 const KVM_FEATURE_ASYNC_PF_INT_BIT: u8 = 14;
@@ -63,7 +66,7 @@ pub const _NSIG: i32 = 65;
 /// is to be used to configure the guest initial state.
 pub struct EntryPoint {
     /// Address in guest memory where the guest must start execution
-    pub entry_addr: Option<GuestAddress>,
+    pub entry_addr: GuestAddress,
     #[cfg(feature = "igvm")]
     pub vmsa: Option<SevVmsa>,
     #[cfg(feature = "snp")]
@@ -151,6 +154,15 @@ struct BootParamsWrapper(boot_params);
 
 // SAFETY: BootParamsWrap is a wrapper over `boot_params` (a series of ints).
 unsafe impl ByteValued for BootParamsWrapper {}
+
+pub struct CpuidConfig {
+    pub sgx_epc_sections: Option<Vec<SgxEpcSection>>,
+    pub phys_bits: u8,
+    pub kvm_hyperv: bool,
+    #[cfg(feature = "tdx")]
+    pub tdx: bool,
+    pub amx: bool,
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -559,11 +571,7 @@ impl CpuidFeatureEntry {
 
 pub fn generate_common_cpuid(
     hypervisor: &Arc<dyn hypervisor::Hypervisor>,
-    topology: Option<(u8, u8, u8)>,
-    sgx_epc_sections: Option<Vec<SgxEpcSection>>,
-    phys_bits: u8,
-    kvm_hyperv: bool,
-    #[cfg(feature = "tdx")] tdx_enabled: bool,
+    config: &CpuidConfig,
 ) -> super::Result<Vec<CpuIdEntry>> {
     // SAFETY: cpuid called with valid leaves
     if unsafe { x86_64::__cpuid(1) }.ecx & 1 << HYPERVISOR_ECX_BIT == 1 << HYPERVISOR_ECX_BIT {
@@ -581,7 +589,10 @@ pub fn generate_common_cpuid(
         );
     }
 
-    info!("Generating guest CPUID for with physical address size: {phys_bits}");
+    info!(
+        "Generating guest CPUID for with physical address size: {}",
+        config.phys_bits
+    );
     let cpuid_patches = vec![
         // Patch tsc deadline timer bit
         CpuidPatch {
@@ -622,16 +633,12 @@ pub fn generate_common_cpuid(
 
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
 
-    if let Some(t) = topology {
-        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2);
-    }
-
-    if let Some(sgx_epc_sections) = sgx_epc_sections {
+    if let Some(sgx_epc_sections) = &config.sgx_epc_sections {
         update_cpuid_sgx(&mut cpuid, sgx_epc_sections)?;
     }
 
     #[cfg(feature = "tdx")]
-    let tdx_capabilities = if tdx_enabled {
+    let tdx_capabilities = if config.tdx {
         let caps = hypervisor
             .tdx_capabilities()
             .map_err(Error::TdxCapabilities)?;
@@ -644,6 +651,12 @@ pub fn generate_common_cpuid(
     // Update some existing CPUID
     for entry in cpuid.as_mut_slice().iter_mut() {
         match entry.function {
+            // Clear AMX related bits if the AMX feature is not enabled
+            0x7 => {
+                if !config.amx && entry.index == 0 {
+                    entry.edx &= !(1 << AMX_BF16 | 1 << AMX_TILE | 1 << AMX_INT8)
+                }
+            }
             0xd =>
             {
                 #[cfg(feature = "tdx")]
@@ -679,7 +692,7 @@ pub fn generate_common_cpuid(
             }
             // Set CPU physical bits
             0x8000_0008 => {
-                entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
+                entry.eax = (entry.eax & 0xffff_ff00) | (config.phys_bits as u32 & 0xff);
             }
             // Disable KVM_FEATURE_ASYNC_PF_INT
             // This is required until we find out why the asynchronous page
@@ -691,7 +704,7 @@ pub fn generate_common_cpuid(
 
                 // These features are not supported by TDX
                 #[cfg(feature = "tdx")]
-                if tdx_enabled {
+                if config.tdx {
                     entry.eax &= !(1 << KVM_FEATURE_CLOCKSOURCE_BIT
                         | 1 << KVM_FEATURE_CLOCKSOURCE2_BIT
                         | 1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT
@@ -719,7 +732,7 @@ pub fn generate_common_cpuid(
         });
     }
 
-    if kvm_hyperv {
+    if config.kvm_hyperv {
         // Remove conflicting entries
         cpuid.retain(|c| c.function != 0x4000_0000);
         cpuid.retain(|c| c.function != 0x4000_0001);
@@ -775,12 +788,33 @@ pub fn configure_vcpu(
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
     cpuid: Vec<CpuIdEntry>,
     kvm_hyperv: bool,
-    #[cfg(feature = "igvm")] vmsa: Option<SevVmsa>,
+    cpu_vendor: CpuVendor,
+    topology: Option<(u8, u8, u8)>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
+    if matches!(cpu_vendor, CpuVendor::AMD) {
+        CpuidPatch::set_cpuid_reg(
+            &mut cpuid,
+            0x8000_001e,
+            Some(0),
+            CpuidReg::EAX,
+            u32::from(id),
+        );
+    }
+
+    if let Some(t) = topology {
+        update_cpuid_topology(&mut cpuid, t.0, t.1, t.2, cpu_vendor, id);
+    }
+
+    // Set ApicId in cpuid for each vcpu
+    // SAFETY: get host cpuid when eax=1
+    let mut cpu_ebx = unsafe { core::arch::x86_64::__cpuid(1) }.ebx;
+    cpu_ebx &= 0xffffff;
+    cpu_ebx |= (id as u32) << 24;
+    CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1, None, CpuidReg::EBX, cpu_ebx);
 
     // The TSC frequency CPUID leaf should not be included when running with HyperV emulation
     if !kvm_hyperv {
@@ -819,29 +853,10 @@ pub fn configure_vcpu(
 
     regs::setup_msrs(vcpu).map_err(Error::MsrsConfiguration)?;
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
-        if let Some(entry_addr) = kernel_entry_point.entry_addr {
-            // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(
-                vcpu,
-                entry_addr.raw_value(),
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
+        regs::setup_regs(vcpu, kernel_entry_point.entry_addr.raw_value())
             .map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(
-                vcpu,
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
-            .map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(
-                &guest_memory.memory(),
-                vcpu,
-                #[cfg(feature = "igvm")]
-                vmsa,
-            )
-            .map_err(Error::SregsConfiguration)?;
-        }
+        regs::setup_fpu(vcpu).map_err(Error::FpuConfiguration)?;
+        regs::setup_sregs(&guest_memory.memory(), vcpu).map_err(Error::SregsConfiguration)?;
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
     Ok(())
@@ -851,47 +866,29 @@ pub fn configure_vcpu(
 /// These should be used to configure the GuestMemory structure for the platform.
 /// For x86_64 all addresses are valid from the start of the kernel except a
 /// carve out at the end of 32bit address space.
-pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, RegionType)> {
-    let reserved_memory_gap_start = layout::MEM_32BIT_RESERVED_START
-        .checked_add(layout::MEM_32BIT_DEVICES_SIZE)
-        .expect("32-bit reserved region is too large");
-
-    let requested_memory_size = GuestAddress(size);
-    let mut regions = Vec::new();
-
-    // case1: guest memory fits before the gap
-    if size <= layout::MEM_32BIT_RESERVED_START.raw_value() {
-        regions.push((GuestAddress(0), size as usize, RegionType::Ram));
-    // case2: guest memory extends beyond the gap
-    } else {
-        // push memory before the gap
-        regions.push((
+pub fn arch_memory_regions() -> Vec<(GuestAddress, usize, RegionType)> {
+    vec![
+        // 0 GiB ~ 3GiB: memory before the gap
+        (
             GuestAddress(0),
             layout::MEM_32BIT_RESERVED_START.raw_value() as usize,
             RegionType::Ram,
-        ));
-        regions.push((
-            layout::RAM_64BIT_START,
-            requested_memory_size.unchecked_offset_from(layout::MEM_32BIT_RESERVED_START) as usize,
-            RegionType::Ram,
-        ));
-    }
-
-    // Add the 32-bit device memory hole as a sub region.
-    regions.push((
-        layout::MEM_32BIT_RESERVED_START,
-        layout::MEM_32BIT_DEVICES_SIZE as usize,
-        RegionType::SubRegion,
-    ));
-
-    // Add the 32-bit reserved memory hole as a sub region.
-    regions.push((
-        reserved_memory_gap_start,
-        (layout::MEM_32BIT_RESERVED_SIZE - layout::MEM_32BIT_DEVICES_SIZE) as usize,
-        RegionType::Reserved,
-    ));
-
-    regions
+        ),
+        // 4 GiB ~ inf: memory after the gap
+        (layout::RAM_64BIT_START, usize::MAX, RegionType::Ram),
+        // 3 GiB ~ 3712 MiB: 32-bit device memory hole
+        (
+            layout::MEM_32BIT_RESERVED_START,
+            layout::MEM_32BIT_DEVICES_SIZE as usize,
+            RegionType::SubRegion,
+        ),
+        // 3712 MiB ~ 3968 MiB: 32-bit reserved memory hole
+        (
+            layout::MEM_32BIT_RESERVED_START.unchecked_add(layout::MEM_32BIT_DEVICES_SIZE),
+            (layout::MEM_32BIT_RESERVED_SIZE - layout::MEM_32BIT_DEVICES_SIZE) as usize,
+            RegionType::Reserved,
+        ),
+    ]
 }
 
 /// Configures the system and should be called once per vm before starting vcpu threads.
@@ -943,6 +940,112 @@ pub fn configure_system(
     )
 }
 
+type RamRange = (u64, u64);
+
+/// Returns usable physical memory ranges for the guest
+/// These should be used to create e820_RAM memory maps
+///
+/// There are up to two usable physical memory ranges,
+/// divided by the gap at the end of 32bit address space.
+pub fn generate_ram_ranges(
+    guest_mem: &GuestMemoryMmap,
+) -> super::Result<(RamRange, Option<RamRange>)> {
+    // Merge continuous memory regions into one region.
+    // Note: memory regions from "GuestMemory" are sorted and non-zero sized.
+    let ram_regions = {
+        let mut ram_regions = Vec::new();
+        let mut current_start = guest_mem
+            .iter()
+            .next()
+            .map(GuestMemoryRegion::start_addr)
+            .expect("GuestMemory must have one memory region at least")
+            .raw_value();
+        let mut current_end = current_start;
+
+        for (start, size) in guest_mem
+            .iter()
+            .map(|m| (m.start_addr().raw_value(), m.len()))
+        {
+            if current_end == start {
+                // This zone is continuous with the previous one.
+                current_end += size;
+            } else {
+                ram_regions.push((current_start, current_end));
+
+                current_start = start;
+                current_end = start + size;
+            }
+        }
+
+        ram_regions.push((current_start, current_end));
+
+        ram_regions
+    };
+
+    if ram_regions.len() > 2 {
+        error!(
+            "There should be up to two usable physical memory ranges, devidided by the
+            gap at the end of 32bit address space (e.g. between 3G and 4G)."
+        );
+        return Err(super::Error::MemmapTableSetup);
+    }
+
+    // Generate the first usable physical memory range before the gap
+    let first_ram_range = {
+        let (first_region_start, first_region_end) =
+            ram_regions.first().ok_or(super::Error::MemmapTableSetup)?;
+        let high_ram_start = layout::HIGH_RAM_START.raw_value();
+        let mem_32bit_reserved_start = layout::MEM_32BIT_RESERVED_START.raw_value();
+
+        if !((first_region_start <= &high_ram_start)
+            && (first_region_end > &high_ram_start)
+            && (first_region_end <= &mem_32bit_reserved_start))
+        {
+            error!(
+                "Unexpected first memory region layout: (start: 0x{:08x}, end: 0x{:08x}).
+                high_ram_start: 0x{:08x}, mem_32bit_reserved_start: 0x{:08x}",
+                first_region_start, first_region_end, high_ram_start, mem_32bit_reserved_start
+            );
+
+            return Err(super::Error::MemmapTableSetup);
+        }
+
+        info!(
+            "first usable physical memory range, start: 0x{:08x}, end: 0x{:08x}",
+            high_ram_start, first_region_end
+        );
+
+        (high_ram_start, *first_region_end)
+    };
+
+    // Generate the second usable physical memory range after the gap if any
+    let second_ram_range = if let Some((second_region_start, second_region_end)) =
+        ram_regions.get(1)
+    {
+        let ram_64bit_start = layout::RAM_64BIT_START.raw_value();
+
+        if second_region_start != &ram_64bit_start {
+            error!(
+                "Unexpected second memory region layout: start: 0x{:08x}, ram_64bit_start: 0x{:08x}",
+                second_region_start, ram_64bit_start
+            );
+
+            return Err(super::Error::MemmapTableSetup);
+        }
+
+        info!(
+            "Second usable physical memory range, start: 0x{:08x}, end: 0x{:08x}",
+            ram_64bit_start, second_region_end
+        );
+
+        Some((ram_64bit_start, *second_region_end))
+    } else {
+        None
+    };
+
+    Ok((first_ram_range, second_ram_range))
+}
+
 fn configure_pvh(
     guest_mem: &GuestMemoryMmap,
     cmdline_addr: GuestAddress,
@@ -989,30 +1092,33 @@ fn configure_pvh(
     // Create the memory map entries.
     add_memmap_entry(&mut memmap, 0, layout::EBDA_START.raw_value(), E820_RAM);
 
-    let mem_end = guest_mem.last_addr();
+    // Get usable physical memory ranges
+    let (first_ram_range, second_ram_range) = generate_ram_ranges(guest_mem)?;
 
-    if mem_end < layout::MEM_32BIT_RESERVED_START {
+    // Create e820 memory map entry before the gap
+    info!(
+        "create_memmap_entry, start: 0x{:08x}, end: 0x{:08x}",
+        first_ram_range.0, first_ram_range.1
+    );
+    add_memmap_entry(
+        &mut memmap,
+        first_ram_range.0,
+        first_ram_range.1 - first_ram_range.0,
+        E820_RAM,
+    );
+
+    // Create e820 memory map after the gap if any
+    if let Some(second_ram_range) = second_ram_range {
+        info!(
+            "create_memmap_entry, start: 0x{:08x}, end: 0x{:08x}",
+            second_ram_range.0, second_ram_range.1
+        );
         add_memmap_entry(
             &mut memmap,
-            layout::HIGH_RAM_START.raw_value(),
-            mem_end.unchecked_offset_from(layout::HIGH_RAM_START) + 1,
+            second_ram_range.0,
+            second_ram_range.1 - second_ram_range.0,
             E820_RAM,
         );
-    } else {
-        add_memmap_entry(
-            &mut memmap,
-            layout::HIGH_RAM_START.raw_value(),
-            layout::MEM_32BIT_RESERVED_START.unchecked_offset_from(layout::HIGH_RAM_START),
-            E820_RAM,
-        );
-        if mem_end > layout::RAM_64BIT_START {
-            add_memmap_entry(
-                &mut memmap,
-                layout::RAM_64BIT_START.raw_value(),
-                mem_end.unchecked_offset_from(layout::RAM_64BIT_START) + 1,
-                E820_RAM,
-            );
-        }
     }
 
     add_memmap_entry(
@@ -1102,7 +1208,7 @@ pub fn initramfs_load_addr(
     Ok(aligned_addr)
 }
 
-pub fn get_host_cpu_phys_bits() -> u8 {
+pub fn get_host_cpu_phys_bits(hypervisor: &Arc<dyn hypervisor::Hypervisor>) -> u8 {
     // SAFETY: call cpuid with valid leaves
     unsafe {
         let leaf = x86_64::__cpuid(0x8000_0000);
@@ -1111,9 +1217,7 @@ pub fn get_host_cpu_phys_bits() -> u8 {
         // Some physical address bits may become reserved when the feature is enabled.
         // See AMD64 Architecture Programmer's Manual Volume 2, Section 7.10.1
         let reduced = if leaf.eax >= 0x8000_001f
-            && leaf.ebx == 0x6874_7541    // Vendor ID: AuthenticAMD
-            && leaf.ecx == 0x444d_4163
-            && leaf.edx == 0x6974_6e65
+            && matches!(hypervisor.get_cpu_vendor(), CpuVendor::AMD)
             && x86_64::__cpuid(0x8000_001f).eax & 0x1 != 0
         {
             (x86_64::__cpuid(0x8000_001f).ebx >> 6) & 0x3f
@@ -1135,6 +1239,8 @@ fn update_cpuid_topology(
     threads_per_core: u8,
     cores_per_die: u8,
     dies_per_package: u8,
+    cpu_vendor: CpuVendor,
+    id: u8,
 ) {
     let thread_width = 8 - (threads_per_core - 1).leading_zeros();
     let core_width = (8 - (cores_per_die - 1).leading_zeros()) + thread_width;
@@ -1191,13 +1297,72 @@ fn update_cpuid_topology(
         u32::from(dies_per_package * cores_per_die * threads_per_core),
     );
     CpuidPatch::set_cpuid_reg(cpuid, 0x1f, Some(2), CpuidReg::ECX, 5 << 8);
+
+    if matches!(cpu_vendor, CpuVendor::AMD) {
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0x8000_001e,
+            Some(0),
+            CpuidReg::EBX,
+            ((threads_per_core as u32 - 1) << 8) | (id as u32 & 0xff),
+        );
+        CpuidPatch::set_cpuid_reg(
+            cpuid,
+            0x8000_001e,
+            Some(0),
+            CpuidReg::ECX,
+            ((dies_per_package as u32 - 1) << 8) | (thread_width + die_width) & 0xff,
+        );
+        CpuidPatch::set_cpuid_reg(cpuid, 0x8000_001e, Some(0), CpuidReg::EDX, 0);
+        if cores_per_die * threads_per_core > 1 {
+            CpuidPatch::set_cpuid_reg(
+                cpuid,
+                0x8000_0001,
+                Some(0),
+                CpuidReg::ECX,
+                (1u32 << 1) | (1u32 << 22),
+            );
+            CpuidPatch::set_cpuid_reg(
+                cpuid,
+                0x0000_0001,
+                Some(0),
+                CpuidReg::EBX,
+                ((id as u32) << 24)
+                    | (8 << 8)
+                    | (((cores_per_die * threads_per_core) as u32) << 16),
+            );
+            let cpuid_patches = vec![
+                // Patch tsc deadline timer bit
+                CpuidPatch {
+                    function: 1,
+                    index: 0,
+                    flags_bit: None,
+                    eax_bit: None,
+                    ebx_bit: None,
+                    ecx_bit: None,
+                    edx_bit: Some(28),
+                },
+            ];
+            CpuidPatch::patch_cpuid(cpuid, cpuid_patches);
+            CpuidPatch::set_cpuid_reg(
+                cpuid,
+                0x8000_0008,
+                Some(0),
+                CpuidReg::ECX,
+                ((thread_width + core_width + die_width) << 12)
+                    | ((cores_per_die * threads_per_core) - 1) as u32,
+            );
+        } else {
+            CpuidPatch::set_cpuid_reg(cpuid, 0x8000_0008, Some(0), CpuidReg::ECX, 0u32);
+        }
+    }
 }
 
 // The goal is to update the CPUID sub-leaves to reflect the number of EPC
 // sections exposed to the guest.
 fn update_cpuid_sgx(
     cpuid: &mut Vec<CpuIdEntry>,
-    epc_sections: Vec<SgxEpcSection>,
+    epc_sections: &Vec<SgxEpcSection>,
 ) -> Result<(), Error> {
     // Something's wrong if there's no EPC section.
     if epc_sections.is_empty() {
@@ -1248,16 +1413,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn regions_lt_4gb() {
-        let regions = arch_memory_regions(1 << 29);
-        assert_eq!(3, regions.len());
-        assert_eq!(GuestAddress(0), regions[0].0);
-        assert_eq!(1usize << 29, regions[0].1);
-    }
-
-    #[test]
-    fn regions_gt_4gb() {
-        let regions = arch_memory_regions((1 << 32) + 0x8000);
+    fn regions_base_addr() {
+        let regions = arch_memory_regions();
         assert_eq!(4, regions.len());
         assert_eq!(GuestAddress(0), regions[0].0);
         assert_eq!(GuestAddress(1 << 32), regions[1].0);
@@ -1281,49 +1438,13 @@ mod tests {
         assert!(config_err.is_err());
 
         // Now assigning some memory that falls before the 32bit memory hole.
-        let mem_size = 128 << 20;
-        let arch_mem_regions = arch_memory_regions(mem_size);
+        let arch_mem_regions = arch_memory_regions();
         let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
             .iter()
-            .filter(|r| r.2 == RegionType::Ram)
+            .filter(|r| r.2 == RegionType::Ram && r.1 != usize::MAX)
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-
-        configure_system(
-            &gm,
-            GuestAddress(0),
-            &None,
-            no_vcpus,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        // Now assigning some memory that is equal to the start of the 32bit memory hole.
-        let mem_size = 3328 << 20;
-        let arch_mem_regions = arch_memory_regions(mem_size);
-        let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
-            .iter()
-            .filter(|r| r.2 == RegionType::Ram)
-            .map(|r| (r.0, r.1))
-            .collect();
-        let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(
-            &gm,
-            GuestAddress(0),
-            &None,
-            no_vcpus,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
 
         configure_system(
             &gm,
@@ -1339,12 +1460,17 @@ mod tests {
         .unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
-        let mem_size = 3330 << 20;
-        let arch_mem_regions = arch_memory_regions(mem_size);
+        let arch_mem_regions = arch_memory_regions();
         let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
             .iter()
             .filter(|r| r.2 == RegionType::Ram)
-            .map(|r| (r.0, r.1))
+            .map(|r| {
+                if r.1 == usize::MAX {
+                    (r.0, 128 << 20)
+                } else {
+                    (r.0, r.1)
+                }
+            })
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
         configure_system(

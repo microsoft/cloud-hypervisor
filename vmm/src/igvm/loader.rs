@@ -1,15 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+//
+// Copyright © 2023, Microsoft Corporation
+//
 use crate::igvm::{BootPageAcceptance, StartupMemoryType, HV_PAGE_SIZE};
-use igvm_parser::hv_defs::Vtl;
-use igvm_parser::registers::X86Register;
 use range_map_vec::{Entry, RangeMap};
-use vm_memory::GuestMemoryMmap;
-
-use std::collections::HashMap;
-use std::mem::Discriminant;
 use thiserror::Error;
 use vm_memory::bitmap::AtomicBitmap;
-use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
-use vm_memory::{GuestMemory, GuestMemoryRegion};
+use vm_memory::{
+    Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestMemoryMmap,
+    GuestMemoryRegion,
+};
+
+/// Structure to hold the guest memory info/layout to check
+/// the if the memory is accepted within the layout.
+/// Adds up the total bytes written to the guest memory
+pub struct Loader {
+    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
+    accepted_ranges: RangeMap<u64, BootPageAcceptance>,
+    bytes_written: u64,
+}
 
 #[derive(Debug)]
 pub struct ImportRegion {
@@ -22,64 +31,25 @@ pub struct ImportRegion {
 pub enum Error {
     #[error("overlaps with existing import region {0:?}")]
     OverlapsExistingRegion(ImportRegion),
-    #[error("invalid parameter area index {0:?}")]
-    InvalidParameterAreaIndex(ParameterAreaIndex),
-    #[error("invalid vtl")]
-    InvalidVtl,
-    #[error("memory unvailable")]
+    #[error("memory unavailable")]
     MemoryUnavailable,
+    #[error("failed to import pages")]
+    ImportPagesFailed,
     #[error("invalid vp context memory")]
     InvalidVpContextMemory(&'static str),
     #[error("data larger than imported region")]
     DataTooLarge,
-    #[error("no vp context page set")]
-    NoVpContextPageSet,
-    #[error("overlaps existing relocation region")]
-    RelocationOverlap,
-    #[error("region alignment is not aligned to 4K")]
-    RelocationAlignment,
-    #[error("relocation base gpa is not aligned to relocation alignment")]
-    RelocationBaseGpa,
-    #[error("relocation minimum gpa is not aligned to relocation alignment")]
-    RelocationMinimumGpa,
-    #[error("relocation maximum gpa is not aligned to relocation alignment")]
-    RelocationMaximumGpa,
-    #[error("relocation size is not 4K aligned")]
-    RelocationSize,
-    #[error("page table relocation is already set, only a single allowed")]
-    PageTableRelocationSet,
-    #[error("page table relocation used size is greater than the region size")]
-    PageTableUsedSize,
-}
-
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
-pub struct ParameterAreaIndex(pub u32);
-
-#[derive(Debug)]
-pub struct Loader {
-    memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>,
-    regs: HashMap<Discriminant<X86Register>, X86Register>,
-    accepted_ranges: RangeMap<u64, BootPageAcceptance>,
-    max_vtl: Vtl,
-    bytes_written: u64,
 }
 
 impl Loader {
-    pub fn new(memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>, max_vtl: Vtl) -> Loader {
+    pub fn new(memory: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>) -> Loader {
         Loader {
             memory,
-            regs: HashMap::new(),
             accepted_ranges: RangeMap::new(),
-            max_vtl,
             bytes_written: 0,
         }
     }
 
-    #[allow(dead_code)]
-    pub fn get_initial_regs(self) -> Vec<X86Register> {
-        self.regs.into_values().collect()
-    }
     /// Accept a new page range with a given acceptance into the map of accepted ranges.
     pub fn accept_new_range(
         &mut self,
@@ -104,9 +74,6 @@ impl Loader {
             }
         }
     }
-    pub fn gets_total_bytes_written(self) -> u64 {
-        self.bytes_written
-    }
 
     pub fn import_pages(
         &mut self,
@@ -115,40 +82,26 @@ impl Loader {
         acceptance: BootPageAcceptance,
         data: &[u8],
     ) -> Result<(), Error> {
-        // Track accepted ranges for duplicate imports.
-        self.accept_new_range(page_base, page_count, acceptance)?;
-
         // Page count must be larger or equal to data.
         if page_count * HV_PAGE_SIZE < data.len() as u64 {
             return Err(Error::DataTooLarge);
         }
 
-        self.memory
+        // Track accepted ranges for duplicate imports.
+        self.accept_new_range(page_base, page_count, acceptance)?;
+
+        let bytes_written = self
+            .memory
             .memory()
             .write(data, GuestAddress(page_base * HV_PAGE_SIZE))
             .map_err(|_e| {
                 debug!("Importing pages failed due to MemoryError");
                 Error::MemoryUnavailable
             })?;
-        self.bytes_written += page_count * HV_PAGE_SIZE;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn import_vp_register(&mut self, vtl: Vtl, register: X86Register) -> Result<(), Error> {
-        // Only importing to the max VTL for registers is currently allowed, as only one set of registers is stored.
-        if vtl != self.max_vtl {
-            return Err(Error::InvalidVtl);
+        if bytes_written != (page_count * HV_PAGE_SIZE) as usize {
+            return Err(Error::ImportPagesFailed);
         }
-
-        let entry = self.regs.entry(std::mem::discriminant(&register));
-        match entry {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                panic!("duplicate register import {:?}", register)
-            }
-            std::collections::hash_map::Entry::Vacant(ve) => ve.insert(register),
-        };
-
+        self.bytes_written += bytes_written as u64;
         Ok(())
     }
 
@@ -158,20 +111,7 @@ impl Loader {
         page_count: u64,
         memory_type: StartupMemoryType,
     ) -> Result<(), Error> {
-        // Allow Vtl2ProtectableRam only if VTL2 is enabled.
-        if self.max_vtl == Vtl::Vtl2 {
-            match memory_type {
-                StartupMemoryType::Ram => {}
-                StartupMemoryType::Vtl2ProtectableRam => {
-                    // TODO: Should enable VTl2 memory protections on this region? Or do we allow VTL2 memory protections
-                    //       on the whole address space when VTL memory protections work?
-                    warn!(
-                        "vtl2 protectable ram requested: {:?} {:?}",
-                        page_base, page_count,
-                    );
-                }
-            }
-        } else if memory_type != StartupMemoryType::Ram {
+        if memory_type != StartupMemoryType::Ram {
             return Err(Error::MemoryUnavailable);
         }
 

@@ -85,7 +85,7 @@ impl Ord for BusRange {
 
 impl PartialOrd for BusRange {
     fn partial_cmp(&self, other: &BusRange) -> Option<Ordering> {
-        self.base.partial_cmp(&other.base)
+        Some(self.cmp(other))
     }
 }
 
@@ -110,8 +110,7 @@ impl Bus {
         let devices = self.devices.read().unwrap();
         let (range, dev) = devices
             .range(..=BusRange { base: addr, len: 1 })
-            .rev()
-            .next()?;
+            .next_back()?;
         dev.upgrade().map(|d| (*range, d.clone()))
     }
 

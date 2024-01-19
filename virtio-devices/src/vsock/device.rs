@@ -339,7 +339,7 @@ impl VersionMapped for VsockState {}
 
 impl<B> Vsock<B>
 where
-    B: VsockBackend,
+    B: VsockBackend + Sync,
 {
     /// Create a new virtio-vsock device with the given VM CID and vsock
     /// backend.

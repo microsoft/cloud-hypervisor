@@ -347,6 +347,28 @@ paths:
         500:
           description: The new vDPA device could not be added to the VM instance.
 
+  /vm.add-user-device:
+    put:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmAddUserDevice'
+        description: The path of the new device
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PciDeviceInfo'
+          description: The new device was successfully added to the VM instance.
+        "204":
+          description: The new device was successfully (cold) added to the VM instance.
+        "404":
+          description: The new device could not be added to the VM instance.
+      summary: Add a new userspace device to the VM
+
   /vm.snapshot:
     put:
       summary: Returns a VM snapshot.
@@ -445,6 +467,10 @@ components:
         pid:
           type: integer
           format: int64
+        features:
+          type: array
+          items:
+            type: string
       description: Virtual Machine Monitor information
 
     VmInfo:
@@ -820,6 +846,8 @@ components:
           format: int16
         id:
           type: string
+        serial:
+          type: string
 
     NetConfig:
       type: object
@@ -945,9 +973,11 @@ components:
       properties:
         file:
           type: string
+        socket:
+          type: string
         mode:
           type: string
-          enum: [Off, Pty, Tty, File, Null]
+          enum: [Off, Pty, Tty, File, Socket, Null]
         iommu:
           type: boolean
           default: false
@@ -1072,6 +1102,11 @@ components:
           type: array
           items:
             type: string
+        pci_segments:
+          type: array
+          items:
+            type: integer
+            format: int32
 
     VmResize:
       type: object
@@ -1143,3 +1178,11 @@ components:
           type: string
         local:
           type: boolean
+
+    VmAddUserDevice:
+      required:
+        - socket
+      type: object
+      properties:
+        socket:
+          type: string
