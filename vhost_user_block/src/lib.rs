@@ -137,7 +137,7 @@ impl VhostUserBlkThread {
             match Request::parse(
                 &mut desc_chain,
                 None,
-                #[cfg(all(feature = "mshv", feature = "snp"))]
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                 None,
             ) {
                 Ok(mut request) => {

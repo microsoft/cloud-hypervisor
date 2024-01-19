@@ -158,7 +158,7 @@ pub trait VsockChannel {
 pub trait VsockBackend: VsockChannel + VsockEpollListener + Send {}
 
 #[cfg(test)]
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 mod tests {
     use super::device::{VsockEpollHandler, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
     use super::packet::VSOCK_PKT_HDR_SIZE;
@@ -254,7 +254,7 @@ mod tests {
     }
     impl VsockBackend for TestBackend {}
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     pub struct TestContext {
         pub cid: u64,
         pub mem: GuestMemoryMmap,
@@ -262,7 +262,7 @@ mod tests {
         pub device: Vsock<TestBackend>,
     }
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     impl TestContext {
         pub fn new() -> Self {
             const CID: u64 = 52;

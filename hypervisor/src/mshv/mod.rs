@@ -335,12 +335,12 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// ```
     fn create_vm(
         &self,
-        #[cfg(feature = "snp")] mem_size: u64,
+        #[cfg(feature = "sev_snp")] mem_size: u64,
     ) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
         self.create_vm_with_type(
             vm_type,
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             mem_size,
         )
     }
@@ -1566,7 +1566,7 @@ impl vm::Vm for MshvVm {
             vm_ops,
             #[cfg(feature = "sev_snp")]
             vm_fd: self.fd.clone(),
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             host_access_pages: self.host_access_pages.clone(),
         };
         Ok(Arc::new(vcpu))

@@ -671,7 +671,7 @@ where
 }
 
 #[cfg(test)]
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 mod tests {
     use libc::EFD_NONBLOCK;
     use virtio_queue::QueueOwnedT;
@@ -804,14 +804,14 @@ mod tests {
     // single `VsockConnection` object will also suffice for our testing needs. We'll be using a
     // specially crafted `Read + Write + AsRawFd` object as a backing stream, so that we can
     // control the various error conditions that might arise.
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     struct CsmTestContext {
         _vsock_test_ctx: TestContext,
         pkt: VsockPacket,
         conn: VsockConnection<TestStream>,
     }
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     impl CsmTestContext {
         fn new_established() -> Self {
             Self::new(ConnState::Established)
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_peer_request() {
         let mut ctx = CsmTestContext::new(ConnState::PeerInit);
         assert!(ctx.conn.has_pending_rx());
@@ -927,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_local_request() {
         let mut ctx = CsmTestContext::new(ConnState::LocalInit);
         // Host-initiated connections should first yield a connection request packet.
@@ -949,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_local_request_timeout() {
         let mut ctx = CsmTestContext::new(ConnState::LocalInit);
         ctx.recv();
@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_rx_data() {
         let mut ctx = CsmTestContext::new_established();
         let data = &[1, 2, 3, 4];
@@ -989,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_local_close() {
         let mut ctx = CsmTestContext::new_established();
         let mut stream = TestStream::new();
@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_peer_close() {
         // Test that send/recv shutdown indications are handled correctly.
         // I.e. once set, an indication cannot be reset.
@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_local_read_error() {
         let mut ctx = CsmTestContext::new_established();
         let mut stream = TestStream::new();
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_credit_request_to_peer() {
         let mut ctx = CsmTestContext::new_established();
         ctx.set_peer_credit(0);
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_credit_request_from_peer() {
         let mut ctx = CsmTestContext::new_established();
         ctx.init_pkt(uapi::VSOCK_OP_CREDIT_REQUEST, 0);
@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_credit_update_to_peer() {
         let mut ctx = CsmTestContext::new_established();
 
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_tx_buffering() {
         // Test case:
         // - when writing to the backing stream would block, TX data should end up in the TX buf
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_stream_write_error() {
         // Test case: sending a data packet to a broken / closed backing stream should kill it.
         {
@@ -1241,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_peer_credit_misbehavior() {
         let mut ctx = CsmTestContext::new_established();
 

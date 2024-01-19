@@ -226,7 +226,7 @@ impl VhostUserBackendMut for VhostUserNetBackend {
                     .process_tx(
                         self.mem.memory().deref(),
                         vring.get_queue_mut(),
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                         None,
                     )
                     .map_err(Error::NetQueuePair)?
@@ -243,7 +243,7 @@ impl VhostUserBackendMut for VhostUserNetBackend {
                     .process_rx(
                         self.mem.memory().deref(),
                         vring.get_queue_mut(),
-                        #[cfg(all(feature = "mshv", feature = "snp"))]
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
                         None,
                     )
                     .map_err(Error::NetQueuePair)?

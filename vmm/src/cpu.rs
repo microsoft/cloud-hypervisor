@@ -1231,7 +1231,7 @@ impl CpuManager {
         let ret = self.create_vcpus(self.boot_vcpus(), snapshot);
 
         if self.snp_enabled {
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             self.vm.snp_init().map_err(Error::InitializeSnp)?;
         }
 
@@ -1274,7 +1274,7 @@ impl CpuManager {
                         None,
                         #[cfg(feature = "igvm")]
                         None,
-                        #[cfg(feature = "snp")]
+                        #[cfg(feature = "sev_snp")]
                         0,
                     )?
                 }

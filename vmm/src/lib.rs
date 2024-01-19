@@ -1343,7 +1343,7 @@ impl Vmm {
             false,
             #[cfg(feature = "sev_snp")]
             false,
-            #[cfg(feature = "snp")]
+            #[cfg(feature = "sev_snp")]
             config.lock().unwrap().memory.total_size(),
         )
         .map_err(|e| {
@@ -1355,9 +1355,9 @@ impl Vmm {
 
         let phys_bits =
             vm::physical_bits(&self.hypervisor, config.lock().unwrap().cpus.max_phys_bits);
-        #[cfg(not(feature = "snp"))]
+        #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
-        #[cfg(feature = "snp")]
+        #[cfg(feature = "sev_snp")]
         let snp_enabled = config.lock().unwrap().is_snp_enabled();
         let memory_manager = MemoryManager::new(
             vm,

@@ -819,7 +819,7 @@ impl VsockMuxer {
 }
 
 #[cfg(test)]
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 mod tests {
     use std::io::{Read, Write};
     use std::ops::Drop;
@@ -835,21 +835,21 @@ mod tests {
     const PEER_CID: u64 = 3;
     const PEER_BUF_ALLOC: u32 = 64 * 1024;
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     struct MuxerTestContext {
         _vsock_test_ctx: VsockTestContext,
         pkt: VsockPacket,
         muxer: VsockMuxer,
     }
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     impl Drop for MuxerTestContext {
         fn drop(&mut self) {
             std::fs::remove_file(self.muxer.host_sock_path.as_str()).unwrap();
         }
     }
 
-    #[cfg(not(all(feature = "mshv", feature = "snp")))]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     impl MuxerTestContext {
         fn new(name: &str) -> Self {
             let vsock_test_ctx = VsockTestContext::new();

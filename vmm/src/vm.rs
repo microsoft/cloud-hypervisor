@@ -511,7 +511,7 @@ impl Vm {
         let sev_snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "tdx")]
         let force_iommu = tdx_enabled;
-        #[cfg(all(not(feature = "tdx"), not(feature = "snp")))]
+        #[cfg(all(not(feature = "tdx"), not(feature = "sev_snp")))]
         let force_iommu = false;
         #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
@@ -883,7 +883,7 @@ impl Vm {
         hypervisor: &Arc<dyn hypervisor::Hypervisor>,
         #[cfg(feature = "tdx")] tdx_enabled: bool,
         #[cfg(feature = "sev_snp")] sev_snp_enabled: bool,
-        #[cfg(feature = "snp")] mem_size: u64,
+        #[cfg(feature = "sev_snp")] mem_size: u64,
     ) -> Result<Arc<dyn hypervisor::Vm>> {
         hypervisor.check_required_extensions().unwrap();
 
@@ -2014,7 +2014,7 @@ impl Vm {
         // Do earlier to parallelise with loading kernel
         #[cfg(target_arch = "x86_64")]
         cfg_if::cfg_if! {
-            if #[cfg(feature = "snp")] {
+            if #[cfg(feature = "sev_snp")] {
                 let rsdp_addr =  if self.snp_enabled {
                     None
                 } else {
@@ -3127,7 +3127,7 @@ mod tests {
     }
 }
 
-#[cfg(not(all(feature = "mshv", feature = "snp")))]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 #[test]
 pub fn test_vm() {
     use hypervisor::VmExit;
