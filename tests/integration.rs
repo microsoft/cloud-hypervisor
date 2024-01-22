@@ -7405,7 +7405,6 @@ mod common_parallel {
 
         handle_child_output(r, &output);
     }
-}
 
     #[test]
     #[cfg(target_arch = "x86_64")]
@@ -7609,7 +7608,6 @@ mod common_parallel {
 
         handle_child_output(r, &output);
     }
-}
 
     #[test]
     #[cfg(target_arch = "x86_64")]
