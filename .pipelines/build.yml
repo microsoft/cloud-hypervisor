@@ -1,7 +1,7 @@
 
 variables:
   DEFAULT_BRANCH: msft-main
-  RUST_VERSION: 1.68.1
+  RUST_VERSION: 1.75.0
 
 trigger:
   batch: false
