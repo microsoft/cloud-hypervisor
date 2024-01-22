@@ -23,7 +23,7 @@ use super::defs;
 use super::{Result, VsockError};
 use crate::get_host_address_range;
 use virtio_queue::DescriptorChain;
-use vm_memory::{Address, GuestMemory};
+use vm_memory::GuestMemory;
 use vm_virtio::{AccessPlatform, Translatable};
 
 // The vsock packet header is defined by the C struct:

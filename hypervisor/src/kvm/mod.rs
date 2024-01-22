@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_arch = "aarch64")]
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
-use vm_memory::bitmap::AtomicBitmap;
 use vmm_sys_util::eventfd::EventFd;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
@@ -93,7 +92,6 @@ pub use kvm_ioctls::{Cap, Kvm};
 use std::mem;
 use thiserror::Error;
 use vfio_ioctls::VfioDeviceFd;
-use vm_memory::GuestMemoryAtomic;
 #[cfg(feature = "tdx")]
 use vmm_sys_util::{ioctl::ioctl_with_val, ioctl_ioc_nr, ioctl_iowr_nr};
 ///

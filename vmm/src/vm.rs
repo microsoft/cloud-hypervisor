@@ -826,6 +826,8 @@ impl Vm {
         } else {
             vm_config.lock().unwrap().is_sev_snp_enabled()
         };
+        #[cfg(not(feature = "sev_snp"))]
+        let sev_snp_enabled = false;
 
         let vm = Self::create_hypervisor_vm(
             &hypervisor,
