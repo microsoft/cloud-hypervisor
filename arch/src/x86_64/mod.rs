@@ -790,6 +790,7 @@ pub fn configure_vcpu(
     kvm_hyperv: bool,
     cpu_vendor: CpuVendor,
     topology: Option<(u8, u8, u8)>,
+    #[cfg(feature = "igvm")] vmsa: Option<SevVmsa>,
 ) -> super::Result<()> {
     // Per vCPU CPUID changes; common are handled via generate_common_cpuid()
     let mut cpuid = cpuid;
@@ -853,10 +854,27 @@ pub fn configure_vcpu(
 
     regs::setup_msrs(vcpu).map_err(Error::MsrsConfiguration)?;
     if let Some((kernel_entry_point, guest_memory)) = boot_setup {
-        regs::setup_regs(vcpu, kernel_entry_point.entry_addr.raw_value())
-            .map_err(Error::RegsConfiguration)?;
-        regs::setup_fpu(vcpu).map_err(Error::FpuConfiguration)?;
-        regs::setup_sregs(&guest_memory.memory(), vcpu).map_err(Error::SregsConfiguration)?;
+	    // Safe to unwrap because this method is called after the VM is configured
+	    regs::setup_regs(
+		vcpu,
+		kernel_entry_point.entry_addr.raw_value(),
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::RegsConfiguration)?;
+	    regs::setup_fpu(
+		vcpu,
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::FpuConfiguration)?;
+	    regs::setup_sregs(
+		&guest_memory.memory(),
+		vcpu,
+		#[cfg(feature = "igvm")]
+		vmsa,
+	    )
+	    .map_err(Error::SregsConfiguration)?;
     }
     interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
     Ok(())
@@ -1445,6 +1463,41 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
+
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Now assigning some memory that is equal to the start of the 32bit memory hole.
+        let mem_size = 3328 << 20;
+        let arch_mem_regions = arch_memory_regions(mem_size);
+        let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
+            .iter()
+            .filter(|r| r.2 == RegionType::Ram)
+            .map(|r| (r.0, r.1))
+            .collect();
+        let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         configure_system(
             &gm,

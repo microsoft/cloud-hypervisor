@@ -2086,15 +2086,19 @@ impl DeviceManager {
                 let _ = self.set_raw_mode(&mut out);
                 Some(Box::new(out))
             }
-            ConsoleOutputMode::Off | ConsoleOutputMode::Null => None,
+            ConsoleOutputMode::Off | ConsoleOutputMode::Null | ConsoleOutputMode::Socket => None,
         };
         if serial_config.mode != ConsoleOutputMode::Off {
             let serial = self.add_serial_device(interrupt_manager, serial_writer)?;
             self.serial_manager = match serial_config.mode {
-                ConsoleOutputMode::Pty | ConsoleOutputMode::Tty => {
-                    let serial_manager =
-                        SerialManager::new(serial, self.serial_pty.clone(), serial_config.mode)
-                            .map_err(DeviceManagerError::CreateSerialManager)?;
+                ConsoleOutputMode::Pty | ConsoleOutputMode::Tty | ConsoleOutputMode::Socket => {
+                    let serial_manager = SerialManager::new(
+                        serial,
+                        self.serial_pty.clone(),
+                        serial_config.mode,
+                        serial_config.socket,
+                    )
+                    .map_err(DeviceManagerError::CreateSerialManager)?;
                     if let Some(mut serial_manager) = serial_manager {
                         serial_manager
                             .start_thread(
@@ -2170,6 +2174,17 @@ impl DeviceManager {
         devices.append(&mut self.make_vdpa_devices()?);
 
         Ok(devices)
+    }
+
+    // Cache whether aio is supported to avoid checking for very block device
+    fn aio_is_supported(&mut self) -> bool {
+        if let Some(supported) = self.aio_supported {
+            return supported;
+        }
+
+        let supported = block_aio_is_supported();
+        self.aio_supported = Some(supported);
+        supported
     }
 
     // Cache whether io_uring is supported to avoid probing for very block device
@@ -2255,12 +2270,21 @@ impl DeviceManager {
                 ImageType::FixedVhd => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
-                    if !disk_cfg.disable_io_uring && self.io_uring_is_supported() {
+                    if cfg!(feature = "io_uring")
+                        && !disk_cfg.disable_io_uring
+                        && self.io_uring_is_supported()
+                    {
                         info!("Using asynchronous fixed VHD disk file (io_uring)");
-                        Box::new(
-                            FixedVhdDiskAsync::new(file)
-                                .map_err(DeviceManagerError::CreateFixedVhdDiskAsync)?,
-                        ) as Box<dyn DiskFile>
+
+                        #[cfg(not(feature = "io_uring"))]
+                        unreachable!("Checked in if statement above");
+                        #[cfg(feature = "io_uring")]
+                        {
+                            Box::new(
+                                FixedVhdDiskAsync::new(file)
+                                    .map_err(DeviceManagerError::CreateFixedVhdDiskAsync)?,
+                            ) as Box<dyn DiskFile>
+                        }
                     } else {
                         info!("Using synchronous fixed VHD disk file");
                         Box::new(
@@ -2272,9 +2296,21 @@ impl DeviceManager {
                 ImageType::Raw => {
                     // Use asynchronous backend relying on io_uring if the
                     // syscalls are supported.
-                    if !disk_cfg.disable_io_uring && self.io_uring_is_supported() {
+                    if cfg!(feature = "io_uring")
+                        && !disk_cfg.disable_io_uring
+                        && self.io_uring_is_supported()
+                    {
                         info!("Using asynchronous RAW disk file (io_uring)");
-                        Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
+
+                        #[cfg(not(feature = "io_uring"))]
+                        unreachable!("Checked in if statement above");
+                        #[cfg(feature = "io_uring")]
+                        {
+                            Box::new(RawFileDisk::new(file)) as Box<dyn DiskFile>
+                        }
+                    } else if !disk_cfg.disable_aio && self.aio_is_supported() {
+                        info!("Using asynchronous RAW disk file (aio)");
+                        Box::new(RawFileDiskAio::new(file)) as Box<dyn DiskFile>
                     } else {
                         info!("Using synchronous RAW disk file");
                         Box::new(RawFileDiskSync::new(file)) as Box<dyn DiskFile>
@@ -2309,6 +2345,7 @@ impl DeviceManager {
                     self.force_iommu | disk_cfg.iommu,
                     disk_cfg.num_queues,
                     disk_cfg.queue_size,
+                    disk_cfg.serial.clone(),
                     self.seccomp_action.clone(),
                     disk_cfg.rate_limiter_config,
                     self.exit_evt
@@ -2427,8 +2464,8 @@ impl DeviceManager {
                     virtio_devices::Net::new(
                         id.clone(),
                         Some(tap_if_name),
-                        None,
-                        None,
+                        Some(net_cfg.ip),
+                        Some(net_cfg.mask),
                         Some(net_cfg.mac),
                         &mut net_cfg.host_mac,
                         net_cfg.mtu,
@@ -2729,7 +2766,7 @@ impl DeviceManager {
             // The memory needs to be 2MiB aligned in order to support
             // hugepages.
             self.pci_segments[pmem_cfg.pci_segment as usize]
-                .allocator
+                .mem64_allocator
                 .lock()
                 .unwrap()
                 .allocate(
@@ -2744,7 +2781,7 @@ impl DeviceManager {
             // The memory needs to be 2MiB aligned in order to support
             // hugepages.
             let base = self.pci_segments[pmem_cfg.pci_segment as usize]
-                .allocator
+                .mem64_allocator
                 .lock()
                 .unwrap()
                 .allocate(None, size as GuestUsize, Some(0x0020_0000))
@@ -3331,7 +3368,11 @@ impl DeviceManager {
             .allocate_bars(
                 &self.address_manager.allocator,
                 &mut self.pci_segments[segment_id as usize]
-                    .allocator
+                    .mem32_allocator
+                    .lock()
+                    .unwrap(),
+                &mut self.pci_segments[segment_id as usize]
+                    .mem64_allocator
                     .lock()
                     .unwrap(),
                 resources,
@@ -3348,6 +3389,10 @@ impl DeviceManager {
             .map_err(DeviceManagerError::AddPciDevice)?;
 
         self.bus_devices.push(Arc::clone(&bus_device));
+
+        for b in bars.iter() {
+            info!("{:x?} {:x?}", b.addr(), b.size());
+        }
 
         pci_bus
             .register_mapping(
@@ -3644,6 +3689,43 @@ impl DeviceManager {
         self.device_tree.lock().unwrap().insert(id, node);
 
         Ok(pci_device_bdf)
+    }
+
+    fn add_pvpanic_device(
+        &mut self,
+    ) -> DeviceManagerResult<Option<Arc<Mutex<devices::PvPanicDevice>>>> {
+        let id = String::from(PVPANIC_DEVICE_NAME);
+        let pci_segment_id = 0x0_u16;
+
+        info!("Creating pvpanic device {}", id);
+
+        let (pci_segment_id, pci_device_bdf, resources) =
+            self.pci_resources(&id, pci_segment_id)?;
+
+        let snapshot = snapshot_from_id(self.snapshot.as_ref(), id.as_str());
+
+        let pvpanic_device = devices::PvPanicDevice::new(id.clone(), snapshot)
+            .map_err(DeviceManagerError::PvPanicCreate)?;
+
+        let pvpanic_device = Arc::new(Mutex::new(pvpanic_device));
+
+        let new_resources = self.add_pci_device(
+            pvpanic_device.clone(),
+            pvpanic_device.clone(),
+            pci_segment_id,
+            pci_device_bdf,
+            resources,
+        )?;
+
+        let mut node = device_node!(id, pvpanic_device);
+
+        node.resources = new_resources;
+        node.pci_bdf = Some(pci_device_bdf);
+        node.pci_device_handle = None;
+
+        self.device_tree.lock().unwrap().insert(id, node);
+
+        Ok(Some(pvpanic_device))
     }
 
     fn pci_resources(
@@ -4007,7 +4089,11 @@ impl DeviceManager {
             .free_bars(
                 &mut self.address_manager.allocator.lock().unwrap(),
                 &mut self.pci_segments[pci_segment_id as usize]
-                    .allocator
+                    .mem32_allocator
+                    .lock()
+                    .unwrap(),
+                &mut self.pci_segments[pci_segment_id as usize]
+                    .mem64_allocator
                     .lock()
                     .unwrap(),
             )
@@ -4237,7 +4323,7 @@ impl DeviceManager {
         // 1. Users will use direct kernel boot with device tree.
         // 2. Users will use ACPI+UEFI boot.
 
-        // Trigger a GPIO pin 3 event to satisify use case 1.
+        // Trigger a GPIO pin 3 event to satisfy use case 1.
         self.gpio_device
             .as_ref()
             .unwrap()
@@ -4245,7 +4331,7 @@ impl DeviceManager {
             .unwrap()
             .trigger_key(3)
             .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
-        // Trigger a GED power button event to satisify use case 2.
+        // Trigger a GED power button event to satisfy use case 2.
         return self
             .ged_notification_device
             .as_ref()
@@ -4287,6 +4373,16 @@ fn numa_node_id_from_memory_zone_id(numa_nodes: &NumaNodes, memory_zone_id: &str
     }
 
     None
+}
+
+fn numa_node_id_from_pci_segment_id(numa_nodes: &NumaNodes, pci_segment_id: u16) -> u32 {
+    for (numa_node_id, numa_node) in numa_nodes.iter() {
+        if numa_node.pci_segments.contains(&pci_segment_id) {
+            return *numa_node_id;
+        }
+    }
+
+    0
 }
 
 struct TpmDevice {}
@@ -4340,10 +4436,11 @@ impl Aml for DeviceManager {
                 &aml::Name::new(
                     "_CRS".into(),
                     &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
+                        aml::AddressSpaceCacheable::NotCacheable,
                         true,
                         self.acpi_address.0,
                         self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
+                        None,
                     )]),
                 ),
                 // OpRegion and Fields map MMIO range into individual field values

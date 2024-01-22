@@ -21,12 +21,16 @@ use crate::coredump::{
     CpuElf64Writable, DumpState, Elf64Writable, GuestDebuggable, GuestDebuggableError, NoteDescType,
 };
 use crate::cpu;
+#[cfg(feature = "igvm")]
+use crate::cpu::CpuManager;
 use crate::device_manager::{DeviceManager, DeviceManagerError, PtyPair};
 use crate::device_tree::DeviceTree;
 #[cfg(feature = "guest_debug")]
 use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayload};
 #[cfg(feature = "igvm")]
 use crate::igvm::igvm_loader;
+#[cfg(feature = "igvm")]
+use crate::igvm::*;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
@@ -35,6 +39,8 @@ use crate::migration::get_vm_snapshot;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
 use crate::migration::{url_to_path, SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE};
+#[cfg(feature = "igvm")]
+use crate::ArchMemRegion;
 use crate::GuestMemoryMmap;
 use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
@@ -48,6 +54,8 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
+#[cfg(feature = "igvm")]
+use arch::RegionType;
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller;
@@ -74,6 +82,8 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
+#[cfg(feature = "tdx")]
+use std::mem;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
 use std::num::Wrapping;
@@ -516,7 +526,7 @@ impl Vm {
         #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
         #[cfg(feature = "sev_snp")]
-        let snp_enabled = config.lock().unwrap().is_snp_enabled();
+        let snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "sev_snp")]
         let force_iommu = snp_enabled;
 
@@ -823,6 +833,8 @@ impl Vm {
             tdx_enabled,
             #[cfg(feature = "sev_snp")]
             sev_snp_enabled,
+            #[cfg(feature = "sev_snp")]
+            vm_config.lock().unwrap().memory.total_size(),
         )?;
 
         let phys_bits = physical_bits(&hypervisor, vm_config.lock().unwrap().cpus.max_phys_bits);
@@ -854,7 +866,7 @@ impl Vm {
                 None,
                 #[cfg(target_arch = "x86_64")]
                 sgx_epc_config,
-                snp_enabled,
+                sev_snp_enabled,
             )
             .map_err(Error::MemoryManager)?
         };
@@ -900,7 +912,7 @@ impl Vm {
                 // Otherwise SEV_SNP_DISABLED: 0
                 // value of sev_snp_enabled is mapped to SEV_SNP_ENABLED for true or SEV_SNP_DISABLED for false
                 let vm = hypervisor
-                    .create_vm_with_type(u64::from(sev_snp_enabled))
+                    .create_vm_with_type(u64::from(sev_snp_enabled), mem_size)
                     .unwrap();
             } else {
                 let vm = hypervisor.create_vm().unwrap();
@@ -1007,15 +1019,55 @@ impl Vm {
     fn load_igvm(
         igvm: File,
         memory_manager: Arc<Mutex<MemoryManager>>,
-        cpu_manager: Arc<Mutex<cpu::CpuManager>>,
+        cpu_manager: Arc<Mutex<CpuManager>>,
+        #[cfg(feature = "sev_snp")] host_data: &str,
     ) -> Result<EntryPoint> {
-        //TODO: see issue https://github.com/cloud-hypervisor/cloud-hypervisor/issues/5993
-
-        let res = igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager, "")
-            .map_err(Error::IgvmLoad)?;
+        /*
+        BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
+        BIOS-e820: [mem 0x00000000000a0000-0x00000000000fffff] reserved
+        BIOS-e820: [mem 0x0000000000100000-0x00000000001fffff] ACPI data
+        BIOS-e820: [mem 0x0000000001a00000-0x0000000003c79fff] usable
+         */
+        let cur_ram_size = memory_manager.lock().unwrap().current_ram;
+        debug!("current ram size: {:?}", cur_ram_size);
+        let num_cpus = cpu_manager.lock().unwrap().vcpus().len() as u32;
+        let mut arch_mem_regions: Vec<ArchMemRegion> = Vec::new();
+        arch_mem_regions.push(ArchMemRegion {
+            base: 0x00000000e8000000,
+            size: 0x10000000,
+            r_type: RegionType::Reserved,
+        });
+        if cur_ram_size <= 3 * 1024 * 1024 * 1024 {
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x200000,
+                size: (cur_ram_size - 0x200000) as usize,
+                r_type: RegionType::Ram,
+            });
+        } else {
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x200000,
+                size: 3 * 1024 * 1024 * 1024 - 0x200000,
+                r_type: RegionType::Ram,
+            });
+            arch_mem_regions.push(ArchMemRegion {
+                base: 0x0000000100000000,
+                size: (cur_ram_size - 3 * 1024 * 1024 * 1024) as usize,
+                r_type: RegionType::Ram,
+            });
+        }
+        let res = igvm_loader::load_igvm(
+            &igvm,
+            memory_manager,
+            cpu_manager,
+            #[cfg(feature = "sev_snp")]
+            host_data,
+        )
+        .map_err(Error::IgvmLoad)?;
 
         Ok(EntryPoint {
             entry_addr: vm_memory::GuestAddress(res.vmsa.rip),
+            #[cfg(feature = "sev_snp")]
+            vmsa_pfn: res.vmsa_gpa / 4096,
         })
     }
 
@@ -1047,7 +1099,11 @@ impl Vm {
         if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
             // Use the PVH kernel entry point to boot the guest
             info!("Kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
-            Ok(EntryPoint { entry_addr })
+            Ok(EntryPoint {
+                entry_addr: entry_addr,
+                #[cfg(feature = "sev_snp")]
+                vmsa_pfn: 0,
+            })
         } else {
             Err(Error::KernelMissingPvhHeader)
         }
@@ -1057,31 +1113,48 @@ impl Vm {
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
-        #[cfg(feature = "igvm")] cpu_manager: Arc<Mutex<cpu::CpuManager>>,
+        #[cfg(feature = "igvm")] cpu_manager: Arc<Mutex<CpuManager>>,
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
+        let firmware = &payload.firmware;
+        let kernel = &payload.kernel;
+        #[cfg(not(feature = "igvm"))]
+        let igvm: Option<std::path::PathBuf> = None;
         #[cfg(feature = "igvm")]
-        if let Some(_igvm_file) = &payload.igvm {
-            let igvm = File::open(_igvm_file).map_err(Error::IgvmFile)?;
-            return Self::load_igvm(igvm, memory_manager, cpu_manager);
-        }
-        match (
-            &payload.firmware,
-            &payload.kernel,
-            &payload.initramfs,
-            &payload.cmdline,
-        ) {
-            (Some(firmware), None, None, None) => {
-                let firmware = File::open(firmware).map_err(Error::FirmwareFile)?;
-                Self::load_kernel(firmware, None, memory_manager)
+        let igvm = &payload.igvm;
+        #[cfg(feature = "sev_snp")]
+        let host_data = &payload.host_data;
+        #[cfg(feature = "igvm")]
+        {
+            if kernel.is_some() && igvm.is_some() {
+                // Providing both Kernel and IGVM is wrong
+                panic!("Invalid playload: Either igvm or kernel should be provided");
             }
-            (None, Some(kernel), _, _) => {
-                let kernel = File::open(kernel).map_err(Error::KernelFile)?;
-                let cmdline = Self::generate_cmdline(payload)?;
-                Self::load_kernel(kernel, Some(cmdline), memory_manager)
-            }
-            _ => Err(Error::InvalidPayload),
         }
+        if firmware.is_some() {
+            let firmware = File::open(firmware.as_ref().unwrap()).map_err(Error::FirmwareFile)?;
+            return Self::load_kernel(firmware, None, memory_manager);
+        } else if kernel.is_some() {
+            let kernel = File::open(kernel.as_ref().unwrap()).map_err(Error::KernelFile)?;
+            let cmdline = Self::generate_cmdline(payload)?;
+            return Self::load_kernel(kernel, Some(cmdline), memory_manager);
+        } else if igvm.is_some() {
+            #[cfg(feature = "igvm")]
+            {
+                let igvm = File::open(igvm.as_ref().unwrap()).map_err(Error::IgvmFile)?;
+                #[cfg(feature = "sev_snp")]
+                {
+                    if let Some(host_data_str) = host_data {
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                    } else {
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
+                    }
+                }
+                #[cfg(not(feature = "sev_snp"))]
+                return Self::load_igvm(igvm, memory_manager, cpu_manager);
+            }
+        }
+        Err(Error::InvalidPayload)
     }
 
     #[cfg(target_arch = "aarch64")]

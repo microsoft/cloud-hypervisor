@@ -111,6 +111,7 @@ impl VsockPacket {
     pub fn from_tx_virtq_head<M>(
         desc_chain: &mut DescriptorChain<M>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self>
     where
         M: Clone + Deref,
@@ -132,11 +133,15 @@ impl VsockPacket {
         let mut pkt = Self {
             hdr: get_host_address_range(
                 desc_chain.memory(),
-                head.addr()
-                    .translate_gva(access_platform, VSOCK_PKT_HDR_SIZE),
+                head.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    head.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                    Some(&vm.clone()),
+                ),
                 VSOCK_PKT_HDR_SIZE,
             )
-            .ok_or(VsockError::GuestMemory)?,
+            .ok_or(VsockError::GuestMemory)? as *mut u8,
             buf: None,
             buf_size: 0,
         };
@@ -152,53 +157,30 @@ impl VsockPacket {
             return Err(VsockError::InvalidPktLen(pkt.len()));
         }
 
-        // Prior to Linux v6.3 there are two descriptors
-        if head.has_next() {
-            let buf_desc = desc_chain.next().ok_or(VsockError::BufDescMissing)?;
+        // If the packet header showed a non-zero length, there should be a data descriptor here.
+        let buf_desc = desc_chain.next().ok_or(VsockError::BufDescMissing)?;
 
-            // TX data should be read-only.
-            if buf_desc.is_write_only() {
-                return Err(VsockError::UnreadableDescriptor);
-            }
+        // TX data should be read-only.
+        if buf_desc.is_write_only() {
+            return Err(VsockError::UnreadableDescriptor);
+        }
 
-            // The data buffer should be large enough to fit the size of the data, as described by
-            // the header descriptor.
-            if buf_desc.len() < pkt.len() {
-                return Err(VsockError::BufDescTooSmall);
-            }
-            let buf_size = buf_desc.len() as usize;
-            pkt.buf_size = buf_size;
-            pkt.buf = Some(
-                get_host_address_range(
-                    desc_chain.memory(),
-                    buf_desc.addr().translate_gva(access_platform, buf_size),
-                    pkt.buf_size,
-                )
-                .ok_or(VsockError::GuestMemory)?,
-            );
-        } else {
-            let buf_size: usize = head.len() as usize - VSOCK_PKT_HDR_SIZE;
-            pkt.buf_size = buf_size;
-            pkt.buf = Some(
-                get_host_address_range(
-                    desc_chain.memory(),
-                    head.addr()
-                        .checked_add(VSOCK_PKT_HDR_SIZE as u64)
-                        .unwrap()
-                        .translate_gva(access_platform, buf_size),
-                    buf_size,
-                )
-                .ok_or(VsockError::GuestMemory)?,
-            );
+        // The data buffer should be large enough to fit the size of the data, as described by
+        // the header descriptor.
+        if buf_desc.len() < pkt.len() {
+            return Err(VsockError::BufDescTooSmall);
         }
 
         pkt.buf_size = buf_desc.len() as usize;
         pkt.buf = Some(
             get_host_address_range(
                 desc_chain.memory(),
-                buf_desc
-                    .addr()
-                    .translate_gva(access_platform, buf_desc.len() as usize),
+                buf_desc.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    buf_desc.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                    Some(&vm.clone()),
+                ),
                 pkt.buf_size,
             )
             .ok_or(VsockError::GuestMemory)? as *mut u8,
@@ -215,6 +197,7 @@ impl VsockPacket {
     pub fn from_rx_virtq_head<M>(
         desc_chain: &mut DescriptorChain<M>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self>
     where
         M: Clone + Deref,
@@ -233,53 +216,40 @@ impl VsockPacket {
             return Err(VsockError::HdrDescTooSmall(head.len()));
         }
 
-        // Prior to Linux v6.3 there are two descriptors
-        if head.has_next() {
-            let buf_desc = desc_chain.next().ok_or(VsockError::BufDescMissing)?;
-            let buf_size = buf_desc.len() as usize;
-
-            Ok(Self {
-                hdr: get_host_address_range(
-                    desc_chain.memory(),
-                    head.addr()
-                        .translate_gva(access_platform, VSOCK_PKT_HDR_SIZE),
-                    VSOCK_PKT_HDR_SIZE,
-                )
-                .ok_or(VsockError::GuestMemory)?,
-                buf: Some(
-                    get_host_address_range(
-                        desc_chain.memory(),
-                        buf_desc.addr().translate_gva(access_platform, buf_size),
-                        buf_size,
-                    )
-                    .ok_or(VsockError::GuestMemory)?,
-                ),
-                buf_size,
-            })
-        } else {
-            let buf_size: usize = head.len() as usize - VSOCK_PKT_HDR_SIZE;
-            Ok(Self {
-                hdr: get_host_address_range(
-                    desc_chain.memory(),
-                    head.addr()
-                        .translate_gva(access_platform, VSOCK_PKT_HDR_SIZE),
-                    VSOCK_PKT_HDR_SIZE,
-                )
-                .ok_or(VsockError::GuestMemory)?,
-                buf: Some(
-                    get_host_address_range(
-                        desc_chain.memory(),
-                        head.addr()
-                            .checked_add(VSOCK_PKT_HDR_SIZE as u64)
-                            .unwrap()
-                            .translate_gva(access_platform, buf_size),
-                        buf_size,
-                    )
-                    .ok_or(VsockError::GuestMemory)?,
-                ),
-                buf_size,
-            })
+        // All RX descriptor chains should have a header and a data descriptor.
+        if !head.has_next() {
+            return Err(VsockError::BufDescMissing);
         }
+        let buf_desc = desc_chain.next().ok_or(VsockError::BufDescMissing)?;
+        let buf_size = buf_desc.len() as usize;
+
+        Ok(Self {
+            hdr: get_host_address_range(
+                desc_chain.memory(),
+                head.addr().translate_gva_with_vmfd(
+                    access_platform,
+                    head.len() as usize,
+                    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                    Some(&vm.clone()),
+                ),
+                VSOCK_PKT_HDR_SIZE,
+            )
+            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            buf: Some(
+                get_host_address_range(
+                    desc_chain.memory(),
+                    buf_desc.addr().translate_gva_with_vmfd(
+                        access_platform,
+                        buf_desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                        Some(&vm.clone()),
+                    ),
+                    buf_size,
+                )
+                .ok_or(VsockError::GuestMemory)? as *mut u8,
+            ),
+            buf_size,
+        })
     }
 
     /// Provides in-place, byte-slice, access to the vsock packet header.
@@ -430,6 +400,7 @@ impl VsockPacket {
 
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks)]
+#[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
 mod tests {
     use super::super::tests::TestContext;
     use super::*;
@@ -474,8 +445,8 @@ mod tests {
 
     fn set_pkt_len(len: u32, guest_desc: &GuestQDesc, mem: &GuestMemoryMmap) {
         let hdr_gpa = guest_desc.addr.get();
-        let hdr_ptr =
-            get_host_address_range(mem, GuestAddress(hdr_gpa), VSOCK_PKT_HDR_SIZE).unwrap();
+        let hdr_ptr = get_host_address_range(mem, GuestAddress(hdr_gpa), VSOCK_PKT_HDR_SIZE)
+            .unwrap() as *mut u8;
         let len_ptr = unsafe { hdr_ptr.add(HDROFF_LEN) };
 
         LittleEndian::write_u32(unsafe { std::slice::from_raw_parts_mut(len_ptr, 4) }, len);
@@ -549,6 +520,16 @@ mod tests {
             expect_asm_error!(tx, test_ctx, handler_ctx, VsockError::InvalidPktLen(_));
         }
 
+        // Test case:
+        // - packet header advertises some data length; and
+        // - the data descriptor is missing.
+        {
+            create_context!(test_ctx, handler_ctx);
+            set_pkt_len(1024, &handler_ctx.guest_txvq.dtable[0], &test_ctx.mem);
+            handler_ctx.guest_txvq.dtable[0].flags.set(0);
+            expect_asm_error!(tx, test_ctx, handler_ctx, VsockError::BufDescMissing);
+        }
+
         // Test case: error on write-only buf descriptor.
         {
             create_context!(test_ctx, handler_ctx);
@@ -604,9 +585,19 @@ mod tests {
                 .set(VSOCK_PKT_HDR_SIZE as u32 - 1);
             expect_asm_error!(rx, test_ctx, handler_ctx, VsockError::HdrDescTooSmall(_));
         }
+
+        // Test case: RX descriptor chain is missing the packet buffer descriptor.
+        {
+            create_context!(test_ctx, handler_ctx);
+            handler_ctx.guest_rxvq.dtable[0]
+                .flags
+                .set(VRING_DESC_F_WRITE.try_into().unwrap());
+            expect_asm_error!(rx, test_ctx, handler_ctx, VsockError::BufDescMissing);
+        }
     }
 
     #[test]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_packet_hdr_accessors() {
         const SRC_CID: u64 = 1;
         const DST_CID: u64 = 2;
@@ -709,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(feature = "mshv", feature = "sev_snp")))]
     fn test_packet_buf() {
         create_context!(test_ctx, handler_ctx);
         let mut pkt = VsockPacket::from_rx_virtq_head(

@@ -277,11 +277,6 @@ pub enum HypervisorCpuError {
     ///
     #[error("Failed to write to GPA: {0}")]
     GpaWrite(#[source] anyhow::Error),
-    ///
-    /// Error getting CPUID leaf
-    ///
-    #[error("Failed to get CPUID entries: {0}")]
-    GetCpuidVales(#[source] anyhow::Error),
 }
 
 #[derive(Debug)]

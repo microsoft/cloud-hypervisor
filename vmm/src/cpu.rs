@@ -1269,14 +1269,7 @@ impl CpuManager {
             cmp::Ordering::Greater => {
                 let vcpus = self.create_vcpus(desired_vcpus, None)?;
                 for vcpu in vcpus {
-                    self.configure_vcpu(
-                        vcpu,
-                        None,
-                        #[cfg(feature = "igvm")]
-                        None,
-                        #[cfg(feature = "sev_snp")]
-                        0,
-                    )?
+                    self.configure_vcpu(vcpu, None)?
                 }
                 self.activate_vcpus(desired_vcpus, true, None)?;
                 Ok(true)
@@ -1710,7 +1703,7 @@ impl CpuManager {
         // PA or IPA size is determined
         let tcr_ips = extract_bits_64!(tcr_el1, 32, 3);
         #[allow(clippy::identity_op)]
-        let pa_range = extract_bits_64_without_offset!(id_aa64mmfr0_el1, 4);
+        let pa_range = extract_bits_64!(id_aa64mmfr0_el1, 0, 4);
         // The IPA size in TCR_BL1 and PA Range in ID_AA64MMFR0_EL1 should match.
         // To be safe, we use the minimum value if they are different.
         let pa_range = std::cmp::min(tcr_ips, pa_range);
@@ -1743,8 +1736,7 @@ impl CpuManager {
         let descaddrmask = descaddrmask & !indexmask_grainsize;
 
         // Translation table base address
-        #[allow(clippy::identity_op)]	
-        let pa_range = extract_bits_64_without_offset!(id_aa64mmfr0_el1, 4);
+        let mut descaddr: u64 = extract_bits_64_without_offset!(ttbr1_el1, 48);
         // In the case of FEAT_LPA and FEAT_LPA2, the initial translation table
         // address bits [48:51] comes from TTBR1_EL1 bits [2:5].
         if pa_size == 52 {

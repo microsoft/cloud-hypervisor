@@ -25,6 +25,7 @@ use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
+use arch::RegionType;
 #[cfg(feature = "dbus_api")]
 use api::dbus::{DBusApiOptions, DBusApiShutdownChannels};
 use libc::{tcsetattr, termios, EFD_NONBLOCK, SIGINT, SIGTERM, TCSANOW};
@@ -50,6 +51,8 @@ use std::time::Instant;
 use std::{result, thread};
 use thiserror::Error;
 use tracer::trace_scoped;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::{ReadVolatile, WriteVolatile};
 use vm_migration::{protocol::*, Migratable};
@@ -1358,7 +1361,7 @@ impl Vmm {
         #[cfg(not(feature = "sev_snp"))]
         let snp_enabled = false;
         #[cfg(feature = "sev_snp")]
-        let snp_enabled = config.lock().unwrap().is_snp_enabled();
+        let snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         let memory_manager = MemoryManager::new(
             vm,
             &config.lock().unwrap().memory.clone(),
@@ -2239,6 +2242,13 @@ impl Vmm {
 const CPU_MANAGER_SNAPSHOT_ID: &str = "cpu-manager";
 const MEMORY_MANAGER_SNAPSHOT_ID: &str = "memory-manager";
 const DEVICE_MANAGER_SNAPSHOT_ID: &str = "device-manager";
+
+#[derive(Clone, Serialize, Deserialize, Versionize)]
+pub struct ArchMemRegion {
+    base: u64,
+    size: usize,
+    r_type: RegionType,
+}
 
 #[cfg(test)]
 mod unit_tests {

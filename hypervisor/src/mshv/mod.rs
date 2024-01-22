@@ -13,6 +13,8 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
+#[cfg(feature = "sev_snp")]
+use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
 use std::any::Any;
@@ -23,6 +25,9 @@ use vm::DataMatch;
 
 #[cfg(feature = "sev_snp")]
 mod snp_constants;
+use vm_memory::bitmap::AtomicBitmap;
+#[allow(unused_imports)] // MshvVcpu::run() needs this for an unused argument
+use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
@@ -31,7 +36,8 @@ use snp_constants::*;
 
 use crate::{
     ClockData, CpuState, IoEventAddress, IrqRoutingEntry, MpState, UserMemoryRegion,
-    USER_MEMORY_REGION_EXECUTE, USER_MEMORY_REGION_READ, USER_MEMORY_REGION_WRITE,
+    USER_MEMORY_REGION_ADJUST_PERMISSION, USER_MEMORY_REGION_EXECUTE, USER_MEMORY_REGION_READ,
+    USER_MEMORY_REGION_WRITE,
 };
 #[cfg(feature = "sev_snp")]
 use igvm_defs::IGVM_VHS_SNP_ID_BLOCK;
@@ -46,7 +52,14 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{CpuIdEntry, FpuState, MsrEntry};
+use crate::arch::x86::{
+    CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters, StandardRegisters,
+};
+
+#[cfg(feature = "sev_snp")]
+mod bitmap;
+#[cfg(feature = "sev_snp")]
+use bitmap::SimpleAtomicBitmap;
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
@@ -227,14 +240,17 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         HypervisorType::Mshv
     }
 
-    fn create_vm_with_type(&self, vm_type: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
-        let mshv_vm_type: VmType = match VmType::try_from(vm_type) {
-            Ok(vm_type) => vm_type,
-            Err(_) => return Err(hypervisor::HypervisorError::UnsupportedVmType()),
-        };
+    fn create_vm_with_type(
+        &self,
+        vm_type: u64,
+        #[cfg(feature = "sev_snp")] _mem_size: u64,
+    ) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let fd: VmFd;
         loop {
-            match self.mshv.create_vm_with_type(mshv_vm_type) {
+            match self
+                .mshv
+                .create_vm_with_type(VmType::try_from(vm_type).unwrap())
+            {
                 Ok(res) => fd = res,
                 Err(e) => {
                     if e.errno() == libc::EINTR {
@@ -250,11 +266,22 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             break;
         }
 
-        // Set additional partition property for SEV-SNP partition.
-        if mshv_vm_type == VmType::Snp {
+        // Default Microsoft Hypervisor behavior for unimplemented MSR is to
+        // send a fault to the guest if it tries to access it. It is possible
+        // to override this behavior with a more suitable option i.e., ignore
+        // writes from the guest and return zero in attempt to read unimplemented
+        // MSR.
+        fd.set_partition_property(
+            hv_partition_property_code_HV_PARTITION_PROPERTY_UNIMPLEMENTED_MSR_ACTION,
+            hv_unimplemented_msr_action_HV_UNIMPLEMENTED_MSR_ACTION_IGNORE_WRITE_READ_ZERO as u64,
+        )
+        .map_err(|e| hypervisor::HypervisorError::SetPartitionProperty(e.into()))?;
+        let mut snp_enabled = false;
+        if 1 == vm_type {
             let snp_policy = snp::get_default_snp_guest_policy();
-            let vmgexit_offloads = snp::get_default_vmgexit_offload_features();
-            // SAFETY: access union fields
+            snp_enabled = true;
+            let offloaded_features = snp::get_default_vmgexit_offload_features();
+            // SAFETY: Using pre-defined hypercall
             unsafe {
                 debug!(
                     "Setting the partition isolation policy as: 0x{:x}",
@@ -267,11 +294,11 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 .map_err(|e| hypervisor::HypervisorError::SetPartitionProperty(e.into()))?;
                 debug!(
                     "Setting the partition property to enable VMGEXIT offloads as : 0x{:x}",
-                    vmgexit_offloads.as_uint64
+                    offloaded_features.as_uint64
                 );
                 fd.set_partition_property(
                     hv_partition_property_code_HV_PARTITION_PROPERTY_SEV_VMGEXIT_OFFLOADS,
-                    vmgexit_offloads.as_uint64,
+                    offloaded_features.as_uint64,
                 )
                 .map_err(|e| hypervisor::HypervisorError::SetPartitionProperty(e.into()))?;
             }
@@ -368,6 +395,8 @@ pub struct MshvVcpu {
     vm_ops: Option<Arc<dyn vm::VmOps>>,
     #[cfg(feature = "sev_snp")]
     vm_fd: Arc<VmFd>,
+    #[cfg(feature = "sev_snp")]
+    host_access_pages: Arc<SimpleAtomicBitmap>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor

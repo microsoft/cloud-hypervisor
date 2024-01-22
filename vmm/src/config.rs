@@ -106,6 +106,8 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum ValidationError {
+    /// Both console and serial are tty.
+    DoubleTtyMode,
     /// No kernel specified
     KernelMissing,
     /// Missing file value for console
@@ -187,6 +189,7 @@ impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::ValidationError::*;
         match self {
+            DoubleTtyMode => write!(f, "Console mode tty specified for both serial and console"),
             KernelMissing => write!(f, "No kernel specified"),
             ConsoleFileMissing => write!(f, "Path missing when using file console mode"),
             ConsoleSocketPathMissing => write!(f, "Path missing when using socket console mode"),
@@ -400,6 +403,8 @@ pub struct VmParams<'a> {
     pub tpm: Option<&'a str>,
     #[cfg(feature = "igvm")]
     pub igvm: Option<&'a str>,
+    #[cfg(feature = "sev_snp")]
+    pub host_data: Option<&'a str>,
 }
 
 impl<'a> VmParams<'a> {
@@ -455,6 +460,8 @@ impl<'a> VmParams<'a> {
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
         #[cfg(feature = "igvm")]
         let igvm = args.get_one::<String>("igvm").map(|x| x as &str);
+        #[cfg(feature = "sev_snp")]
+        let host_data = args.get_one::<String>("host_data").map(|x| x as &str);
         VmParams {
             cpus,
             memory,
@@ -486,6 +493,8 @@ impl<'a> VmParams<'a> {
             tpm,
             #[cfg(feature = "igvm")]
             igvm,
+            #[cfg(feature = "sev_snp")]
+            host_data,
         }
     }
 }
@@ -2304,6 +2313,8 @@ impl VmConfig {
                 firmware: vm_params.firmware.map(PathBuf::from),
                 #[cfg(feature = "igvm")]
                 igvm: vm_params.igvm.map(PathBuf::from),
+                #[cfg(feature = "sev_snp")]
+                host_data: vm_params.host_data.map(|s| s.to_string()),
             })
         } else {
             None

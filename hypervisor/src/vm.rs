@@ -223,14 +223,30 @@ pub enum HypervisorVmError {
     #[error("Failed to create Vgic: {0}")]
     CreateVgic(#[source] anyhow::Error),
     ///
+    /// Initialize SNP error
+    ///
+    #[error("Failed to initialize SNP: {0}")]
+    SnpInit(#[source] anyhow::Error),
+    ///
     /// Import isolated pages error
     ///
     #[error("Failed to import isolated pages: {0}")]
     ImportIsolatedPages(#[source] anyhow::Error),
+    ///
+    /// Modify GPA host access error
+    ///
+    #[error("Failed to modify GPA host access: {0}")]
+    ModifyGpaHostAccess(#[source] anyhow::Error),
+    ///
     /// Failed to complete isolated import
     ///
     #[error("Failed to complete isolated import: {0}")]
     CompleteIsolatedImport(#[source] anyhow::Error),
+    ///
+    /// PSP issue guest request error
+    ///
+    #[error("Failed to issue PSP guest request: {0}")]
+    PspIssueGuestRequest(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -388,6 +404,35 @@ pub trait Vm: Send + Sync + Any {
         _host_data: &[u8],
         _id_block_enabled: u8,
     ) -> Result<()> {
+        unimplemented!()
+    }
+
+    #[cfg(feature = "sev_snp")]
+    /// Initialize SNP on this VM
+    fn snp_init(&self) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "sev_snp")]
+    fn modify_gpa_host_access(
+        &self,
+        _host_access: u32,
+        _flags: u32,
+        _acquire: u8,
+        _gpas: &[u64],
+    ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "sev_snp")]
+    fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "sev_snp")]
+    fn psp_issue_guest_request(&self, _req_gpa: u64, _rsp_gpa: u64) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "sev_snp")]
+    /// Remove a gpa from ache of pages that host has access to
+    fn remove_gpa_from_host_acess_cache(&self, _gpa: u64) -> Result<()> {
         unimplemented!()
     }
 }

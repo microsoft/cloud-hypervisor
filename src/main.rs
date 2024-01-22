@@ -508,8 +508,6 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         } else {
             (None, None)
         };
-        event_monitor::set_monitor(file).map_err(Error::EventMonitorIo)?;
-    }
 
     let (api_request_sender, api_request_receiver) = channel();
     let api_evt = EventFd::new(EFD_NONBLOCK).map_err(Error::CreateApiEventFd)?;
@@ -685,8 +683,7 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
     let r: Result<(), Error> = (|| {
         let payload_present =
             cmd_arguments.contains_id("kernel") || cmd_arguments.contains_id("firmware");
-	#[cfg(feature = "igvm")]
-        let payload_present = payload_present || toplevel.igvm.is_some();
+
         if payload_present {
             let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
             let vm_config = config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
