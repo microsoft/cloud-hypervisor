@@ -909,58 +909,16 @@ impl Guest {
         )
     }
 
-    pub fn api_create_body(
-        &self,
-        cpu_count: u8,
-        kernel_path: &str,
-        kernel_cmd: &str,
-        is_cvm: bool,
-        host_data: &str,
-    ) -> String {
-        if is_cvm {
-            format!(
-                // Add snp flag under platform element
-                // Add host-data under payload element
-                r#"{{
-                    "platform":{{"sev_snp":true}},
-                    "cpus":{{"boot_vcpus":{},"max_vcpus":{}}},
-                    "payload":{{"igvm":"{}","cmdline": "{}","host_data": "{}"}},
-                    "net":[{{"ip":"{}", "mask":"255.255.255.0", "mac":"{}"}}],
-                    "disks":[{{"path":"{}"}}, {{"path":"{}"}}]
-                }}"#,
-                cpu_count,
-                cpu_count,
-                kernel_path,
-                kernel_cmd,
-                host_data,
-                self.network.host_ip,
-                self.network.guest_mac,
-                self.disk_config
-                    .disk(DiskType::OperatingSystem)
-                    .unwrap()
-                    .as_str(),
-                self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
-            )
-        } else {
-            format!(
-                r#"{{
-                    "cpus":{{"boot_vcpus":{},"max_vcpus":{}}},
-                    "payload":{{"kernel":"{}","cmdline": "{}"}},
-                    "net":[{{"ip":"{}", "mask":"255.255.255.0", "mac":"{}"}}],
-                    "disks":[{{"path":"{}"}}, {{"path":"{}"}}]
-                }}"#,
-                cpu_count,
-                cpu_count,
-                kernel_path,
-                kernel_cmd,
-                self.network.host_ip,
-                self.network.guest_mac,
-                self.disk_config
-                    .disk(DiskType::OperatingSystem)
-                    .unwrap()
-                    .as_str(),
-                self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
-            )
+    pub fn api_create_body(&self, cpu_count: u8, kernel_path: &str, kernel_cmd: &str) -> String {
+        format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"payload\":{{\"kernel\":\"{}\",\"cmdline\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
+                 cpu_count,
+                 cpu_count,
+                 kernel_path,
+                 kernel_cmd,
+                 self.network.host_ip,
+                 self.network.guest_mac,
+                 self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
+                 self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
         }
     }
 

@@ -10,8 +10,6 @@
 
 extern crate test_infra;
 
-use api_client::simple_api_command;
-use api_client::simple_api_full_command;
 use net_util::MacAddr;
 use regex::Regex;
 use std::collections::HashMap;

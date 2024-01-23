@@ -29,8 +29,6 @@ use crate::device_tree::DeviceTree;
 use crate::gdb::{Debuggable, DebuggableError, GdbRequestPayload, GdbResponsePayload};
 #[cfg(feature = "igvm")]
 use crate::igvm::igvm_loader;
-#[cfg(feature = "igvm")]
-use crate::igvm::*;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData,
 };
@@ -82,8 +80,6 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
-#[cfg(feature = "tdx")]
-use std::mem;
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use std::mem::size_of;
 use std::num::Wrapping;
@@ -470,6 +466,7 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    #[cfg(feature = "sev_snp")]
     snp_enabled: bool,
 }
 
@@ -704,6 +701,7 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
+            #[cfg(feature = "sev_snp")]
             snp_enabled,
         })
     }
@@ -1032,7 +1030,6 @@ impl Vm {
          */
         let cur_ram_size = memory_manager.lock().unwrap().current_ram;
         debug!("current ram size: {:?}", cur_ram_size);
-        let num_cpus = cpu_manager.lock().unwrap().vcpus().len() as u32;
         let mut arch_mem_regions: Vec<ArchMemRegion> = Vec::new();
         arch_mem_regions.push(ArchMemRegion {
             base: 0x00000000e8000000,
@@ -1102,7 +1099,7 @@ impl Vm {
             // Use the PVH kernel entry point to boot the guest
             info!("Kernel loaded: entry_addr = 0x{:x}", entry_addr.0);
             Ok(EntryPoint {
-                entry_addr: entry_addr,
+                entry_addr,
                 #[cfg(feature = "sev_snp")]
                 vmsa_pfn: 0,
             })

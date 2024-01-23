@@ -49,9 +49,7 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
 #[cfg(target_arch = "x86_64")]
-use crate::arch::x86::{
-    CpuIdEntry, FpuState, MsrEntry,
-};
+use crate::arch::x86::{CpuIdEntry, FpuState, MsrEntry};
 
 #[cfg(feature = "sev_snp")]
 mod bitmap;
@@ -60,6 +58,7 @@ use bitmap::SimpleAtomicBitmap;
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
+#[cfg(feature = "sev_snp")]
 const ONE_GB: usize = 1024 * 1024 * 1024;
 
 ///
@@ -393,6 +392,7 @@ pub struct MshvVcpu {
     #[cfg(feature = "sev_snp")]
     vm_fd: Arc<VmFd>,
     #[cfg(feature = "sev_snp")]
+    #[allow(dead_code)]
     host_access_pages: Arc<SimpleAtomicBitmap>,
 }
 

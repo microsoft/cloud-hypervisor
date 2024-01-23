@@ -86,6 +86,7 @@ impl SimpleAtomicBitmap {
             self.map[n >> 6].set_bit(n & INDEX_MASK);
         }
     }
+    #[allow(dead_code)]
     pub fn reset_bits_range(&self, start_bit: usize, len: usize) {
         if len == 0 {
             return;

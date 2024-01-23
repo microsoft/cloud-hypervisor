@@ -59,10 +59,6 @@ use hypervisor::kvm::{TdxExitDetails, TdxExitStatus};
 #[cfg(target_arch = "x86_64")]
 use hypervisor::CpuVendor;
 use hypervisor::{CpuState, HypervisorCpuError, HypervisorType, VmExit, VmOps};
-#[cfg(feature = "igvm")]
-use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
-#[cfg(feature = "igvm")]
-use igvm_parser::snp_defs::SevVmsa;
 use libc::{c_void, siginfo_t};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use linux_loader::elf::Elf64_Nhdr;
@@ -462,7 +458,6 @@ impl Snapshottable for Vcpu {
 }
 
 pub struct CpuManager {
-    hypervisor_type: HypervisorType,
     config: CpusConfig,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     interrupt_controller: Option<Arc<Mutex<dyn InterruptController>>>,
@@ -708,7 +703,6 @@ impl CpuManager {
         let dynamic = true;
 
         Ok(Arc::new(Mutex::new(CpuManager {
-            hypervisor_type,
             config: config.clone(),
             interrupt_controller: None,
             #[cfg(target_arch = "x86_64")]
