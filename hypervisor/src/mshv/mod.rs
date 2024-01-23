@@ -25,9 +25,6 @@ use vm::DataMatch;
 
 #[cfg(feature = "sev_snp")]
 mod snp_constants;
-use vm_memory::bitmap::AtomicBitmap;
-#[allow(unused_imports)] // MshvVcpu::run() needs this for an unused argument
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
@@ -53,7 +50,7 @@ use std::os::unix::io::AsRawFd;
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86::{
-    CpuIdEntry, FpuState, LapicState, MsrEntry, SpecialRegisters, StandardRegisters,
+    CpuIdEntry, FpuState, MsrEntry,
 };
 
 #[cfg(feature = "sev_snp")]
