@@ -1478,8 +1478,7 @@ mod tests {
         .unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
-        let mem_size = 3328 << 20;
-        let arch_mem_regions = arch_memory_regions(mem_size);
+        let arch_mem_regions = arch_memory_regions();
         let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
             .iter()
             .filter(|r| r.2 == RegionType::Ram)
