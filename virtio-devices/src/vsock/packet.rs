@@ -141,7 +141,7 @@ impl VsockPacket {
                 ),
                 VSOCK_PKT_HDR_SIZE,
             )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            .ok_or(VsockError::GuestMemory)?,
             buf: None,
             buf_size: 0,
         };
@@ -183,7 +183,7 @@ impl VsockPacket {
                 ),
                 pkt.buf_size,
             )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            .ok_or(VsockError::GuestMemory)?,
         );
 
         Ok(pkt)
@@ -234,7 +234,7 @@ impl VsockPacket {
                 ),
                 VSOCK_PKT_HDR_SIZE,
             )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            .ok_or(VsockError::GuestMemory)?,
             buf: Some(
                 get_host_address_range(
                     desc_chain.memory(),
@@ -246,7 +246,7 @@ impl VsockPacket {
                     ),
                     buf_size,
                 )
-                .ok_or(VsockError::GuestMemory)? as *mut u8,
+                .ok_or(VsockError::GuestMemory)?,
             ),
             buf_size,
         })
@@ -445,8 +445,8 @@ mod tests {
 
     fn set_pkt_len(len: u32, guest_desc: &GuestQDesc, mem: &GuestMemoryMmap) {
         let hdr_gpa = guest_desc.addr.get();
-        let hdr_ptr = get_host_address_range(mem, GuestAddress(hdr_gpa), VSOCK_PKT_HDR_SIZE)
-            .unwrap() as *mut u8;
+        let hdr_ptr =
+            get_host_address_range(mem, GuestAddress(hdr_gpa), VSOCK_PKT_HDR_SIZE).unwrap();
         let len_ptr = unsafe { hdr_ptr.add(HDROFF_LEN) };
 
         LittleEndian::write_u32(unsafe { std::slice::from_raw_parts_mut(len_ptr, 4) }, len);

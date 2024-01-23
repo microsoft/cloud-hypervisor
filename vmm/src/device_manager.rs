@@ -2072,9 +2072,9 @@ impl DeviceManager {
                     self.config.lock().unwrap().serial.file = Some(pty.path.clone());
                     self.serial_pty = Some(Arc::new(Mutex::new(pty)));
                 } else {
-                    let (main, mut sub, path) =
+                    let (main, sub, path) =
                         create_pty().map_err(DeviceManagerError::SerialPtyOpen)?;
-                    self.set_raw_mode(&mut sub)
+                    self.set_raw_mode(&sub)
                         .map_err(DeviceManagerError::SetPtyRaw)?;
                     self.config.lock().unwrap().serial.file = Some(path.clone());
                     self.serial_pty = Some(Arc::new(Mutex::new(PtyPair { main, path })));
@@ -2082,8 +2082,8 @@ impl DeviceManager {
                 None
             }
             ConsoleOutputMode::Tty => {
-                let mut out = stdout();
-                let _ = self.set_raw_mode(&mut out);
+                let out = stdout();
+                let _ = self.set_raw_mode(&out);
                 Some(Box::new(out))
             }
             ConsoleOutputMode::Off | ConsoleOutputMode::Null | ConsoleOutputMode::Socket => None,
