@@ -461,7 +461,7 @@ impl<'a> VmParams<'a> {
         #[cfg(feature = "igvm")]
         let igvm = args.get_one::<String>("igvm").map(|x| x as &str);
         #[cfg(feature = "sev_snp")]
-        let host_data = args.get_one::<String>("host_data").map(|x| x as &str);
+        let host_data = args.get_one::<String>("host-data").map(|x| x as &str);
         VmParams {
             cpus,
             memory,

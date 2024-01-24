@@ -453,8 +453,8 @@ fn create_app(default_vcpus: String, default_memory: String, default_rng: String
     );
     #[cfg(feature = "sev_snp")]
     let app = app.arg(
-        Arg::new("host_data")
-            .long("host_data")
+        Arg::new("host-data")
+            .long("host-data")
             .help("Host data string.")
             .num_args(1)
             .group("vm-config"),
