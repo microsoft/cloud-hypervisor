@@ -273,7 +273,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         )
         .map_err(|e| hypervisor::HypervisorError::SetPartitionProperty(e.into()))?;
         let mut snp_enabled = false;
-        if 1 == vm_type {
+        if VmType::try_from(vm_type).unwrap() == VmType::Snp {
             let snp_policy = snp::get_default_snp_guest_policy();
             snp_enabled = true;
             let offloaded_features = snp::get_default_vmgexit_offload_features();
