@@ -104,6 +104,7 @@ pub fn load_igvm(
     memory_manager: Arc<Mutex<MemoryManager>>,
     cpu_manager: Arc<Mutex<CpuManager>>,
     cmdline: &str,
+    #[cfg(feature = "sev_snp")] host_data: &str,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::default();
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
@@ -114,6 +115,16 @@ pub fn load_igvm(
 
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
+
+    let mut host_data_contents = [0; 32];
+    #[cfg(feature = "sev_snp")]
+    {
+        if !host_data.is_empty() {
+            assert_eq!(64, host_data.len());
+            hex::decode_to_slice(host_data, &mut host_data_contents as &mut [u8])
+                .expect("Failed to decode host data");
+        }
+    }
 
     let igvm_file = IgvmFile::new_from_binary(&file_contents, Some(IsolationType::Snp))
         .map_err(Error::InvalidIgvmFile)?;
@@ -369,6 +380,82 @@ pub fn load_igvm(
         }
     }
 
-    debug!("Dumping the contents of VMSA page: {:x?}", loaded_info.vmsa);
+    #[cfg(feature = "sev_snp")]
+    {
+        use std::time::Instant;
+
+        let now = Instant::now();
+
+        memory_manager
+            .lock()
+            .unwrap()
+            .allocate_address_space()
+            .map_err(Error::MemoryManager)?;
+
+        let elapsed = now.elapsed();
+
+        info!("Time it took to allocate address space {:.2?}", elapsed);
+
+        let now = Instant::now();
+
+        gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
+
+        let gpas_grouped = gpas
+            .iter()
+            .fold(Vec::<Vec<GpaPages>>::new(), |mut acc, gpa| {
+                if let Some(last_vec) = acc.last_mut() {
+                    if last_vec[0].page_type == gpa.page_type {
+                        last_vec.push(*gpa);
+                        return acc;
+                    }
+                }
+                acc.push(vec![*gpa]);
+                acc
+            });
+
+        for group in gpas_grouped.iter() {
+            info!(
+                "Importing {} page{}",
+                group.len(),
+                if group.len() > 1 { "s" } else { "" }
+            );
+            let v: Vec<u64> = group.iter().map(|gpa| gpa.gpa >> 12).collect();
+            memory_manager
+                .lock()
+                .unwrap()
+                .vm
+                .import_isolated_pages(
+                    group[0].page_type,
+                    hv_isolated_page_size_HV_ISOLATED_PAGE_SIZE_4KB,
+                    &v,
+                )
+                .map_err(Error::ImportIsolatedPages)?;
+        }
+
+        let elapsed = now.elapsed();
+
+        info!(
+            "Time it took to for hashing pages {:.2?} and page_count {:?}",
+            elapsed,
+            gpas.len()
+        );
+
+        let now = Instant::now();
+        // Call Complete Isolated Import since we are done importing isolated pages
+        memory_manager
+            .lock()
+            .unwrap()
+            .vm
+            .complete_isolated_import(loaded_info.snp_id_block, &host_data_contents, 1)
+            .map_err(Error::CompleteIsolatedImport)?;
+
+        let elapsed = now.elapsed();
+
+        info!(
+            "Time it took to for launch complete command  {:.2?}",
+            elapsed
+        );
+    }
+    debug!("Loaded info xcr0: {:0x}", loaded_info.vmsa.xcr0);
     Ok(loaded_info)
 }

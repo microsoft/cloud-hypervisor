@@ -385,6 +385,8 @@ impl Vcpu {
             kvm_hyperv,
             self.vendor,
             topology,
+            #[cfg(feature = "igvm")]
+            None,
         )
         .map_err(Error::VcpuConfiguration)?;
 

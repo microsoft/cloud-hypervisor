@@ -1058,6 +1058,7 @@ impl Vm {
             &igvm,
             memory_manager,
             cpu_manager,
+            "",
             #[cfg(feature = "sev_snp")]
             host_data,
         )
