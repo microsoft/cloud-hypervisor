@@ -7,6 +7,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+const INDEX_MASK: usize = 63;
+
 // Define a trait for atomic bitmap operation
 pub trait AtomicBitmapOps {
     // Size in total number of bits can be stored
@@ -53,5 +55,39 @@ impl AtomicBitmapOps for AtomicU64 {
 
     fn capacity() -> usize {
         8 * mem::size_of::<AtomicU64>()
+    }
+}
+
+#[derive(Debug)]
+pub struct SimpleAtomicBitmap {
+    map: Vec<AtomicU64>,
+    size: usize,
+    map_size: usize,
+}
+
+impl Default for SimpleAtomicBitmap {
+    fn default() -> Self {
+        SimpleAtomicBitmap::new(0)
+    }
+}
+
+#[allow(clippy::len_without_is_empty)]
+impl SimpleAtomicBitmap {
+    pub fn new(size: usize) -> Self {
+        let map_size = size / AtomicU64::capacity() + usize::from(size % AtomicU64::capacity() > 0);
+        let map: Vec<AtomicU64> = (0..map_size).map(|_| AtomicU64::new(0)).collect();
+        SimpleAtomicBitmap {
+            map,
+            size,
+            map_size,
+        }
+    }
+
+    pub fn new_with_bytes(size: usize, page_size: usize) -> Self {
+        let mut num_pages = size / page_size;
+        if size % page_size > 0 {
+            num_pages += 1;
+        }
+        SimpleAtomicBitmap::new(num_pages)
     }
 }
