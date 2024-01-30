@@ -1575,39 +1575,47 @@ impl vm::Vm for MshvVm {
         addr: &IoEventAddress,
         datamatch: Option<DataMatch>,
     ) -> vm::Result<()> {
-        let addr = &mshv_ioctls::IoEventAddress::from(*addr);
-        debug!(
-            "register_ioevent fd {} addr {:x?} datamatch {:?}",
-            fd.as_raw_fd(),
-            addr,
-            datamatch
-        );
-        if let Some(dm) = datamatch {
-            match dm {
-                vm::DataMatch::DataMatch32(mshv_dm32) => self
-                    .fd
-                    .register_ioevent(fd, addr, mshv_dm32)
-                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
-                vm::DataMatch::DataMatch64(mshv_dm64) => self
-                    .fd
-                    .register_ioevent(fd, addr, mshv_dm64)
-                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+        if !self.snp_enabled {
+            let addr = &mshv_ioctls::IoEventAddress::from(*addr);
+            debug!(
+                "register_ioevent fd {} addr {:x?} datamatch {:?}",
+                fd.as_raw_fd(),
+                addr,
+                datamatch
+            );
+            if let Some(dm) = datamatch {
+                match dm {
+                    vm::DataMatch::DataMatch32(mshv_dm32) => self
+                        .fd
+                        .register_ioevent(fd, addr, mshv_dm32)
+                        .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+                    vm::DataMatch::DataMatch64(mshv_dm64) => self
+                        .fd
+                        .register_ioevent(fd, addr, mshv_dm64)
+                        .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
+                }
+            } else {
+                self.fd
+                    .register_ioevent(fd, addr, NoDatamatch)
+                    .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
             }
         } else {
-            self.fd
-                .register_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
+            Ok(())
         }
     }
 
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
-        let addr = &mshv_ioctls::IoEventAddress::from(*addr);
-        debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
+        if !self.snp_enabled {
+            let addr = &mshv_ioctls::IoEventAddress::from(*addr);
+            debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
-        self.fd
-            .unregister_ioevent(fd, addr, NoDatamatch)
-            .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+            self.fd
+                .unregister_ioevent(fd, addr, NoDatamatch)
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+        } else {
+            Ok(())
+        }
     }
 
     /// Creates a guest physical memory region.
