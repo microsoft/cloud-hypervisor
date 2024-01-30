@@ -1,0 +1,49 @@
+# Template task to prepare the build environment. Things might be not needed
+# if an image has these baked in.
+
+steps:
+  - bash: |
+      set -e
+      set -x
+
+      export DEBIAN_FRONTEND=noninteractive
+
+      if [ "$(uname -m)" == "aarch64" ]; then
+              # Backports repo is required to pull QEMU >= 6.2. On the aarch64 side
+              # qemu-x86_64 is needed, as currently ArtifactTool doesn't run natively
+              # anywhere except x86_64. The particular QEMU version and the ArtifactTool
+              # are needed, so then universal package feed artifacts can be accessed.
+              command -v qemu-x86_64 || (
+                sudo add-apt-repository -y ppa:canonical-server/server-backports;
+                sudo apt-get update;
+                sudo apt install -y build-essential qemu-user
+              )
+              qemu-x86_64 --version
+      fi
+
+      sudo apt install -y \
+        git gcc bison make libtool sudo \
+        bc bison cifs-utils cpio dosfstools g++ gawk gdisk genisoimage \
+        kpartx libfuse-dev libreadline-dev libssl-dev locales make psmisc python3-pip \
+        qemu-utils rpm rpm2cpio tar texinfo uuid-dev wget rsync software-properties-common \
+        shellcheck jq findutils unzip flake8
+
+      command -v go || (
+        sudo apt -y install golang-1.18-go;
+        sudo ln -vsf /usr/lib/go-1.18/bin/go /usr/bin/go
+      )
+      go version
+
+      command -v az || (sudo pip3 install azure-cli;
+        az extension add --name azure-devops)
+      az version
+
+      command -v rustc || (
+        curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail "https://sh.rustup.rs" | sh -s -- -y --default-toolchain none
+        $HOME/.cargo/bin/rustup toolchain install $(RUST_VERSION) --profile minimal --no-self-update
+        $HOME/.cargo/bin/rustup component add rust-src clippy rustfmt
+        for i in $HOME/.cargo/bin/*; do sudo ln -s $i /usr/bin/; done
+      )
+      rustc --version
+
+    displayName: 'Prepare Ubuntu environment'
