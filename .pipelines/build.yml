@@ -1,0 +1,118 @@
+
+variables:
+  DEFAULT_BRANCH: msft-main
+  RUST_VERSION: 1.75.0
+
+trigger:
+  batch: false
+  tags:
+    include:
+      - v*
+  branches:
+    include:
+      - $(DEFAULT_BRANCH)
+
+pr:
+  autoCancel: false
+  drafts: false
+  branches:
+    include:
+      - $(DEFAULT_BRANCH)
+
+stages:
+  - stage:
+    jobs:
+      - job: CH_BUILD
+
+        timeoutInMinutes: 30
+
+        strategy:
+          matrix:
+            'x86_64 cargo build':
+              AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
+              BUILD_CMD: 'cargo build'
+            'x86_64 cargo build --no-default-features --features "mshv,kvm"':
+              AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
+              BUILD_CMD: 'cargo build --no-default-features --features "mshv,kvm"'
+            'x86_64 cargo build --no-default-features --features "mshv,kvm,sev_snp"':
+              AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
+              BUILD_CMD: 'cargo build --no-default-features --features "mshv,kvm,sev_snp"'
+            'x86_64 cargo build --package vhost_user_net':
+              AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
+              BUILD_CMD: 'cargo build --package vhost_user_net'
+            'x86_64 cargo build --package vhost_user_block':
+              AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-2'
+              BUILD_CMD: 'cargo build --package vhost_user_block'
+            'aarch64 cargo build':
+              AGENT_POOL: 'lsg-virt-aarch64-1es-agent-pool-2'
+              BUILD_CMD: 'cargo build --all'
+            'aarch64 cargo build --package vhost_user_net':
+              AGENT_POOL: 'lsg-virt-aarch64-1es-agent-pool-2'
+              BUILD_CMD: 'cargo build --all --package vhost_user_net'
+            'aarch64 cargo build --package vhost_user_block':
+              AGENT_POOL: 'lsg-virt-aarch64-1es-agent-pool-2'
+              BUILD_CMD: 'cargo build --all --package vhost_user_block'
+        pool:
+          name: $(AGENT_POOL)
+        steps:
+        - checkout: self
+          persistCredentials: true
+        - template: templates/ubuntu-20.04-build.yml
+        - bash: |
+            set -e
+            set -x
+
+            $(BUILD_CMD) --release
+          displayName: Build
+
+      - job: CH_FMT
+
+        timeoutInMinutes: 30
+        pool:
+          name: lsg-virt-amd64-1es-agent-pool-3
+
+        steps:
+        - checkout: self
+          persistCredentials: true
+        - template: templates/ubuntu-20.04-build.yml
+        - bash: |
+            set -e
+            set -x
+
+            cargo fmt -- --check
+
+        - bash: test -z "$(git status --porcelain)"
+
+      - job: CH_CLIPPY
+
+        timeoutInMinutes: 30
+        strategy:
+          matrix:
+            "clippy default":
+                    CLIPPY_ARGS: "--locked --all --all-targets --tests --examples -- -D warnings -D clippy::undocumented_unsafe_blocks"
+            "clippy default + guest_debug":
+                    CLIPPY_ARGS: '--locked --all --all-targets --tests --examples --features "guest_debug" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy default + tracing":
+                    CLIPPY_ARGS: '--locked --all --all-targets --tests --examples --features "tracing" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy mshv":
+                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy mshv + kvm":
+                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv,kvm" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy kvm + tdx":
+                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "tdx,kvm" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy mshv + kvm + sev_snp ":
+                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv,kvm,sev_snp" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+        pool:
+          name: lsg-virt-amd64-1es-agent-pool-2
+        steps:
+        - checkout: self
+          persistCredentials: true
+        - template: templates/ubuntu-20.04-build.yml
+        - bash: |
+            set -e
+            set -x
+
+            cargo clippy $(CLIPPY_ARGS)
+
+        - bash: test -z "$(git status --porcelain)"
+
