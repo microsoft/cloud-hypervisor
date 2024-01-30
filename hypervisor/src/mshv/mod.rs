@@ -246,9 +246,11 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             break;
         }
 
+        let mut snp_enabled = false;
         // Set additional partition property for SEV-SNP partition.
         if mshv_vm_type == VmType::Snp {
             let snp_policy = snp::get_default_snp_guest_policy();
+            snp_enabled = true;
             let vmgexit_offloads = snp::get_default_vmgexit_offload_features();
             // SAFETY: access union fields
             unsafe {
@@ -302,6 +304,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
+            snp_enabled,
         }))
     }
 
@@ -1452,6 +1455,7 @@ pub struct MshvVm {
     fd: Arc<VmFd>,
     msrs: Vec<MsrEntry>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
+    snp_enabled: bool,
 }
 
 impl MshvVm {
