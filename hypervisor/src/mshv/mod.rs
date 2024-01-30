@@ -684,6 +684,19 @@ impl cpu::Vcpu for MshvVcpu {
                         info.interrupt_vector.try_into().unwrap(),
                     ))
                 }
+                hv_message_type_HVMSG_UNACCEPTED_GPA => {
+                    let info = x.to_memory_info().unwrap();
+                    let gva = info.guest_virtual_address;
+                    let gpa = info.guest_physical_address;
+                    let gb = gpa / (ONE_GB as u64);
+                    debug!(
+                        "Unaccepted GPA: GVA: {:x}, GPA: {:x} Gigabyte: {:?}",
+                        gva, gpa, gb
+                    );
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit: Unaccepted GPA"
+                    )))
+                }
                 #[cfg(feature = "sev_snp")]
                 hv_message_type_HVMSG_X64_SEV_VMGEXIT_INTERCEPT => {
                     let info = x.to_vmg_intercept_info().unwrap();
