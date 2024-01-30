@@ -22,6 +22,9 @@ use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
 
 #[cfg(feature = "sev_snp")]
+mod bitmap;
+
+#[cfg(feature = "sev_snp")]
 mod snp_constants;
 // x86_64 dependencies
 #[cfg(target_arch = "x86_64")]
