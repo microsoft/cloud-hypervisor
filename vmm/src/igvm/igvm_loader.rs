@@ -386,18 +386,6 @@ pub fn load_igvm(
 
         let now = Instant::now();
 
-        memory_manager
-            .lock()
-            .unwrap()
-            .allocate_address_space()
-            .map_err(Error::MemoryManager)?;
-
-        let elapsed = now.elapsed();
-
-        info!("Time it took to allocate address space {:.2?}", elapsed);
-
-        let now = Instant::now();
-
         gpas.sort_by(|a, b| a.gpa.cmp(&b.gpa));
 
         let gpas_grouped = gpas
