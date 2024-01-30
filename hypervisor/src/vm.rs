@@ -231,6 +231,12 @@ pub enum HypervisorVmError {
     ///
     #[error("Failed to complete isolated import: {0}")]
     CompleteIsolatedImport(#[source] anyhow::Error),
+    ///
+    /// Modify GPA host access error
+    ///
+    #[cfg(feature = "sev_snp")]
+    #[error("Failed to modify GPA host access: {0}")]
+    ModifyGpaHostAccess(#[source] anyhow::Error),
 }
 ///
 /// Result type for returning from a function
@@ -388,6 +394,10 @@ pub trait Vm: Send + Sync + Any {
         _host_data: [u8; 32],
         _id_block_enabled: u8,
     ) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(feature = "sev_snp")]
+    fn gain_page_access(&self, _gpa: u64, _size: u32) -> Result<()> {
         unimplemented!()
     }
 }
