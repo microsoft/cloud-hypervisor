@@ -230,7 +230,11 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         HypervisorType::Mshv
     }
 
-    fn create_vm_with_type(&self, vm_type: u64) -> hypervisor::Result<Arc<dyn crate::Vm>> {
+    fn create_vm_with_type(
+        &self,
+        vm_type: u64,
+        #[cfg(feature = "sev_snp")] _mem_size: u64,
+    ) -> hypervisor::Result<Arc<dyn crate::Vm>> {
         let mshv_vm_type: VmType = match VmType::try_from(vm_type) {
             Ok(vm_type) => vm_type,
             Err(_) => return Err(hypervisor::HypervisorError::UnsupportedVmType()),
@@ -325,9 +329,16 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// let hypervisor = MshvHypervisor::new().unwrap();
     /// let vm = hypervisor.create_vm().unwrap();
     /// ```
-    fn create_vm(&self) -> hypervisor::Result<Arc<dyn vm::Vm>> {
+    fn create_vm(
+        &self,
+        #[cfg(feature = "sev_snp")] mem_size: u64,
+    ) -> hypervisor::Result<Arc<dyn vm::Vm>> {
         let vm_type = 0;
-        self.create_vm_with_type(vm_type)
+        self.create_vm_with_type(
+            vm_type,
+            #[cfg(feature = "sev_snp")]
+            mem_size,
+        )
     }
     ///
     /// Get the supported CpuID
