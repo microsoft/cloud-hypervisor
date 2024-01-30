@@ -1619,20 +1619,22 @@ impl vm::Vm for MshvVm {
                     .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into())),
             }
         } else {
-            self.fd
-                .register_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::RegisterIoEvent(e.into()))
+            Ok(())
         }
     }
 
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
-        let addr = &mshv_ioctls::IoEventAddress::from(*addr);
-        debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
+        if !self.snp_enabled {
+            let addr = &mshv_ioctls::IoEventAddress::from(*addr);
+            debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
-        self.fd
-            .unregister_ioevent(fd, addr, NoDatamatch)
-            .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+            self.fd
+                .unregister_ioevent(fd, addr, NoDatamatch)
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
+        } else {
+            Ok(())
+        }
     }
 
     /// Creates a guest physical memory region.
