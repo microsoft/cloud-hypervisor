@@ -13,6 +13,8 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
+#[cfg(feature = "sev_snp")]
+use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
 use std::any::Any;
@@ -23,6 +25,8 @@ use vm::DataMatch;
 
 #[cfg(feature = "sev_snp")]
 mod bitmap;
+#[cfg(feature = "sev_snp")]
+use bitmap::SimpleAtomicBitmap;
 
 #[cfg(feature = "sev_snp")]
 mod snp_constants;
@@ -54,6 +58,7 @@ use crate::arch::x86::{CpuIdEntry, FpuState, MsrEntry};
 
 const DIRTY_BITMAP_CLEAR_DIRTY: u64 = 0x4;
 const DIRTY_BITMAP_SET_DIRTY: u64 = 0x8;
+const ONE_GB: usize = 1024 * 1024 * 1024;
 
 ///
 /// Export generically-named wrappers of mshv-bindings for Unix-based platforms
@@ -311,12 +316,24 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         }
         let vm_fd = Arc::new(fd);
 
+        #[cfg(feature = "sev_snp")]
+        let mem_size_for_bitmap = if _mem_size as usize > 3 * ONE_GB {
+            _mem_size as usize + ONE_GB
+        } else {
+            _mem_size as usize
+        };
+
         Ok(Arc::new(MshvVm {
             fd: vm_fd,
             msrs,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "sev_snp")]
             sev_snp_enabled: mshv_vm_type == VmType::Snp,
+            #[cfg(feature = "sev_snp")]
+            host_access_pages: Arc::new(SimpleAtomicBitmap::new_with_bytes(
+                mem_size_for_bitmap,
+                HV_PAGE_SIZE as usize,
+            )),
         }))
     }
 
@@ -366,6 +383,8 @@ pub struct MshvVcpu {
     vm_ops: Option<Arc<dyn vm::VmOps>>,
     #[cfg(feature = "sev_snp")]
     vm_fd: Arc<VmFd>,
+    #[cfg(feature = "sev_snp")]
+    host_access_pages: Arc<SimpleAtomicBitmap>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -1487,6 +1506,8 @@ pub struct MshvVm {
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
     #[cfg(feature = "sev_snp")]
     sev_snp_enabled: bool,
+    #[cfg(feature = "sev_snp")]
+    host_access_pages: Arc<SimpleAtomicBitmap>,
 }
 
 impl MshvVm {
@@ -1586,6 +1607,8 @@ impl vm::Vm for MshvVm {
             vm_ops,
             #[cfg(feature = "sev_snp")]
             vm_fd: self.fd.clone(),
+            #[cfg(feature = "sev_snp")]
+            host_access_pages: self.host_access_pages.clone(),
         };
         Ok(Arc::new(vcpu))
     }
