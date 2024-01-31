@@ -103,6 +103,12 @@ pub trait AccessPlatform: Send + Sync + Debug {
 pub trait Translatable {
     fn translate_gva(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self;
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self;
 }
 
 impl Translatable for GuestAddress {
@@ -111,6 +117,19 @@ impl Translatable for GuestAddress {
     }
     fn translate_gpa(&self, access_platform: Option<&Arc<dyn AccessPlatform>>, len: usize) -> Self {
         GuestAddress(self.0.translate_gpa(access_platform, len))
+    }
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self {
+        GuestAddress(self.0.translate_gva_with_vmfd(
+            access_platform,
+            len,
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+            vm,
+        ))
     }
 }
 
@@ -127,6 +146,31 @@ impl Translatable for u64 {
             access_platform.translate_gpa(*self, len as u64).unwrap()
         } else {
             *self
+        }
+    }
+    fn translate_gva_with_vmfd(
+        &self,
+        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        len: usize,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
+    ) -> Self {
+        cfg_if::cfg_if! {
+            if #[cfg(all(feature = "mshv", feature = "sev_snp"))] {
+                if let Some(_vm) = vm {
+                    _vm.gain_page_access(*self, len  as u32).unwrap();
+                }
+                if let Some(access_platform) = access_platform {
+                    access_platform.translate_gva(*self, len as u64).unwrap()
+                } else {
+                    *self
+                }
+            } else {
+                if let Some(access_platform) = access_platform {
+                    access_platform.translate_gva(*self, len as u64).unwrap()
+                } else {
+                    *self
+                }
+            }
         }
     }
 }
