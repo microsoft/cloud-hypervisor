@@ -34,9 +34,9 @@ stages:
             'x86_64 cargo build --no-default-features --features "mshv,kvm"':
               AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
               BUILD_CMD: 'cargo build --no-default-features --features "mshv,kvm"'
-            'x86_64 cargo build --no-default-features --features "mshv,kvm,sev_snp"':
+            'x86_64 cargo build --no-default-features --features "mshv,kvm,sev_snp,igvm"':
               AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
-              BUILD_CMD: 'cargo build --no-default-features --features "mshv,kvm,sev_snp"'
+              BUILD_CMD: 'cargo build --no-default-features --features "mshv,kvm,sev_snp,igvm"'
             'x86_64 cargo build --package vhost_user_net':
               AGENT_POOL: 'lsg-virt-amd64-1es-agent-pool-1'
               BUILD_CMD: 'cargo build --package vhost_user_net'
@@ -100,8 +100,8 @@ stages:
                     CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv,kvm" -- -D warnings -D clippy::undocumented_unsafe_blocks'
             "clippy kvm + tdx":
                     CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "tdx,kvm" -- -D warnings -D clippy::undocumented_unsafe_blocks'
-            "clippy mshv + kvm + sev_snp ":
-                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv,kvm,sev_snp" -- -D warnings -D clippy::undocumented_unsafe_blocks'
+            "clippy mshv + kvm + sev_snp + igvm":
+                    CLIPPY_ARGS: '--locked --all --all-targets --no-default-features --tests --examples --features "mshv,kvm,sev_snp,igvm" -- -D warnings -D clippy::undocumented_unsafe_blocks'
         pool:
           name: lsg-virt-amd64-1es-agent-pool-2
         steps:
