@@ -6,6 +6,8 @@ edition = "2021"
 
 [features]
 default = []
+mshv = []
+sev_snp = []
 
 [dependencies]
 log = "0.4.20"
