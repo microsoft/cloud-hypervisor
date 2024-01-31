@@ -2558,6 +2558,8 @@ dependencies = [
 name = "vm-virtio"
 version = "0.1.0"
 dependencies = [
+ "cfg-if",
+ "hypervisor",
  "log",
  "virtio-queue",
  "vm-memory",
