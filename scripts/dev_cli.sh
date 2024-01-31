@@ -20,12 +20,20 @@ CLH_CARGO_TARGET="${CLH_BUILD_DIR}/cargo_target"
 CLH_DOCKERFILE="${CLH_SCRIPTS_DIR}/../resources/Dockerfile"
 CLH_CTR_BUILD_DIR="/tmp/cloud-hypervisor/ctr-build"
 CLH_INTEGRATION_WORKLOADS="${HOME}/workloads"
+SRC_IGVM_FILES_PATH="/usr/share/cloud-hypervisor/cvm"
+DEST_IGVM_FILES_PATH="$CLH_INTEGRATION_WORKLOADS/igvm_files"
+
+# Host paths for MS-IGVM and MS-VMLINUX
+MS_CLH_FILES_PATH="/usr/share/cloud-hypervisor"
+# Assign VMLINUX_PATH to default MSFT kernel if unset and if USE_MS_GUEST_KERNEL is set
+VMLINUX_PATH="${VMLINUX_PATH:-${USE_MS_GUEST_KERNEL:+${MS_CLH_FILES_PATH}/vmlinux.bin}}"
 
 # Container paths
 CTR_CLH_ROOT_DIR="/cloud-hypervisor"
 CTR_CLH_CARGO_BUILT_DIR="${CTR_CLH_ROOT_DIR}/build"
 CTR_CLH_CARGO_TARGET="${CTR_CLH_CARGO_BUILT_DIR}/cargo_target"
 CTR_CLH_INTEGRATION_WORKLOADS="/root/workloads"
+CTR_IGVM_FILES_PATH="/igvm_files"
 
 # Container networking option
 CTR_CLH_NET="bridge"
@@ -166,6 +174,20 @@ process_volumes_args() {
         fi
         exported_volumes="$exported_volumes --volume $var"
     done
+}
+
+process_igvm_files() {
+    src=$1
+    dest=$2
+
+    if [ -d $src ]; then
+        say "Moving IGVM files from $src to $dest"
+        cp $src/* $dest
+    else
+        say_err "IGVM File path '$src' not found on host"
+        exit 1
+    fi
+
 }
 
 cmd_help() {
@@ -419,7 +441,23 @@ cmd_tests() {
             ./scripts/run_unit_tests.sh "$@" || fix_dir_perms $? || exit $?
     fi
 
+    if [ -n "$VMLINUX_PATH" ]; then
+	    echo "Using custom kernel: $VMLINUX_PATH"
+	    if [ ! -f "$VMLINUX_PATH" ]; then
+		    echo "File not found: $VMLINUX_PATH"
+		    exit 1
+	    fi
+	    sudo cp $VMLINUX_PATH $CLH_INTEGRATION_WORKLOADS/vmlinux
+    fi
+
     if [ "$integration" = true ]; then
+        mkdir -p $DEST_IGVM_FILES_PATH
+
+        # for cvm guest run please do, export GUEST_VM_TYPE=CVM
+        if [ "$GUEST_VM_TYPE" = "CVM" ]; then
+            process_igvm_files $SRC_IGVM_FILES_PATH $DEST_IGVM_FILES_PATH
+        fi
+
         say "Running integration tests for $target..."
         $DOCKER_RUNTIME run \
             --workdir "$CTR_CLH_ROOT_DIR" \
@@ -433,11 +471,13 @@ cmd_tests() {
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" \
             ${exported_volumes:+"$exported_volumes"} \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --volume "$DEST_IGVM_FILES_PATH:$CTR_IGVM_FILES_PATH" \
             --env USER="root" \
             --env BUILD_TARGET="$target" \
             --env RUSTFLAGS="$rustflags" \
             --env TARGET_CC="$target_cc" \
             --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
+            --env GUEST_VM_TYPE="${GUEST_VM_TYPE}" \
             "$CTR_IMAGE" \
             dbus-run-session ./scripts/run_integration_tests_"$(uname -m)".sh "$@" || fix_dir_perms $? || exit $?
     fi
@@ -558,6 +598,13 @@ cmd_tests() {
     fi
 
     if [ "$metrics" = true ]; then
+        mkdir -p $DEST_IGVM_FILES_PATH
+
+        # for cvm guest run please do, export GUEST_VM_TYPE=CVM
+        if [ "$GUEST_VM_TYPE" = "CVM" ]; then
+            process_igvm_files $SRC_IGVM_FILES_PATH $DEST_IGVM_FILES_PATH
+        fi
+
         say "Generating performance metrics for $target..."
         $DOCKER_RUNTIME run \
             --workdir "$CTR_CLH_ROOT_DIR" \
@@ -571,12 +618,14 @@ cmd_tests() {
             --volume "$CLH_ROOT_DIR:$CTR_CLH_ROOT_DIR" \
             ${exported_volumes:+"$exported_volumes"} \
             --volume "$CLH_INTEGRATION_WORKLOADS:$CTR_CLH_INTEGRATION_WORKLOADS" \
+            --volume "$DEST_IGVM_FILES_PATH:$CTR_IGVM_FILES_PATH" \
             --env USER="root" \
             --env BUILD_TARGET="$target" \
             --env RUSTFLAGS="$rustflags" \
             --env TARGET_CC="$target_cc" \
             --env RUST_BACKTRACE="${RUST_BACKTRACE}" \
             --env AUTH_DOWNLOAD_TOKEN="$AUTH_DOWNLOAD_TOKEN" \
+            --env GUEST_VM_TYPE="${GUEST_VM_TYPE}" \
             "$CTR_IMAGE" \
             ./scripts/run_metrics.sh "$@" || fix_dir_perms $? || exit $?
     fi

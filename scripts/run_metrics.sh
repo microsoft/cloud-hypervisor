@@ -81,7 +81,10 @@ if [ "${TEST_ARCH}" == "aarch64" ]; then
 fi
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
-build_custom_linux
+VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
+if [ ! -f "$VMLINUX_IMAGE" ]; then
+    build_custom_linux
+fi
 
 CFLAGS=""
 if [[ "${BUILD_TARGET}" == "${TEST_ARCH}-unknown-linux-musl" ]]; then
@@ -89,12 +92,19 @@ if [[ "${BUILD_TARGET}" == "${TEST_ARCH}-unknown-linux-musl" ]]; then
     CFLAGS="-I /usr/include/${TEST_ARCH}-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --features mshv --all --release --target "$BUILD_TARGET"
+cargo build --features "kvm,mshv,igvm,sev_snp" --all --release --target $BUILD_TARGET
+
+# Get the total memory in gb
+TOTAL_MEM_GB=$(free -g | grep Mem | awk '{print $2}')
 
 # setup hugepages
-HUGEPAGESIZE=$(grep Hugepagesize /proc/meminfo | awk '{print $2}')
-PAGE_NUM=$((12288 * 1024 / HUGEPAGESIZE))
-echo "$PAGE_NUM" | sudo tee /proc/sys/vm/nr_hugepages
+HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`
+if [ "$TOTAL_MEM_GB" -lt 256 ]; then
+    PAGE_NUM=`echo $((12288 * 1024 / $HUGEPAGESIZE))`
+else
+    PAGE_NUM=`echo $((128 * 1024 * 1024 / $HUGEPAGESIZE))`
+fi
+echo $PAGE_NUM | sudo tee /proc/sys/vm/nr_hugepages
 sudo chmod a+rwX /dev/hugepages
 
 if [ -n "$test_filter" ]; then
