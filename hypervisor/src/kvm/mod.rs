@@ -895,7 +895,7 @@ impl vm::Vm for KvmVm {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    #[cfg(feature = "snp")]
+    #[cfg(feature = "sev_snp")]
     fn gain_page_access(&self, _gpa: u64, _size: u32) -> vm::Result<()> {
         Ok(())
     }
