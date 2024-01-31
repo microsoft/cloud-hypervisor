@@ -6,6 +6,8 @@ edition = "2021"
 
 [features]
 default = []
+mshv = ["hypervisor"]
+sev_snp = ["hypervisor"]
 
 [dependencies]
 anyhow = "1.0.79"
@@ -15,6 +17,7 @@ byteorder = "1.4.3"
 epoll = "4.3.3"
 event_monitor = { path = "../event_monitor" }
 libc = "0.2.153"
+hypervisor = { path = "../hypervisor", optional = true}
 log = "0.4.20"
 net_gen = { path = "../net_gen" }
 net_util = { path = "../net_util" }

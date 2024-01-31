@@ -1937,7 +1937,7 @@ impl vm::Vm for MshvVm {
 
     #[cfg(feature = "sev_snp")]
     fn gain_page_access(&self, gpa: u64, size: u32) -> vm::Result<()> {
-        if !self.snp_enabled {
+        if !self.sev_snp_enabled {
             return Ok(());
         }
 
