@@ -6,6 +6,7 @@
 #![allow(clippy::undocumented_unsafe_blocks)]
 
 use once_cell::sync::Lazy;
+use rand::{thread_rng, Rng};
 use serde_json::Value;
 use ssh2::Session;
 use std::env;
@@ -914,16 +915,58 @@ impl Guest {
         )
     }
 
-    pub fn api_create_body(&self, cpu_count: u8, kernel_path: &str, kernel_cmd: &str) -> String {
-        format! {"{{\"cpus\":{{\"boot_vcpus\":{},\"max_vcpus\":{}}},\"payload\":{{\"kernel\":\"{}\",\"cmdline\": \"{}\"}},\"net\":[{{\"ip\":\"{}\", \"mask\":\"255.255.255.0\", \"mac\":\"{}\"}}], \"disks\":[{{\"path\":\"{}\"}}, {{\"path\":\"{}\"}}]}}",
-                 cpu_count,
-                 cpu_count,
-                 kernel_path,
-                 kernel_cmd,
-                 self.network.host_ip,
-                 self.network.guest_mac,
-                 self.disk_config.disk(DiskType::OperatingSystem).unwrap().as_str(),
-                 self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
+    pub fn api_create_body(
+        &self,
+        cpu_count: u8,
+        kernel_path: &str,
+        kernel_cmd: &str,
+        is_cvm: bool,
+        host_data: &str,
+    ) -> String {
+        if is_cvm {
+            format!(
+                // Add snp flag under platform element
+                // Add host-data under payload element
+                r#"{{
+                    "platform":{{"snp":true}},
+                    "cpus":{{"boot_vcpus":{},"max_vcpus":{}}},
+                    "payload":{{"igvm":"{}","cmdline": "{}","host_data": "{}"}},
+                    "net":[{{"ip":"{}", "mask":"255.255.255.0", "mac":"{}"}}],
+                    "disks":[{{"path":"{}"}}, {{"path":"{}"}}]
+                }}"#,
+                cpu_count,
+                cpu_count,
+                kernel_path,
+                kernel_cmd,
+                host_data,
+                self.network.host_ip,
+                self.network.guest_mac,
+                self.disk_config
+                    .disk(DiskType::OperatingSystem)
+                    .unwrap()
+                    .as_str(),
+                self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
+            )
+        } else {
+            format!(
+                r#"{{
+                    "cpus":{{"boot_vcpus":{},"max_vcpus":{}}},
+                    "payload":{{"kernel":"{}","cmdline": "{}"}},
+                    "net":[{{"ip":"{}", "mask":"255.255.255.0", "mac":"{}"}}],
+                    "disks":[{{"path":"{}"}}, {{"path":"{}"}}]
+                }}"#,
+                cpu_count,
+                cpu_count,
+                kernel_path,
+                kernel_cmd,
+                self.network.host_ip,
+                self.network.guest_mac,
+                self.disk_config
+                    .disk(DiskType::OperatingSystem)
+                    .unwrap()
+                    .as_str(),
+                self.disk_config.disk(DiskType::CloudInit).unwrap().as_str(),
+            )
         }
     }
 
@@ -1724,4 +1767,52 @@ pub fn measure_virtio_net_latency(guest: &Guest, test_timeout: u32) -> Result<Ve
     // Parse the ethr latency test output
     let content = fs::read(log_file).map_err(Error::EthrLogFile)?;
     parse_ethr_latency_output(&content)
+}
+
+pub fn get_env_var(var_name: &str) -> Option<String> {
+    env::var(var_name).ok()
+}
+
+pub fn is_guest_vm_type_cvm() -> bool {
+    get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string())
+}
+pub fn generate_host_data() -> String {
+    let mut rng = thread_rng();
+    let hex_string: String = (0..64)
+        .map(|_| rng.gen_range(0..=15))
+        .map(|num| format!("{:x}", num))
+        .collect();
+
+    hex_string
+}
+
+pub fn extend_guest_cmd<'a>(
+    mut cmd: GuestCommand<'a>,
+    kernel: &'a str,
+    cmdline: Option<&'a str>,
+    igvm: &'a str,
+    platform: Option<&'a str>,
+) -> GuestCommand<'a> {
+    if is_guest_vm_type_cvm() {
+        cmd.args(["--igvm", igvm]);
+        cmd.args(["--host-data", generate_host_data().as_str()]);
+
+        if let Some(platform_arg) = platform {
+            cmd.args(["--platform", &format!("{platform_arg},snp=on")]);
+        } else {
+            cmd.args(["--platform", "snp=on"]);
+        }
+    } else {
+        cmd.args(["--kernel", kernel]);
+
+        if let Some(cmdline_arg) = cmdline {
+            cmd.args(["--cmdline", cmdline_arg]);
+        }
+
+        if let Some(platform_arg) = platform {
+            cmd.args(["--platform", platform_arg]);
+        }
+    }
+
+    cmd
 }
