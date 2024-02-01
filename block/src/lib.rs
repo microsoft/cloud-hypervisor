@@ -244,6 +244,7 @@ impl Request {
     pub fn parse(
         desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
         access_platform: Option<&Arc<dyn AccessPlatform>>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> result::Result<Request, Error> {
         let hdr_desc = desc_chain
             .next()
@@ -258,9 +259,12 @@ impl Request {
             return Err(Error::UnexpectedWriteOnlyDescriptor);
         }
 
-        let hdr_desc_addr = hdr_desc
-            .addr()
-            .translate_gva(access_platform, hdr_desc.len() as usize);
+        let hdr_desc_addr = hdr_desc.addr().translate_gva_with_vmfd(
+            access_platform,
+            hdr_desc.len() as usize,
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+            vm,
+        );
 
         let mut req = Request {
             request_type: request_type(desc_chain.memory(), hdr_desc_addr)?,
@@ -302,8 +306,12 @@ impl Request {
                 }
 
                 req.data_descriptors.push((
-                    desc.addr()
-                        .translate_gva(access_platform, desc.len() as usize),
+                    desc.addr().translate_gva_with_vmfd(
+                        access_platform,
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                        vm,
+                    ),
                     desc.len(),
                 ));
                 desc = desc_chain
@@ -326,9 +334,12 @@ impl Request {
             return Err(Error::DescriptorLengthTooSmall);
         }
 
-        req.status_addr = status_desc
-            .addr()
-            .translate_gva(access_platform, status_desc.len() as usize);
+        req.status_addr = status_desc.addr().translate_gva_with_vmfd(
+            access_platform,
+            status_desc.len() as usize,
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+            vm,
+        );
 
         Ok(req)
     }
@@ -397,6 +408,7 @@ impl Request {
         disk_image: &mut dyn AsyncIo,
         serial: &[u8],
         user_data: u64,
+        #[cfg(feature = "sev_snp")] vm: Option<&Arc<dyn hypervisor::Vm>>,
     ) -> result::Result<bool, ExecuteError> {
         let sector = self.sector;
         let request_type = self.request_type;
@@ -408,6 +420,12 @@ impl Request {
             if *data_len == 0 {
                 continue;
             }
+            data_addr.translate_gva_with_vmfd(
+                None,
+                *data_len as usize,
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                vm,
+            );
             let mut top: u64 = u64::from(*data_len) / SECTOR_SIZE;
             if u64::from(*data_len) % SECTOR_SIZE != 0 {
                 top += 1;
@@ -472,6 +490,12 @@ impl Request {
         match request_type {
             RequestType::In => {
                 for (data_addr, data_len) in &self.data_descriptors {
+                    data_addr.translate_gva_with_vmfd(
+                        None,
+                        *data_len as usize,
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                        vm,
+                    );
                     mem.get_slice(*data_addr, *data_len as usize)
                         .map_err(ExecuteError::GetHostAddress)?
                         .bitmap()

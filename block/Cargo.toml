@@ -7,10 +7,13 @@ authors = ["The Cloud Hypervisor Authors", "The Chromium OS Authors"]
 [features]
 default = []
 io_uring = ["dep:io-uring"]
+mshv = []
+sev_snp = ["hypervisor"]
 
 [dependencies]
 byteorder = "1.4.3"
 crc-any = "2.4.4"
+hypervisor = { path = "../hypervisor", optional = true }
 io-uring = { version = "0.6.2", optional = true }
 libc = "0.2.153"
 log = "0.4.20"
