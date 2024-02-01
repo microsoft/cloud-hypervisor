@@ -239,8 +239,12 @@ impl ConsoleEpollHandler {
                 .memory()
                 .write_slice(
                     &source_slice[..],
-                    desc.addr()
-                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                    desc.addr().translate_gva_with_vmfd(
+                        self.access_platform.as_ref(),
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                        Some(&self.vm.clone()),
+                    ),
                 )
                 .map_err(Error::GuestMemoryWrite)?;
 
@@ -275,8 +279,12 @@ impl ConsoleEpollHandler {
                 desc_chain
                     .memory()
                     .write_volatile_to(
-                        desc.addr()
-                            .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                        desc.addr().translate_gva_with_vmfd(
+                            self.access_platform.as_ref(),
+                            desc.len() as usize,
+                            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                            Some(&self.vm.clone()),
+                        ),
                         &mut buf,
                         desc.len() as usize,
                     )
@@ -631,6 +639,7 @@ impl VersionMapped for ConsoleState {}
 
 impl Console {
     /// Create a new virtio console device
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         endpoint: Endpoint,
