@@ -2537,6 +2537,8 @@ impl DeviceManager {
                         .map(|s| s.to_versioned_state())
                         .transpose()
                         .map_err(DeviceManagerError::RestoreGetState)?,
+                    #[cfg(feature = "sev_snp")]
+                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioBlock)?,
             ));
