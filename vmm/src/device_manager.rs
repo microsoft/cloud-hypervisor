@@ -2635,6 +2635,8 @@ impl DeviceManager {
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
+                    #[cfg(feature = "sev_snp")]
+                    self.address_manager.vm.clone(),
                 ) {
                     Ok(vun_device) => vun_device,
                     Err(e) => {
@@ -2675,6 +2677,8 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
+                        #[cfg(feature = "sev_snp")]
+                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
@@ -2695,6 +2699,8 @@ impl DeviceManager {
                     net_cfg.offload_tso,
                     net_cfg.offload_ufo,
                     net_cfg.offload_csum,
+                    #[cfg(feature = "sev_snp")]
+                    self.address_manager.vm.clone(),
                 )
                 .map_err(DeviceManagerError::CreateVirtioNet)?;
 
@@ -2726,6 +2732,8 @@ impl DeviceManager {
                         net_cfg.offload_tso,
                         net_cfg.offload_ufo,
                         net_cfg.offload_csum,
+                        #[cfg(feature = "sev_snp")]
+                        self.address_manager.vm.clone(),
                     )
                     .map_err(DeviceManagerError::CreateVirtioNet)?,
                 ))
