@@ -1337,6 +1337,7 @@ version = "0.1.0"
 dependencies = [
  "epoll",
  "getrandom",
+ "hypervisor",
  "libc",
  "log",
  "net_gen",
