@@ -57,6 +57,8 @@ struct RngEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     access_platform: Option<Arc<dyn AccessPlatform>>,
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl RngEpollHandler {
@@ -76,8 +78,12 @@ impl RngEpollHandler {
             let len = desc_chain
                 .memory()
                 .read_volatile_from(
-                    desc.addr()
-                        .translate_gva(self.access_platform.as_ref(), desc.len() as usize),
+                    desc.addr().translate_gva_with_vmfd(
+                        self.access_platform.as_ref(),
+                        desc.len() as usize,
+                        #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                        Some(&self.vm.clone()),
+                    ),
                     &mut self.random_file,
                     desc.len() as usize,
                 )
@@ -156,6 +162,8 @@ pub struct Rng {
     random_file: Option<File>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
+    #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 #[derive(Versionize)]
@@ -175,6 +183,7 @@ impl Rng {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
         state: Option<RngState>,
+        #[cfg(all(feature = "mshv", feature = "sev_snp"))] vm: Arc<dyn hypervisor::Vm>,
     ) -> io::Result<Rng> {
         let random_file = File::open(path)?;
 
@@ -206,6 +215,8 @@ impl Rng {
             random_file: Some(random_file),
             seccomp_action,
             exit_evt,
+            #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+            vm,
         })
     }
 
@@ -275,6 +286,8 @@ impl VirtioDevice for Rng {
                 kill_evt,
                 pause_evt,
                 access_platform: self.common.access_platform.clone(),
+                #[cfg(all(feature = "mshv", feature = "sev_snp"))]
+                vm: self.vm.clone(),
             };
 
             let paused = self.common.paused.clone();
