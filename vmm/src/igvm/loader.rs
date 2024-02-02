@@ -107,7 +107,6 @@ impl Loader {
                 debug!("Importing pages failed due to MemoryError");
                 Error::MemoryUnavailable
             })?;
-
         // A page could be partially filled and the rest of the content is zero.
         // Our IGVM generation tool only fills data here if there is some data without zeros.
         // Rest of them are padded. We only write data without padding and compare whether we
