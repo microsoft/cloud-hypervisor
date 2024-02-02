@@ -43,6 +43,77 @@ pub enum VirtioDeviceType {
     Unknown = 0xFF,
 }
 
+/* The standard layout for the ring is a continuous chunk of memory which looks
+ * like this.  We assume num is a power of 2.
+ *
+ * struct vring
+ * {
+ *	// The actual descriptors (16 bytes each)
+ *	struct vring_desc desc[num];
+ *
+ *	// A ring of available descriptor heads with free-running index.
+ *	__virtio16 avail_flags;
+ *	__virtio16 avail_idx;
+ *	__virtio16 available[num];
+ *	__virtio16 used_event_idx;
+ *
+ *	// Padding to the next align boundary.
+ *	char pad[];
+ *
+ *	// A ring of used descriptor heads with free-running index.
+ *	__virtio16 used_flags;
+ *	__virtio16 used_idx;
+ *	struct vring_used_elem used[num];
+ *	__virtio16 avail_event_idx;
+ * };
+ * struct vring_desc {
+ *	__virtio64 addr;
+ *	__virtio32 len;
+ *	__virtio16 flags;
+ *	__virtio16 next;
+ * };
+ *
+ * struct vring_avail {
+ *	__virtio16 flags;
+ *	__virtio16 idx;
+ *	__virtio16 ring[];
+ * };
+ *
+ * // u32 is used here for ids for padding reasons.
+ * struct vring_used_elem {
+ *	// Index of start of used descriptor chain.
+ *	__virtio32 id;
+ *	// Total length of the descriptor chain which was used (written to)
+ *	__virtio32 len;
+ * };
+*
+ * Kernel header used for this reference: include/uapi/linux/virtio_ring.h
+ * Virtio Spec: https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html
+ *
+ */
+#[cfg(feature = "sev_snp")]
+const VRING_DESC_ELEMENT_SIZE: usize = 16;
+#[cfg(feature = "sev_snp")]
+const VRING_AVAIL_ELEMENT_SIZE: usize = 2;
+#[cfg(feature = "sev_snp")]
+const VRING_USED_ELEMENT_SIZE: usize = 8;
+#[cfg(feature = "sev_snp")]
+pub enum VringType {
+    Desc,
+    Avail,
+    Used,
+}
+
+#[cfg(feature = "sev_snp")]
+pub fn get_vring_size(t: VringType, queue_size: u16) -> usize {
+    let (length_except_ring, element_size) = match t {
+        VringType::Desc => (0, VRING_DESC_ELEMENT_SIZE),
+        VringType::Avail => (6, VRING_AVAIL_ELEMENT_SIZE),
+        VringType::Used => (6, VRING_USED_ELEMENT_SIZE),
+    };
+    length_except_ring + element_size * queue_size as usize
+}
+
 impl From<u32> for VirtioDeviceType {
     fn from(t: u32) -> Self {
         match t {
@@ -176,7 +247,10 @@ impl Translatable for u64 {
 }
 
 /// Helper for cloning a Queue since QueueState doesn't derive Clone
-pub fn clone_queue(queue: &Queue) -> Queue {
+pub fn clone_queue(
+    queue: &Queue,
+    #[cfg(feature = "sev_snp")] vm: Option<&Arc<dyn hypervisor::Vm>>,
+) -> Queue {
     let mut q = Queue::new(queue.max_size()).unwrap();
 
     q.set_next_avail(queue.next_avail());
@@ -184,6 +258,18 @@ pub fn clone_queue(queue: &Queue) -> Queue {
     q.set_event_idx(queue.event_idx_enabled());
     q.set_size(queue.size());
     q.set_ready(queue.ready());
+
+    #[cfg(feature = "sev_snp")]
+    if let Some(_vm) = vm {
+        let desc_a = GuestAddress(queue.desc_table());
+        let avail_a = GuestAddress(queue.avail_ring());
+        let ring_a = GuestAddress(queue.used_ring());
+
+        desc_a.translate_gva_with_vmfd(None, get_vring_size(VringType::Desc, queue.size()), vm);
+        avail_a.translate_gva_with_vmfd(None, get_vring_size(VringType::Avail, queue.size()), vm);
+        ring_a.translate_gva_with_vmfd(None, get_vring_size(VringType::Used, queue.size()), vm);
+    }
+
     q.try_set_desc_table_address(GuestAddress(queue.desc_table()))
         .unwrap();
     q.try_set_avail_ring_address(GuestAddress(queue.avail_ring()))

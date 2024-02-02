@@ -374,6 +374,8 @@ pub struct VirtioPciDevice {
 
     // Pending activations
     pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
+    #[cfg(feature = "sev_snp")]
+    vm: Arc<dyn hypervisor::Vm>,
 }
 
 impl VirtioPciDevice {
@@ -392,6 +394,7 @@ impl VirtioPciDevice {
         dma_handler: Option<Arc<dyn ExternalDmaMapping>>,
         pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
         snapshot: Option<Snapshot>,
+        #[cfg(feature = "sev_snp")] vm: Arc<dyn hypervisor::Vm>,
     ) -> Result<Self> {
         let mut locked_device = device.lock().unwrap();
         let mut queue_evts = Vec::new();
@@ -590,6 +593,8 @@ impl VirtioPciDevice {
             activate_evt,
             dma_handler,
             pending_activations,
+            #[cfg(feature = "sev_snp")]
+            vm,
         };
 
         if let Some(msix_config) = &virtio_pci_device.msix_config {
@@ -794,7 +799,11 @@ impl VirtioPciDevice {
 
             queues.push((
                 queue_index,
-                vm_virtio::clone_queue(queue),
+                vm_virtio::clone_queue(
+                    queue,
+                    #[cfg(feature = "sev_snp")]
+                    Some(&self.vm.clone()),
+                ),
                 self.queue_evts[queue_index].try_clone().unwrap(),
             ));
         }
