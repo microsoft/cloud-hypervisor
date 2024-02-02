@@ -82,6 +82,10 @@ impl Loader {
         acceptance: BootPageAcceptance,
         data: &[u8],
     ) -> Result<(), Error> {
+        if data.is_empty() {
+            self.bytes_written += page_count * HV_PAGE_SIZE;
+            return Ok(());
+        }
         // Page count must be larger or equal to data.
         if page_count * HV_PAGE_SIZE < data.len() as u64 {
             return Err(Error::DataTooLarge);
@@ -98,10 +102,10 @@ impl Loader {
                 debug!("Importing pages failed due to MemoryError");
                 Error::MemoryUnavailable
             })?;
-        if bytes_written != (page_count * HV_PAGE_SIZE) as usize {
+        if bytes_written != data.len() {
             return Err(Error::ImportPagesFailed);
         }
-        self.bytes_written += bytes_written as u64;
+        self.bytes_written += page_count * HV_PAGE_SIZE;
         Ok(())
     }
 
