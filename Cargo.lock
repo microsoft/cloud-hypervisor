@@ -455,6 +455,7 @@ dependencies = [
  "net_util",
  "once_cell",
  "option_parser",
+ "regex",
  "seccompiler",
  "serde_json",
  "signal-hook",
