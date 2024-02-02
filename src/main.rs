@@ -82,6 +82,8 @@ enum Error {
     LogFileCreation(std::io::Error),
     #[error("Error setting up logger: {0}")]
     LoggerSetup(log::SetLoggerError),
+    #[error("Missing payload")]
+    MissingPayload,
 }
 
 struct Logger {
@@ -729,6 +731,8 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
                     config::RestoreConfig::parse(restore_params).map_err(Error::ParsingRestore)?,
                 )
                 .map_err(Error::VmRestore)?;
+        } else {
+            return Err(Error::MissingPayload);
         }
 
         Ok(())
