@@ -1778,6 +1778,7 @@ pub fn is_guest_vm_type_cvm() -> bool {
 }
 pub fn generate_host_data() -> String {
     let mut rng = thread_rng();
+    #[allow(clippy::format_collect)]
     let hex_string: String = (0..64)
         .map(|_| rng.gen_range(0..=15))
         .map(|num| format!("{:x}", num))
