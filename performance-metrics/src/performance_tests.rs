@@ -317,6 +317,7 @@ fn measure_boot_time(cmd: &mut GuestCommand, test_timeout: u32) -> Result<Vec<f6
             e
         })
     });
+    #[allow(clippy::redundant_pattern_matching)]
     if let Ok(..) = boot_time {
         Ok(Vec::from([
             boot_time.unwrap().unwrap(),
