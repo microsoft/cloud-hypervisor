@@ -822,6 +822,19 @@ impl CpuManager {
     ) -> Result<()> {
         let mut vcpu = vcpu.lock().unwrap();
 
+        #[cfg(feature = "sev_snp")]
+        if self.sev_snp_enabled {
+            if let Some((kernel_entry_point, _)) = boot_setup {
+                vcpu.set_sev_control_register(
+                    kernel_entry_point.entry_addr.0 / crate::igvm::HV_PAGE_SIZE,
+                )?;
+            }
+
+            // Traditional way to configure vcpu doesn't work for SEV-SNP guests.
+            // All the vCPU configuration for SEV-SNP guest is provided via VMSA.
+            return Ok(());
+        }
+
         #[cfg(target_arch = "x86_64")]
         assert!(!self.cpuid.is_empty());
 
