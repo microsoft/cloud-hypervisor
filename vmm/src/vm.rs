@@ -2047,7 +2047,13 @@ impl Vm {
 
         // Do earlier to parallelise with loading kernel
         #[cfg(target_arch = "x86_64")]
-        let rsdp_addr = self.create_acpi_tables();
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "sev_snp")] {
+                let rsdp_addr = None;
+            } else {
+                let rsdp_addr = self.create_acpi_tables();
+            }
+        }
 
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
