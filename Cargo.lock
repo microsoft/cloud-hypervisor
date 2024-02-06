@@ -463,6 +463,8 @@ dependencies = [
  "thiserror",
  "tpm",
  "tracer",
+ "vhost_user_block",
+ "vhost_user_net",
  "vm-memory",
  "vmm",
  "vmm-sys-util",

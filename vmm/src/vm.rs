@@ -3134,7 +3134,7 @@ mod tests {
 }
 
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-#[cfg(not(feature = "snp"))]
+#[cfg(not(feature = "sev_snp"))]
 #[test]
 pub fn test_vm() {
     use hypervisor::VmExit;

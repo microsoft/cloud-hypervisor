@@ -158,7 +158,7 @@ pub trait VsockChannel {
 pub trait VsockBackend: VsockChannel + VsockEpollListener + Send {}
 
 #[cfg(test)]
-#[cfg(not(feature = "snp"))]
+#[cfg(not(feature = "sev_snp"))]
 mod tests {
     use super::device::{VsockEpollHandler, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
     use super::packet::VSOCK_PKT_HDR_SIZE;

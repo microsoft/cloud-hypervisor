@@ -5,6 +5,11 @@ authors = ["The Cloud Hypervisor Authors"]
 edition = "2021"
 build = "../build.rs"
 
+[features]
+default = []
+mshv = []
+sev_snp = []
+
 [dependencies]
 clap = { version = "4.4.7", features = ["wrap_help","cargo"] }
 env_logger = "0.10.1"
