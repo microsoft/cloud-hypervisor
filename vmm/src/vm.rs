@@ -564,6 +564,21 @@ impl Vm {
             )
             .map_err(Error::CpuManager)?;
 
+        cpu_manager
+            .lock()
+            .unwrap()
+            .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
+            .map_err(Error::CpuManager)?;
+
+        // This initial SEV-SNP configuration must be done immediately after
+        // vCPUs are created. As part of this initialization we are
+        // transitioning the guest into secure state.
+        #[cfg(feature = "sev_snp")]
+        if sev_snp_enabled {
+            println!("Coming into sev_snp_init");
+            vm.sev_snp_init().map_err(Error::InitializeSevSnpVm)?;
+        }
+
         // Loading the igvm file is pushed down here because
         // igvm parser needs cpu_manager to retrieve cpuid leaf.
         // For the regular case, we can start loading early, but for
@@ -585,21 +600,7 @@ impl Vm {
             let max_vcpus = cpu_manager.lock().unwrap().max_vcpus() as u32;
             vm.tdx_init(&cpuid, max_vcpus)
                 .map_err(Error::InitializeTdxVm)?;
-        }
-
-        cpu_manager
-            .lock()
-            .unwrap()
-            .create_boot_vcpus(snapshot_from_id(snapshot.as_ref(), CPU_MANAGER_SNAPSHOT_ID))
-            .map_err(Error::CpuManager)?;
-
-        // This initial SEV-SNP configuration must be done immediately after
-        // vCPUs are created. As part of this initialization we are
-        // transitioning the guest into secure state.
-        #[cfg(feature = "sev_snp")]
-        if sev_snp_enabled {
-            vm.sev_snp_init().map_err(Error::InitializeSevSnpVm)?;
-        }
+        } 
 
         #[cfg(feature = "tdx")]
         let dynamic = !tdx_enabled;
