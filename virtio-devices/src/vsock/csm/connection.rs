@@ -671,7 +671,7 @@ where
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "snp"))]
+#[cfg(not(feature = "sev_snp"))]
 mod tests {
     use libc::EFD_NONBLOCK;
     use virtio_queue::QueueOwnedT;
@@ -825,6 +825,8 @@ mod tests {
                     .unwrap()
                     .next()
                     .unwrap(),
+                None,
+                #[cfg(feature = "sev_snp")]
                 None,
             )
             .unwrap();

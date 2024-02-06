@@ -850,6 +850,7 @@ impl VsockMuxer {
 }
 
 #[cfg(test)]
+#[cfg(not(feature = "sev_snp"))]
 mod tests {
     use std::io::{Read, Write};
     use std::ops::Drop;
