@@ -8,7 +8,7 @@ use zerocopy::AsBytes;
 use crate::igvm::loader::Loader;
 use crate::igvm::IgvmLoadedInfo;
 use crate::igvm::{BootPageAcceptance, StartupMemoryType, HV_PAGE_SIZE};
-use crate::memory_manager::MemoryManager;
+use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use igvm_defs::IgvmPageDataType;
 use igvm_defs::IgvmPlatformType;
 use igvm_parser::IgvmDirectiveHeader;
@@ -53,6 +53,8 @@ pub enum Error {
     ImportIsolatedPages(#[source] hypervisor::HypervisorVmError),
     #[error("Error completing importing isolated pages: {0}")]
     CompleteIsolatedImport(#[source] hypervisor::HypervisorVmError),
+    #[error("allocate address space")]
+    MemoryManager(MemoryManagerError),
 }
 
 #[allow(dead_code)]
@@ -416,6 +418,7 @@ pub fn load_igvm(
 
     #[cfg(feature = "sev_snp")]
     {
+        memory_manager.lock().unwrap().allocate_address_space().map_err(Error::MemoryManager)?;
         use std::time::Instant;
 
         let mut now = Instant::now();
