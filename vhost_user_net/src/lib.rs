@@ -223,7 +223,12 @@ impl VhostUserBackendMut for VhostUserNetBackend {
                 let mut vring = vrings[1].get_mut();
                 if thread
                     .net
-                    .process_tx(self.mem.memory().deref(), vring.get_queue_mut())
+                    .process_tx(
+                        self.mem.memory().deref(),
+                        vring.get_queue_mut(),
+                        #[cfg(feature = "sev_snp")]
+                        None,
+                    )
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
@@ -235,7 +240,12 @@ impl VhostUserBackendMut for VhostUserNetBackend {
                 let mut vring = vrings[0].get_mut();
                 if thread
                     .net
-                    .process_rx(self.mem.memory().deref(), vring.get_queue_mut())
+                    .process_rx(
+                        self.mem.memory().deref(),
+                        vring.get_queue_mut(),
+                        #[cfg(feature = "sev_snp")]
+                        None,
+                    )
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
