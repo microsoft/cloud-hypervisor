@@ -849,7 +849,24 @@ impl CpuManager {
             },
             |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
         );
+
+        #[cfg(feature = "sev_snp")]
+        if self.sev_snp_enabled {
+            if let Some((kernel_entry_point, _)) = boot_setup {
+                vcpu.set_sev_control_register(
+                    kernel_entry_point.entry_addr.0 / crate::igvm::HV_PAGE_SIZE,
+                )?;
+            }
+        } else {
+            vcpu.configure(
+                boot_setup,
+                self.cpuid.clone(),
+                self.config.kvm_hyperv,
+                topology,
+            )?;
+        }
         #[cfg(target_arch = "x86_64")]
+        #[cfg(not(feature = "sev_snp"))]
         vcpu.configure(
             boot_setup,
             self.cpuid.clone(),
