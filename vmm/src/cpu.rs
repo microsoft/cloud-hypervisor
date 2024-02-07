@@ -2713,6 +2713,7 @@ impl CpuElf64Writable for CpuManager {
 }
 
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
+#[cfg(not(feature = "sev_snp"))]
 #[cfg(test)]
 mod tests {
     use arch::x86_64::interrupts::*;
