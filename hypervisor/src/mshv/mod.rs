@@ -696,6 +696,7 @@ impl cpu::Vcpu for MshvVcpu {
                     assert!(info.header.intercept_access_type == HV_INTERCEPT_ACCESS_EXECUTE as u8);
 
                     match ghcb_op {
+                        GHCB_INFO_SPECIAL_DBGPRINT => {}
                         GHCB_INFO_HYP_FEATURE_REQUEST => {
                             // Pre-condition: GHCB data must be zero
                             assert!(ghcb_data == 0);
