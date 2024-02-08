@@ -1008,9 +1008,17 @@ impl Vm {
         igvm: File,
         memory_manager: Arc<Mutex<MemoryManager>>,
         cpu_manager: Arc<Mutex<cpu::CpuManager>>,
+        #[cfg(feature = "sev_snp")] host_data: &str,
     ) -> Result<EntryPoint> {
-        let res = igvm_loader::load_igvm(&igvm, memory_manager, cpu_manager.clone(), "")
-            .map_err(Error::IgvmLoad)?;
+        let res = igvm_loader::load_igvm(
+            &igvm,
+            memory_manager,
+            cpu_manager.clone(),
+            "",
+            #[cfg(feature = "sev_snp")]
+            host_data,
+        )
+        .map_err(Error::IgvmLoad)?;
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "sev_snp")] {
@@ -1067,10 +1075,23 @@ impl Vm {
         #[cfg(feature = "igvm")] cpu_manager: Arc<Mutex<cpu::CpuManager>>,
     ) -> Result<EntryPoint> {
         trace_scoped!("load_payload");
+        #[cfg(feature = "sev_snp")]
+        let host_data = &payload.host_data;
         #[cfg(feature = "igvm")]
-        if let Some(_igvm_file) = &payload.igvm {
-            let igvm = File::open(_igvm_file).map_err(Error::IgvmFile)?;
-            return Self::load_igvm(igvm, memory_manager, cpu_manager);
+        {
+            if let Some(_igvm_file) = &payload.igvm {
+                let igvm = File::open(_igvm_file).map_err(Error::IgvmFile)?;
+                #[cfg(feature = "sev_snp")]
+                {
+                    if let Some(host_data_str) = host_data {
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, host_data_str);
+                    } else {
+                        return Self::load_igvm(igvm, memory_manager, cpu_manager, "");
+                    }
+                }
+                #[cfg(not(feature = "sev_snp"))]
+                return Self::load_igvm(igvm, memory_manager, cpu_manager);
+            }
         }
         match (
             &payload.firmware,
