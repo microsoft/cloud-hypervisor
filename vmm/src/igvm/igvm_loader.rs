@@ -146,6 +146,7 @@ pub fn load_igvm(
     memory_manager: Arc<Mutex<MemoryManager>>,
     cpu_manager: Arc<Mutex<CpuManager>>,
     cmdline: &str,
+    #[cfg(feature = "sev_snp")] host_data: &str,
 ) -> Result<Box<IgvmLoadedInfo>, Error> {
     let mut loaded_info: Box<IgvmLoadedInfo> = Box::default();
     let command_line = CString::new(cmdline).map_err(Error::InvalidCommandLine)?;
@@ -154,6 +155,16 @@ pub fn load_igvm(
     let mut gpas: Vec<GpaPages> = Vec::new();
     let proc_count = cpu_manager.lock().unwrap().vcpus().len() as u32;
 
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "sev_snp")] {
+            let mut host_data_contents = [0; 32];
+            if !host_data.is_empty() {
+                assert_eq!(64, host_data.len());
+                hex::decode_to_slice(host_data, &mut host_data_contents  as &mut [u8])
+                    .expect("Failed to decode host data");
+            }
+        }
+    }
     file.seek(SeekFrom::Start(0)).map_err(Error::Igvm)?;
     file.read_to_end(&mut file_contents).map_err(Error::Igvm)?;
 
@@ -475,12 +486,11 @@ pub fn load_igvm(
 
         now = Instant::now();
         // Call Complete Isolated Import since we are done importing isolated pages
-        let host_data: [u8; 32] = [0; 32];
         memory_manager
             .lock()
             .unwrap()
             .vm
-            .complete_isolated_import(loaded_info.snp_id_block, host_data, 1)
+            .complete_isolated_import(loaded_info.snp_id_block, host_data_contents, 1)
             .map_err(Error::CompleteIsolatedImport)?;
 
         info!(
