@@ -436,6 +436,8 @@ pub struct VmParams<'a> {
     pub tpm: Option<&'a str>,
     #[cfg(feature = "igvm")]
     pub igvm: Option<&'a str>,
+    #[cfg(feature = "sev_snp")]
+    pub host_data: Option<&'a str>,
 }
 
 impl<'a> VmParams<'a> {
@@ -496,6 +498,8 @@ impl<'a> VmParams<'a> {
         let tpm: Option<&str> = args.get_one::<String>("tpm").map(|x| x as &str);
         #[cfg(feature = "igvm")]
         let igvm = args.get_one::<String>("igvm").map(|x| x as &str);
+        #[cfg(feature = "sev_snp")]
+        let host_data = args.get_one::<String>("host-data").map(|x| x as &str);
         VmParams {
             cpus,
             memory,
@@ -530,6 +534,8 @@ impl<'a> VmParams<'a> {
             tpm,
             #[cfg(feature = "igvm")]
             igvm,
+            #[cfg(feature = "sev_snp")]
+            host_data,
         }
     }
 }
@@ -2545,6 +2551,8 @@ impl VmConfig {
                 firmware: vm_params.firmware.map(PathBuf::from),
                 #[cfg(feature = "igvm")]
                 igvm: vm_params.igvm.map(PathBuf::from),
+                #[cfg(feature = "sev_snp")]
+                host_data: vm_params.host_data.map(|s| s.to_string()),
             })
         } else {
             None
@@ -3414,6 +3422,8 @@ mod tests {
                 initramfs: None,
                 #[cfg(feature = "igvm")]
                 igvm: None,
+                #[cfg(feature = "sev_snp")]
+                host_data: None,
             }),
             rate_limit_groups: None,
             disks: None,

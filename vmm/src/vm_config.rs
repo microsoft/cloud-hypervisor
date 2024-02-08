@@ -514,6 +514,9 @@ pub struct PayloadConfig {
     #[cfg(feature = "igvm")]
     #[serde(default)]
     pub igvm: Option<PathBuf>,
+    #[cfg(feature = "sev_snp")]
+    #[serde(default)]
+    pub host_data: Option<String>,
 }
 
 pub fn default_serial() -> ConsoleConfig {
