@@ -1,7 +1,64 @@
 
+parameters:
+  - name: run_on_intel
+    displayName: Run on Intel VM SKU
+    type: boolean
+    default: True
+  - name: intel_vm_size_func
+    displayName: Intel VM Size for Functional tests
+    type: string
+    default: "Standard_D16ds_v5"
+  - name: run_on_amd
+    displayName: Run on AMD VM SKU
+    type: boolean
+    default: True
+  - name: amd_vm_size_func
+    displayName: AMD VM Size - Functional tests
+    type: string
+    default: "Standard_D16ads_v5"
+  - name: run_on_cvm
+    displayName: Include CVM CLH Guest testing
+    type: boolean
+    default: True
+  - name: amd_vm_size_func_cvm
+    displayName: AMD VM Size - Functional tests (CVM)
+    type: string
+    default: "Standard_DC16ads_cc_v5"
+  - name: run_ch_integration_tests
+    displayName: Run CH Integration tests
+    type: boolean
+    default: True
+
 variables:
-  DEFAULT_BRANCH: msft-main
-  RUST_VERSION: 1.75.0
+  - group: azure_subscription_testonly
+  - group: azure_subscription_devtest
+  - group: lis_database
+  - group: mail
+  - group: virtstackvalidation_variables
+  - name: DEFAULT_BRANCH
+    value: msft-main
+  - name: RUST_VERSION
+    value: "1.75.0"
+  - name: test_project
+    value: "Cloud-Hypervisor Test"
+  - name: enable_publish
+    value: False
+  - name: ch_integration_tests
+    # Should be of comma separated strings format
+    ${{ if eq(variables['Build.Reason'], 'Manual') }}:
+      value: ""
+    ${{ else }}:
+      # Following are VM life cycle tests from ch integration tests
+      value: 'common_parallel::test_api_create_boot,common_parallel::test_api_pause_resume,common_parallel::test_api_shutdown,common_parallel::test_macvtap,common_parallel::test_snapshot_restore_basic'
+  - name: ch_tests_exclude_list_cvm
+    # Should be of comma separated strings format
+    # Following are known failures
+    value: 'common_parallel::test_boot_from_vhost_user_blk_default,common_parallel::test_boot_from_virtio_pmem,common_parallel::test_cpu_hotplug,common_parallel::test_cpu_topology_142,common_parallel::test_cpu_topology_262,common_parallel::test_cpu_topology_421,common_parallel::test_initramfs,common_parallel::test_iommu_segments,common_parallel::test_memory_hotplug,common_parallel::test_pmem_hotplug,common_parallel::test_pmem_multi_segment_hotplug,common_parallel::test_tpm,common_parallel::test_vhost_user_blk_default,common_parallel::test_vhost_user_blk_direct,common_parallel::test_vhost_user_blk_readonly,common_parallel::test_vhost_user_net_client_mode,common_parallel::test_vhost_user_net_default,common_parallel::test_vhost_user_net_existing_tap,common_parallel::test_vhost_user_net_host_mac,common_parallel::test_vhost_user_net_multiple_queues,common_parallel::test_vhost_user_net_named_tap,common_parallel::test_vhost_user_net_tap_multiple_queues,common_parallel::test_virtio_balloon_deflate_on_oom,common_parallel::test_virtio_fs,common_parallel::test_virtio_fs_hotplug,common_parallel::test_virtio_iommu,common_parallel::test_virtio_pmem_discard_writes,common_parallel::test_virtio_pmem_persist_writes,common_parallel::test_virtio_pmem_with_size,common_parallel::test_watchdog,common_parallel::test_snapshot_restore_basic,common_parallel::test_dmi_serial_number,common_parallel::test_dmi_uuid,common_parallel::test_dmi_oem_strings,common_parallel::test_vfio_user,common_parallel::test_focal_hypervisor_fw,common_parallel::test_focal_ovmf,common_parallel::test_power_button,boot_time_pmem_ms,boot_time_16_vcpus_pmem_ms'
+  - name: clh_ref
+    ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+      value: $(Build.SourceVersion)
+    ${{ else }}:
+      value: $(System.PullRequest.SourceCommitId)
 
 trigger:
   batch: false
@@ -19,8 +76,16 @@ pr:
     include:
       - $(DEFAULT_BRANCH)
 
+resources:
+  repositories:
+    - repository: lisa
+      type: git
+      name: LSG/lsg-lisa
+      ref: main
+
 stages:
-  - stage:
+  - stage: "CLH_Build"
+    displayName: "Cloud-Hypervisor Build"
     jobs:
       - job: CH_BUILD
 
@@ -116,3 +181,48 @@ stages:
 
         - bash: test -z "$(git status --porcelain)"
 
+  - stage: "CLH_Test_Non_CVM"
+    displayName: "Cloud-Hypervisor Test (NON-CVM)"
+    dependsOn: CLH_Build
+    pool:
+      name: LSG_Virt_1ES_Pool
+    jobs:
+      - template: virtstack\pipelines\templates\linux_dom0_test_template.yml@lisa
+        parameters:
+          test_scenario: "$(test_project) - NON_CVM"
+          test_project: $(test_project)
+          checkout_repo: "lisa"
+          use_ms_clh_repo: "yes"
+          use_ms_guest_kernel: "YES"
+          use_ms_hypervisor_fw: "YES"
+          use_ms_ovmf_fw: "YES"
+          override_clh_ref: $(clh_ref)
+          ch_subtest_include_list: $(ch_integration_tests)
+          system_access_token: $(System.AccessToken)
+          run_on_intel: ${{ parameters.run_on_intel }}
+          intel_vm_size_func: ${{ parameters.intel_vm_size_func }}
+          run_on_amd: ${{ parameters.run_on_amd }}
+          amd_vm_size_func: ${{ parameters.amd_vm_size_func }}
+          run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
+
+  - stage: "CLH_Test_CVM"
+    displayName: "Cloud-Hypervisor Test (CVM)"
+    dependsOn: CLH_Build
+    condition: eq(${{ parameters.run_on_cvm }}, True)
+    pool:
+      name: LSG_Virt_1ES_Pool
+    jobs:
+      - template: virtstack\pipelines\templates\linux_dom0_test_template.yml@lisa
+        parameters:
+          test_scenario: "$(test_project) - NON_CVM"
+          test_project: $(test_project)
+          checkout_repo: "lisa"
+          use_ms_clh_repo: "yes"
+          clh_guest_vm_type: "CVM"
+          override_clh_ref: $(clh_ref)
+          run_on_amd: true
+          ch_subtest_include_list: $(ch_integration_tests)
+          ch_subtest_exclude_list: $(ch_tests_exclude_list_cvm)
+          system_access_token: $(System.AccessToken)
+          amd_vm_size_func: ${{ parameters.amd_vm_size_func_cvm }}
+          run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
