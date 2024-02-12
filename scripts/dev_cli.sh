@@ -28,6 +28,12 @@ MS_CLH_FILES_PATH="/usr/share/cloud-hypervisor"
 # Assign VMLINUX_PATH to default MSFT kernel if unset and if USE_MS_GUEST_KERNEL is set
 VMLINUX_PATH="${VMLINUX_PATH:-${USE_MS_GUEST_KERNEL:+${MS_CLH_FILES_PATH}/vmlinux.bin}}"
 
+# Assign HV_FW_PATH to default MSFT hypervisor-fw if unset and if USE_MS_HV_FW is set
+HV_FW_PATH="${HV_FW_PATH:-${USE_MS_HV_FW:+${MS_CLH_FILES_PATH}/hypervisor-fw}}"
+
+# Assign OVMF_FW_PATH to default MSFT CLOUDHV_EFI.fd if unset and if USE_MS_OVMF_FW is set
+OVMF_FW_PATH="${OVMF_FW_PATH:-${USE_MS_OVMF_FW:+${MS_CLH_FILES_PATH}/CLOUDHV_EFI.fd}}"
+
 # Container paths
 CTR_CLH_ROOT_DIR="/cloud-hypervisor"
 CTR_CLH_CARGO_BUILT_DIR="${CTR_CLH_ROOT_DIR}/build"
@@ -445,6 +451,24 @@ cmd_tests() {
 		    exit 1
 	    fi
 	    sudo cp $VMLINUX_PATH $CLH_INTEGRATION_WORKLOADS/vmlinux
+    fi
+
+    if [ -n "$HV_FW_PATH" ]; then
+	    echo "Using custom hypervisor-fw: $HV_FW_PATH"
+	    if [ ! -f "$HV_FW_PATH" ]; then
+		    echo "File not found: $HV_FW_PATH"
+		    exit 1
+	    fi
+	    sudo cp $HV_FW_PATH $CLH_INTEGRATION_WORKLOADS/hypervisor-fw
+    fi
+
+    if [ -n "$OVMF_FW_PATH" ]; then
+	    echo "Using custom OVMF fw: $OVMF_FW_PATH"
+	    if [ ! -f "$OVMF_FW_PATH" ]; then
+		    echo "File not found: $OVMF_FW_PATH"
+		    exit 1
+	    fi
+	    sudo cp $OVMF_FW_PATH $CLH_INTEGRATION_WORKLOADS/CLOUDHV.fd
     fi
 
     if [ "$integration" = true ]; then
