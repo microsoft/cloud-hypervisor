@@ -605,7 +605,7 @@ impl Vm {
             let max_vcpus = cpu_manager.lock().unwrap().max_vcpus() as u32;
             vm.tdx_init(&cpuid, max_vcpus)
                 .map_err(Error::InitializeTdxVm)?;
-        } 
+        }
 
         #[cfg(feature = "tdx")]
         let dynamic = !tdx_enabled;

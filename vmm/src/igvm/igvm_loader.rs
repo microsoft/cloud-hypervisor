@@ -434,7 +434,11 @@ pub fn load_igvm(
 
     #[cfg(feature = "sev_snp")]
     {
-        memory_manager.lock().unwrap().allocate_address_space().map_err(Error::MemoryManager)?;
+        memory_manager
+            .lock()
+            .unwrap()
+            .allocate_address_space()
+            .map_err(Error::MemoryManager)?;
         use std::time::Instant;
 
         let mut now = Instant::now();
