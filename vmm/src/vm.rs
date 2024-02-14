@@ -455,6 +455,7 @@ pub struct Vm {
     vm: Arc<dyn hypervisor::Vm>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     saved_clock: Option<hypervisor::ClockData>,
+    #[allow(dead_code)]
     numa_nodes: NumaNodes,
     #[cfg_attr(any(not(feature = "kvm"), target_arch = "aarch64"), allow(dead_code))]
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
@@ -2006,6 +2007,7 @@ impl Vm {
     // In case of TDX being used, this is a no-op since the tables will be
     // created and passed when populating the HOB.
 
+    #[allow(dead_code)]
     fn create_acpi_tables(&self) -> Option<GuestAddress> {
         #[cfg(feature = "tdx")]
         if self.config.lock().unwrap().is_tdx_enabled() {
@@ -2115,6 +2117,7 @@ impl Vm {
                 .map(|_| {
                     // Safe to unwrap rsdp_addr as we know it can't be None when
                     // the entry_point is Some.
+                    #[allow(clippy::unnecessary_literal_unwrap)]
                     self.configure_system(rsdp_addr.unwrap())
                 })
                 .transpose()?;

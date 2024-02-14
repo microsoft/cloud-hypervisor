@@ -103,6 +103,7 @@ bitflags! {
 }
 
 impl MemoryAffinity {
+    #[allow(dead_code)]
     fn from_region(
         region: &Arc<GuestRegionMmap>,
         proximity_domain: u32,
@@ -169,6 +170,7 @@ struct ViotPciRangeNode {
     _reserved2: [u8; 6],
 }
 
+#[allow(dead_code)]
 pub fn create_dsdt_table(
     device_manager: &Arc<Mutex<DeviceManager>>,
     cpu_manager: &Arc<Mutex<CpuManager>>,
@@ -188,6 +190,7 @@ pub fn create_dsdt_table(
     dsdt
 }
 
+#[allow(dead_code)]
 fn create_facp_table(dsdt_offset: GuestAddress, device_manager: &Arc<Mutex<DeviceManager>>) -> Sdt {
     trace_scoped!("create_facp_table");
 
@@ -246,6 +249,7 @@ fn create_facp_table(dsdt_offset: GuestAddress, device_manager: &Arc<Mutex<Devic
     facp
 }
 
+#[allow(dead_code)]
 fn create_mcfg_table(pci_segments: &[PciSegment]) -> Sdt {
     let mut mcfg = Sdt::new(*b"MCFG", 36, 1, *b"CLOUDH", *b"CHMCFG  ", 1);
 
@@ -265,6 +269,7 @@ fn create_mcfg_table(pci_segments: &[PciSegment]) -> Sdt {
     mcfg
 }
 
+#[allow(dead_code)]
 fn create_tpm2_table() -> Sdt {
     let mut tpm = Sdt::new(*b"TPM2", 52, 3, *b"CLOUDH", *b"CHTPM2  ", 1);
 
@@ -277,6 +282,7 @@ fn create_tpm2_table() -> Sdt {
     tpm
 }
 
+#[allow(dead_code)]
 fn create_srat_table(
     numa_nodes: &NumaNodes,
     #[cfg(target_arch = "x86_64")] topology: Option<(u8, u8, u8)>,
@@ -353,6 +359,7 @@ fn create_srat_table(
     srat
 }
 
+#[allow(dead_code)]
 fn create_slit_table(numa_nodes: &NumaNodes) -> Sdt {
     let mut slit = Sdt::new(*b"SLIT", 36, 1, *b"CLOUDH", *b"CHSLIT  ", 1);
     // Number of System Localities on 8 bytes.
@@ -586,6 +593,7 @@ fn create_iort_table(pci_segments: &[PciSegment]) -> Sdt {
     iort
 }
 
+#[allow(dead_code)]
 fn create_viot_table(iommu_bdf: &PciBdf, devices_bdf: &[PciBdf]) -> Sdt {
     // VIOT
     let mut viot = Sdt::new(*b"VIOT", 36, 0, *b"CLOUDH", *b"CHVIOT  ", 0);
@@ -622,6 +630,7 @@ fn create_viot_table(iommu_bdf: &PciBdf, devices_bdf: &[PciBdf]) -> Sdt {
     viot
 }
 
+#[allow(dead_code)]
 pub fn create_acpi_tables(
     guest_mem: &GuestMemoryMmap,
     device_manager: &Arc<Mutex<DeviceManager>>,
