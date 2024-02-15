@@ -113,28 +113,35 @@ process_common_args() {
 }
 
 download_hypervisor_fw() {
-    if [ -n "$AUTH_DOWNLOAD_TOKEN" ]; then
-        echo "Using authenticated download from GitHub"
-        FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest \
-            --header "Authorization: Token $AUTH_DOWNLOAD_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" | grep "browser_download_url" | grep -o 'https://.*[^ "]')
-    else
-        echo "Using anonymous download from GitHub"
-        FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
-    fi
     FW="$WORKLOADS_DIR/hypervisor-fw"
-    pushd "$WORKLOADS_DIR" || exit
-    rm -f "$FW"
-    time wget --quiet "$FW_URL" || exit 1
-    popd || exit
+    if [ ! -f $FW ]; then
+        if [ -n "$AUTH_DOWNLOAD_TOKEN" ]; then
+            echo "Using authenticated download from GitHub"
+            FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest \
+                    --header "Authorization: Token $AUTH_DOWNLOAD_TOKEN" \
+                    --header "X-GitHub-Api-Version: 2022-11-28" | grep "browser_download_url" | grep -o 'https://.*[^ "]')
+        else
+            echo "Using anonymous download from GitHub"
+            FW_URL=$(curl --silent https://api.github.com/repos/cloud-hypervisor/rust-hypervisor-firmware/releases/latest | grep "browser_download_url" | grep -o 'https://.*[^ "]')
+        fi
+        pushd $WORKLOADS_DIR
+        time wget --quiet $FW_URL || exit 1
+        popd
+    else
+        echo "File already exist: $FW"
+    fi
 }
 
 download_ovmf() {
-    OVMF_FW_TAG="ch-6624aa331f"
-    OVMF_FW_URL="https://github.com/cloud-hypervisor/edk2/releases/download/$OVMF_FW_TAG/CLOUDHV.fd"
     OVMF_FW="$WORKLOADS_DIR/CLOUDHV.fd"
-    pushd "$WORKLOADS_DIR" || exit
-    rm -f "$OVMF_FW"
-    time wget --quiet $OVMF_FW_URL || exit 1
-    popd || exit
+    if [ ! -f $OVMF_FW ]; then
+        OVMF_FW_TAG="ch-6624aa331f"
+        OVMF_FW_URL="https://github.com/cloud-hypervisor/edk2/releases/download/$OVMF_FW_TAG/CLOUDHV.fd"
+        pushd $WORKLOADS_DIR
+        rm -f $OVMF_FW
+        time wget --quiet $OVMF_FW_URL || exit 1
+        popd
+    else
+        echo "File already exist: $OVMF_FW"
+    fi
 }
