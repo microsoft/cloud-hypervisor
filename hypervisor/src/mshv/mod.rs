@@ -1730,7 +1730,8 @@ impl vm::Vm for MshvVm {
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
-            return self.fd
+            return self
+                .fd
                 .unregister_ioevent(fd, addr, NoDatamatch)
                 .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()));
         }
