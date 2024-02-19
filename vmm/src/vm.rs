@@ -519,8 +519,6 @@ impl Vm {
         let force_iommu = sev_snp_enabled;
         #[cfg(all(not(feature = "tdx"), not(feature = "sev_snp")))]
         let force_iommu = false;
-        #[cfg(feature = "sev_snp")]
-        let force_iommu = sev_snp_enabled;
 
         #[cfg(feature = "guest_debug")]
         let stop_on_boot = config.lock().unwrap().gdb;

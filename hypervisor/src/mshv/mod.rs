@@ -16,7 +16,9 @@ use crate::HypervisorType;
 #[cfg(feature = "sev_snp")]
 use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
 pub use mshv_bindings::*;
-use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
+#[cfg(feature = "sev_snp")]
+use mshv_ioctls::NoDatamatch;
+use mshv_ioctls::{set_registers_64, Mshv, VcpuFd, VmFd, VmType};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -262,11 +264,9 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             break;
         }
 
-        let mut snp_enabled = false;
         // Set additional partition property for SEV-SNP partition.
         if mshv_vm_type == VmType::Snp {
             let snp_policy = snp::get_default_snp_guest_policy();
-            snp_enabled = true;
             let vmgexit_offloads = snp::get_default_vmgexit_offload_features();
             // SAFETY: access union fields
             unsafe {
@@ -684,6 +684,7 @@ impl cpu::Vcpu for MshvVcpu {
                         info.interrupt_vector.try_into().unwrap(),
                     ))
                 }
+                #[allow(unreachable_patterns)]
                 hv_message_type_HVMSG_UNACCEPTED_GPA => {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
@@ -1723,6 +1724,7 @@ impl vm::Vm for MshvVm {
         }
     }
 
+    #[allow(unused_variables)]
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
         #[cfg(feature = "sev_snp")]
