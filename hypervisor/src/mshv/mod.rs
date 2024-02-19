@@ -1725,16 +1725,16 @@ impl vm::Vm for MshvVm {
 
     /// Unregister an event from a certain address it has been previously registered to.
     fn unregister_ioevent(&self, fd: &EventFd, addr: &IoEventAddress) -> vm::Result<()> {
-        if !self.snp_enabled {
+        #[cfg(feature = "sev_snp")]
+        if !self.sev_snp_enabled {
             let addr = &mshv_ioctls::IoEventAddress::from(*addr);
             debug!("unregister_ioevent fd {} addr {:x?}", fd.as_raw_fd(), addr);
 
-            self.fd
+            return self.fd
                 .unregister_ioevent(fd, addr, NoDatamatch)
-                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()))
-        } else {
-            Ok(())
+                .map_err(|e| vm::HypervisorVmError::UnregisterIoEvent(e.into()));
         }
+        Ok(())
     }
 
     /// Creates a guest physical memory region.
@@ -2006,7 +2006,7 @@ impl vm::Vm for MshvVm {
 
     #[cfg(feature = "sev_snp")]
     fn gain_page_access(&self, gpa: u64, size: u32) -> vm::Result<()> {
-        if !self.snp_enabled {
+        if !self.sev_snp_enabled {
             return Ok(());
         }
 
