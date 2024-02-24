@@ -85,6 +85,7 @@ fn create_virtio_iommu_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     ]
 }
 
+#[allow(dead_code)]
 fn create_virtio_mem_ioctl_seccomp_rule() -> Vec<SeccompRule> {
     or![
         and![Cond::new(1, ArgLen::Dword, Eq, VFIO_IOMMU_MAP_DMA).unwrap()],
