@@ -7,7 +7,7 @@ parameters:
   - name: intel_vm_size_func
     displayName: Intel VM Size for Functional tests
     type: string
-    default: "Standard_D16ds_v5"
+    default: "Standard_D32ds_v5"
   - name: run_on_amd
     displayName: Run on AMD VM SKU
     type: boolean
@@ -15,7 +15,7 @@ parameters:
   - name: amd_vm_size_func
     displayName: AMD VM Size - Functional tests
     type: string
-    default: "Standard_D16ads_v5"
+    default: "Standard_D32ads_v5"
   - name: run_on_cvm
     displayName: Include CVM CLH Guest testing
     type: boolean
@@ -23,7 +23,7 @@ parameters:
   - name: amd_vm_size_func_cvm
     displayName: AMD VM Size - Functional tests (CVM)
     type: string
-    default: "Standard_DC16ads_cc_v5"
+    default: "Standard_DC32ads_cc_v5"
   - name: run_ch_integration_tests
     displayName: Run CH Integration tests
     type: boolean
@@ -200,9 +200,13 @@ stages:
           ch_subtest_include_list: "$(ch_integration_tests),common_parallel::test_api_pause_resume"
           system_access_token: $(System.AccessToken)
           run_on_intel: ${{ parameters.run_on_intel }}
-          intel_vm_size_func: ${{ parameters.intel_vm_size_func }}
           run_on_amd: ${{ parameters.run_on_amd }}
-          amd_vm_size_func: ${{ parameters.amd_vm_size_func }}
+          ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+            intel_vm_size_func: "Standard_D16ds_v5"
+            amd_vm_size_func: "Standard_D16ads_v5"
+          ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+            intel_vm_size_func: ${{ parameters.intel_vm_size_func }}
+            amd_vm_size_func: ${{ parameters.amd_vm_size_func }}
           run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
 
   - stage: "CLH_Test_CVM"
@@ -221,8 +225,11 @@ stages:
           clh_guest_vm_type: "CVM"
           override_clh_ref: $(clh_ref)
           run_on_amd: true
+          ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+            amd_vm_size_func: "Standard_DC16ads_cc_v5"
+          ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+            amd_vm_size_func: ${{ parameters.amd_vm_size_func_cvm }}
           ch_subtest_include_list: $(ch_integration_tests)
           ch_subtest_exclude_list: $(ch_tests_exclude_list_cvm)
           system_access_token: $(System.AccessToken)
-          amd_vm_size_func: ${{ parameters.amd_vm_size_func_cvm }}
           run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
