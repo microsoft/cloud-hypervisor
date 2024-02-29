@@ -1715,6 +1715,23 @@ pub fn get_env_var(var_name: &str) -> Option<String> {
 pub fn is_guest_vm_type_cvm() -> bool {
     get_env_var("GUEST_VM_TYPE") == Some("CVM".to_string())
 }
+
+pub fn run_block_io_with_datadisk() -> bool {
+    get_env_var("USE_DATADISK") == Some("1".to_string())
+}
+
+pub fn get_block_io_datadisk() -> Option<String> {
+    get_env_var("DATADISK_NAME")
+}
+
+pub fn get_block_size() -> Option<String> {
+    get_env_var("BLOCK_SIZE")
+}
+
+pub fn run_block_io_without_cache() -> bool {
+    get_env_var("DISABLE_DATADISK_CACHING") == Some("1".to_string())
+}
+
 pub fn generate_host_data() -> String {
     let mut rng = thread_rng();
     let hex_string: String = (0..64)

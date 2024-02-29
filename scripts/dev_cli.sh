@@ -613,6 +613,10 @@ cmd_tests() {
             --env CH_LIBC="${libc}" \
             --env RUST_BACKTRACE="${RUST_BACKTRACE}" \
             --env GUEST_VM_TYPE="${GUEST_VM_TYPE}" \
+            --env USE_DATADISK="${USE_DATADISK}" \
+            --env DATADISK_NAME="${DATADISK_NAME}" \
+            --env DISABLE_DATADISK_CACHING="${DISABLE_DATADISK_CACHING}" \
+            --env BLOCK_SIZE="${BLOCK_SIZE}" \
             "$CTR_IMAGE" \
             ./scripts/run_metrics.sh "$@" || fix_dir_perms $? || exit $?
     fi

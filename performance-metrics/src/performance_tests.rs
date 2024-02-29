@@ -500,14 +500,41 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
                 guest.disk_config.disk(DiskType::CloudInit).unwrap()
             )
             .as_str(),
-            "--disk",
-            format!("path={BLK_IO_TEST_IMG}").as_str(),
         ])
         .default_net()
         .args(["--api-socket", &api_socket])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
         .set_print_cmd(false);
+
+    if run_block_io_with_datadisk() {
+        let disk = get_block_io_datadisk().unwrap_or("".to_owned());
+        // Check if disk exist on host
+        if fs::metadata(&disk).is_ok() {
+            let disk_arg = format!(
+                "path={disk}{}",
+                if run_block_io_without_cache() {
+                    ",direct=on"
+                } else {
+                    ""
+                }
+            );
+            cmd.args(["--disk", &disk_arg]);
+        } else {
+            println!("SKIPPED: Disk does not exist: {:?}", disk);
+            return Vec::from([0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+    } else {
+        let disk_arg = format!(
+            "path={BLK_IO_TEST_IMG}{}",
+            if run_block_io_without_cache() {
+                ",direct=on"
+            } else {
+                ""
+            }
+        );
+        cmd.args(["--disk", &disk_arg]);
+    }
 
     let igvm = direct_igvm_boot_path(Some("hvc0"));
     let kernel = direct_kernel_boot_path();
@@ -523,11 +550,13 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
 
+        let block_size_kb = get_block_size().or(Some("4".to_string())).unwrap();
         let fio_command = format!(
             "sudo fio --filename=/dev/vdc --name=test --output-format=json \
-            --direct=1 --bs=4k --ioengine=io_uring --iodepth=64 \
+            --direct=1 --bs={block_size_kb}k --ioengine=io_uring --iodepth=64 \
             --rw={fio_ops} --runtime={test_timeout} --numjobs={num_queues}"
         );
+        println!("FIO Command: {:?}", fio_command);
         let output = guest
             .ssh_command(&fio_command)
             .map_err(InfraError::SshCommand)
