@@ -28,6 +28,14 @@ parameters:
     displayName: Run CH Integration tests
     type: boolean
     default: True
+  - name: override_clh_ref
+    displayName: CH Github ref (Microsoft Fork Only)
+    type: string
+    default: " "
+  - name: githubref
+    displayName: LISA Github ref
+    type: string
+    default: " "
 
 variables:
   - group: azure_subscription_testonly
@@ -208,6 +216,10 @@ stages:
             intel_vm_size_func: ${{ parameters.intel_vm_size_func }}
             amd_vm_size_func: ${{ parameters.amd_vm_size_func }}
           run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
+          ${{ if and(ne(parameters.override_clh_ref, ' '), ne(parameters.override_clh_ref, '')) }}:
+            override_clh_ref: ${{ parameters.override_clh_ref }}
+          ${{ if and(ne(parameters.githubref, ' '), ne(parameters.githubref, '')) }}:
+            githubref: ${{ parameters.githubref }}
 
   - stage: "CLH_Test_CVM"
     displayName: "Cloud-Hypervisor Test (CVM)"
@@ -233,3 +245,7 @@ stages:
           ch_subtest_exclude_list: $(ch_tests_exclude_list_cvm)
           system_access_token: $(System.AccessToken)
           run_ch_integration_tests: ${{ parameters.run_ch_integration_tests }}
+          ${{ if and(ne(parameters.override_clh_ref, ' '), ne(parameters.override_clh_ref, '')) }}:
+            override_clh_ref: ${{ parameters.override_clh_ref }}
+          ${{ if and(ne(parameters.githubref, ' '), ne(parameters.githubref, '')) }}:
+            githubref: ${{ parameters.githubref }}
