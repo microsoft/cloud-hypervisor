@@ -489,25 +489,47 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
     let mut cmd = GuestCommand::new(&guest);
     cmd.args(["--cpus", &format!("boot={num_queues}")])
         .args(["--memory", "size=4G"])
-        .args([
-            "--disk",
-            format!(
-                "path={}",
-                guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
-            )
-            .as_str(),
-            format!(
-                "path={}",
-                guest.disk_config.disk(DiskType::CloudInit).unwrap()
-            )
-            .as_str(),
-            format!("path={BLK_IO_TEST_IMG}").as_str(),
-        ])
         .default_net()
         .args(["--api-socket", &api_socket])
         .capture_output()
         .verbosity(VerbosityLevel::Warn)
         .set_print_cmd(false);
+
+    let mut disk_args = vec![
+        "--disk".to_string(),
+        format!("path={}", guest.disk_config.disk(DiskType::OperatingSystem).unwrap()).to_string(),
+        format!("path={}", guest.disk_config.disk(DiskType::CloudInit).unwrap()).to_string(),
+    ];
+
+    if run_block_io_with_datadisk() {
+        let disk = get_block_io_datadisk().unwrap_or("".to_owned());
+        // Check if disk exist on host
+        if fs::metadata(&disk).is_ok() {
+            let disk_arg = format!(
+                "path={disk}{}",
+                if run_block_io_without_cache() {
+                    ",direct=on"
+                } else {
+                    ""
+                }
+            );
+            disk_args.push(disk_arg.to_string());
+        } else {
+            println!("SKIPPED: Disk does not exist: {:?}", disk);
+            return Vec::from([0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+    } else {
+        let disk_arg = format!(
+            "path={BLK_IO_TEST_IMG}{}",
+            if run_block_io_without_cache() {
+                ",direct=on"
+            } else {
+                ""
+            }
+        );
+        disk_args.push(disk_arg.to_string());
+    }
+    cmd.args(disk_args);
 
     let igvm = direct_igvm_boot_path(Some("hvc0"));
     let kernel = direct_kernel_boot_path();
@@ -522,12 +544,13 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
     let mut child = cmd.spawn().unwrap();
     let r = std::panic::catch_unwind(|| {
         guest.wait_vm_boot(None).unwrap();
-
+        let block_size_kb = get_block_size().or(Some("4".to_string())).unwrap();
         let fio_command = format!(
             "sudo fio --filename=/dev/vdc --name=test --output-format=json \
-            --direct=1 --bs=4k --ioengine=io_uring --iodepth=64 \
+            --direct=1 --bs={block_size_kb}k --ioengine=io_uring --iodepth=64 \
             --rw={fio_ops} --runtime={test_timeout} --numjobs={num_queues}"
         );
+        println!("FIO Command: {:?}", fio_command);
         let output = guest
             .ssh_command(&fio_command)
             .map_err(InfraError::SshCommand)
