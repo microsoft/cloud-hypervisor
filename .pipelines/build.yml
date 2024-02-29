@@ -230,7 +230,7 @@ stages:
     jobs:
       - template: virtstack\pipelines\templates\linux_dom0_test_template.yml@lisa
         parameters:
-          test_scenario: "$(test_project) - NON_CVM"
+          test_scenario: "$(test_project) - CVM"
           test_project: $(test_project)
           checkout_repo: "lisa"
           use_ms_clh_repo: "yes"
