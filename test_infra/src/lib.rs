@@ -1799,9 +1799,9 @@ pub fn extend_guest_cmd<'a>(
         cmd.args(["--host-data", generate_host_data().as_str()]);
 
         if let Some(platform_arg) = platform {
-            cmd.args(["--platform", &format!("{platform_arg},snp=on")]);
+            cmd.args(["--platform", &format!("{platform_arg},sev_snp=on")]);
         } else {
-            cmd.args(["--platform", "snp=on"]);
+            cmd.args(["--platform", "sev_snp=on"]);
         }
     } else {
         cmd.args(["--kernel", kernel]);
