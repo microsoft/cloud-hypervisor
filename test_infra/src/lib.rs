@@ -925,10 +925,10 @@ impl Guest {
     ) -> String {
         if is_cvm {
             format!(
-                // Add snp flag under platform element
+                // Add sev_snp flag under platform element
                 // Add host-data under payload element
                 r#"{{
-                    "platform":{{"snp":true}},
+                    "platform":{{"sev_snp":true}},
                     "cpus":{{"boot_vcpus":{},"max_vcpus":{}}},
                     "payload":{{"igvm":"{}","cmdline": "{}","host_data": "{}"}},
                     "net":[{{"ip":"{}", "mask":"255.255.255.0", "mac":"{}"}}],
