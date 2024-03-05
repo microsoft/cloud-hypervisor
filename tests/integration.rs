@@ -160,13 +160,23 @@ fn _test_api_create_boot(target_api: TargetApi, guest: Guest) {
 
     // Create the VM first
     let cpu_count: u8 = 4;
-    let request_body = guest.api_create_body(
-        cpu_count,
-        direct_kernel_boot_path().to_str().unwrap(),
-        DIRECT_KERNEL_BOOT_CMDLINE,
-        true,
-        generate_host_data().as_str(),
-    );
+    let request_body = if is_guest_vm_type_cvm() {
+        guest.api_create_body(
+            cpu_count,
+            direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            true,
+            generate_host_data().as_str(),
+        )
+    } else {
+        guest.api_create_body(
+            cpu_count,
+            direct_kernel_boot_path().to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            false,
+            "",
+        )
+    };
 
     let temp_config_path = guest.tmp_dir.as_path().join("config");
     std::fs::write(&temp_config_path, request_body).unwrap();
@@ -176,12 +186,22 @@ fn _test_api_create_boot(target_api: TargetApi, guest: Guest) {
 
     // Then boot it
     assert!(target_api.remote_command("boot", None));
-    thread::sleep(std::time::Duration::new(20, 0));
+    if is_guest_vm_type_cvm() {
+        // wait until guest boot, cvm guest take little long to boot
+        // This way we will wait for 120 second (default timeout)
+        guest.wait_vm_boot(None).unwrap();
+    } else {
+        thread::sleep(std::time::Duration::new(20, 0));
+    }
 
     let r = std::panic::catch_unwind(|| {
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        if is_guest_vm_type_cvm() {
+            assert!(guest.get_total_memory().unwrap_or_default() > 408_000);
+        } else {
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        }
     });
 
     let _ = child.kill();
@@ -207,13 +227,23 @@ fn _test_api_shutdown(target_api: TargetApi, guest: Guest) {
 
     // Create the VM first
     let cpu_count: u8 = 4;
-    let request_body = guest.api_create_body(
-        cpu_count,
-        direct_kernel_boot_path().to_str().unwrap(),
-        DIRECT_KERNEL_BOOT_CMDLINE,
-        true,
-        generate_host_data().as_str(),
-    );
+    let request_body = if is_guest_vm_type_cvm() {
+        guest.api_create_body(
+            cpu_count,
+            direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            true,
+            generate_host_data().as_str(),
+        )
+    } else {
+        guest.api_create_body(
+            cpu_count,
+            direct_kernel_boot_path().to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            false,
+            "",
+        )
+    };
 
     let temp_config_path = guest.tmp_dir.as_path().join("config");
     std::fs::write(&temp_config_path, request_body).unwrap();
@@ -229,7 +259,11 @@ fn _test_api_shutdown(target_api: TargetApi, guest: Guest) {
 
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        if is_guest_vm_type_cvm() {
+            assert!(guest.get_total_memory().unwrap_or_default() > 408_000);
+        } else {
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        }
 
         // Sync and shutdown without powering off to prevent filesystem
         // corruption.
@@ -249,7 +283,11 @@ fn _test_api_shutdown(target_api: TargetApi, guest: Guest) {
 
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        if is_guest_vm_type_cvm() {
+            assert!(guest.get_total_memory().unwrap_or_default() > 408_000);
+        } else {
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        }
     });
 
     let _ = child.kill();
@@ -275,13 +313,24 @@ fn _test_api_delete(target_api: TargetApi, guest: Guest) {
 
     // Create the VM first
     let cpu_count: u8 = 4;
-    let request_body = guest.api_create_body(
-        cpu_count,
-        direct_kernel_boot_path().to_str().unwrap(),
-        DIRECT_KERNEL_BOOT_CMDLINE,
-        true,
-        generate_host_data().as_str(),
-    );
+    let request_body = if is_guest_vm_type_cvm() {
+        guest.api_create_body(
+            cpu_count,
+            direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            true,
+            generate_host_data().as_str(),
+        )
+    } else {
+        guest.api_create_body(
+            cpu_count,
+            direct_kernel_boot_path().to_str().unwrap(),
+            DIRECT_KERNEL_BOOT_CMDLINE,
+            false,
+            "",
+        )
+    };
+
     let temp_config_path = guest.tmp_dir.as_path().join("config");
     std::fs::write(&temp_config_path, request_body).unwrap();
     let create_config = temp_config_path.as_os_str().to_str().unwrap();
@@ -296,7 +345,13 @@ fn _test_api_delete(target_api: TargetApi, guest: Guest) {
 
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        if is_guest_vm_type_cvm() {
+            // CVM guest will have little less memory,
+            // we will assert based on guest vm type
+            assert!(guest.get_total_memory().unwrap_or_default() > 408_000);
+        } else {
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        }
 
         // Sync and shutdown without powering off to prevent filesystem
         // corruption.
@@ -318,7 +373,13 @@ fn _test_api_delete(target_api: TargetApi, guest: Guest) {
 
         // Check that the VM booted as expected
         assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        if is_guest_vm_type_cvm() {
+            // CVM guest will have little less memory,
+            // we will assert based on guest vm type
+            assert!(guest.get_total_memory().unwrap_or_default() > 408_000);
+        } else {
+            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+        }
     });
 
     let _ = child.kill();
@@ -349,8 +410,8 @@ fn _test_api_pause_resume(target_api: TargetApi, guest: Guest) {
         cpu_count,
         direct_kernel_boot_path().to_str().unwrap(),
         DIRECT_KERNEL_BOOT_CMDLINE,
-        true,
-        generate_host_data().as_str(),
+        false,
+        "",
     );
 
     let temp_config_path = guest.tmp_dir.as_path().join("config");
@@ -2631,9 +2692,7 @@ mod common_parallel {
             .args(["--memory", "size=512M"])
             .default_disks()
             .default_net()
-            .capture_output()
-            .spawn()
-            .unwrap();
+            .capture_output();
 
         let igvm = direct_igvm_boot_path(Some("hvc0"));
         let kernel = direct_kernel_boot_path();
@@ -5323,10 +5382,11 @@ mod common_parallel {
 
         let r = std::panic::catch_unwind(|| {
             let overhead = get_vmm_overhead(child.id(), guest_memory_size_kb);
-            eprintln!("Guest memory overhead: {overhead} vs {MAXIMUM_VMM_OVERHEAD_KB}");
             if is_guest_vm_type_cvm() {
+                eprintln!("Guest memory overhead: {overhead} vs {MAXIMUM_VMM_CVM_OVERHEAD_KB}");
                 assert!(overhead <= MAXIMUM_VMM_CVM_OVERHEAD_KB);
             } else {
+                eprintln!("Guest memory overhead: {overhead} vs {MAXIMUM_VMM_OVERHEAD_KB}");
                 assert!(overhead <= MAXIMUM_VMM_OVERHEAD_KB);
             }
         });
@@ -7283,7 +7343,6 @@ mod common_parallel {
             .default_disks()
             .default_net()
             .args(["--vdpa", "path=/dev/vhost-vdpa-0,num_queues=1"])
-            .args(["--platform", "num_pci_segments=2,iommu_segments=1"])
             .args(["--api-socket", &api_socket])
             .capture_output();
 
