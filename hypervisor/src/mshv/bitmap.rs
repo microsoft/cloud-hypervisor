@@ -133,6 +133,7 @@ impl SimpleAtomicBitmap {
         self.map[index >> 6].set_bit(index & INDEX_MASK)
     }
 
+    #[allow(dead_code)]
     pub fn reset_bit(&self, index: usize) {
         if index >= self.size {
             panic!("Index: {:?} is greater than size: {:?}", index, self.size);
