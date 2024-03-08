@@ -973,7 +973,7 @@ impl DeviceManager {
     pub fn new(
         #[cfg(target_arch = "x86_64")] io_bus: Arc<Bus>,
         mmio_bus: Arc<Bus>,
-        hypervisor_type: HypervisorType,
+        hypervisor: Arc<dyn hypervisor::Hypervisor>,
         vm: Arc<dyn hypervisor::Vm>,
         config: Arc<Mutex<VmConfig>>,
         memory_manager: Arc<Mutex<MemoryManager>>,
@@ -1043,8 +1043,22 @@ impl DeviceManager {
         // and we are supporting 10 segs only so we are saying that end of the device
         // area is 40G.
         assert!(num_pci_segments <= 10);
-        let start_of_device_area = 0x10000000000;
-        let end_of_device_area = 0x10000000000 + (num_pci_segments as u64 * (4 << 30)) - 1;
+        let phys_width =
+            crate::vm::physical_bits(&hypervisor, config.lock().unwrap().cpus.max_phys_bits);
+
+        let mut start_of_device_area = 0x10000000000;
+        if phys_width < 41 {
+            #[cfg(feature = "sev_snp")]
+            if config.lock().unwrap().is_sev_snp_enabled() {
+                error!(
+                    "Cannot start a SEV-SNP guest with max gpa_width: {:?} < 41",
+                    phys_width
+                );
+            }
+            start_of_device_area = (1 << phys_width) - (num_pci_segments + 1) as u64 * (4 << 30);
+        }
+
+        let end_of_device_area = start_of_device_area + (num_pci_segments as u64 * (4 << 30)) - 1;
 
         let start_of_mmio64_area = start_of_device_area;
         let end_of_mmio64_area = end_of_device_area;
@@ -1155,7 +1169,7 @@ impl DeviceManager {
         }
 
         let device_manager = DeviceManager {
-            hypervisor_type,
+            hypervisor_type: hypervisor.hypervisor_type(),
             address_manager: Arc::clone(&address_manager),
             console: Arc::new(Console::default()),
             interrupt_controller: None,
