@@ -640,6 +640,62 @@ impl cpu::Vcpu for MshvVcpu {
 
                     Ok(cpu::VmExit::Ignore)
                 }
+                #[cfg(feature = "sev_snp")]
+                hv_message_type_HVMSG_GPA_ATTRIBUTE_INTERCEPT => {
+                    let info = x.to_gpa_attribute_info().unwrap();
+                    let host_vis = info.__bindgen_anon_1.host_visibility();
+                    if host_vis >= HV_MAP_GPA_READABLE | HV_MAP_GPA_WRITABLE {
+                        warn!("Ignored attribute intercept with full host visibility");
+                        return Ok(cpu::VmExit::Ignore);
+                    }
+
+                    let num_ranges = info.__bindgen_anon_1.range_count();
+                    assert!(num_ranges >= 1);
+                    if num_ranges > 1 {
+                        return Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                            "Unhandled VCPU exit(GPA_ATTRIBUTE_INTERCEPT): Expected num_ranges to be 1 but found num_ranges {:?}",
+                            num_ranges
+                        )));
+                    }
+
+                    // TODO: we could also deny the request with HvCallCompleteIntercept
+                    let mut gpas = Vec::new();
+                    let ranges = info.ranges;
+                    let (gfn_start, gfn_count) = snp::parse_gpa_range(ranges[0]).unwrap();
+                    self.host_access_pages
+                        .reset_bits_range(gfn_start as usize, gfn_count as usize);
+
+                    debug!(
+                        "Releasing pages: gfn_start: {:x?}, gfn_count: {:?}",
+                        gfn_start, gfn_count
+                    );
+                    let gpa_start = gfn_start * HV_PAGE_SIZE;
+                    for i in 0..gfn_count {
+                        gpas.push(gpa_start + i * HV_PAGE_SIZE);
+                    }
+
+                    let mut gpa_list =
+                        vec_with_array_field::<mshv_modify_gpa_host_access, u64>(gpas.len());
+                    gpa_list[0].gpa_list_size = gpas.len() as u64;
+                    gpa_list[0].host_access = host_vis;
+                    gpa_list[0].acquire = 0;
+                    gpa_list[0].flags = 0;
+
+                    // SAFETY: gpa_list initialized with gpas.len() and now it is being turned into
+                    // gpas_slice with gpas.len() again. It is guaranteed to be large enough to hold
+                    // everything from gpas.
+                    unsafe {
+                        let gpas_slice: &mut [u64] = gpa_list[0].gpa_list.as_mut_slice(gpas.len());
+                        gpas_slice.copy_from_slice(gpas.as_slice());
+                    }
+
+                    self.vm_fd
+                        .modify_gpa_host_access(&gpa_list[0])
+                        .map_err(|e| cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                            "Unhandled VCPU exit: attribute intercept - couldn't modify host access {}", e
+                        )))?;
+                    Ok(cpu::VmExit::Ignore)
+                }
                 hv_message_type_HVMSG_UNACCEPTED_GPA => {
                     let info = x.to_memory_info().unwrap();
                     let gva = info.guest_virtual_address;
@@ -1138,10 +1194,11 @@ impl cpu::Vcpu for MshvVcpu {
                                         .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
 
                                     let mut swei2_rw_gpa_arg = mshv_bindings::mshv_read_write_gpa {
-                                        base_gpa: ghcb_gpa + GHCB_SW_EXITINFO2_OFFSET,
+                                        base_gpa: ghcb_gpa + GHCB_SW_EXITINFO1_OFFSET,
                                         byte_count: std::mem::size_of::<u64>() as u32,
                                         ..Default::default()
                                     };
+
                                     self.fd
                                         .gpa_write(&mut swei2_rw_gpa_arg)
                                         .map_err(|e| cpu::HypervisorCpuError::GpaWrite(e.into()))?;
