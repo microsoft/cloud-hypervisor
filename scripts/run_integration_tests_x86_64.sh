@@ -100,8 +100,9 @@ fi
 popd || exit
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
+# We will build kernel only if we are not running integration test for CVM
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
-if [ ! -f "$VMLINUX_IMAGE" ]; then
+if [ ! -f "$VMLINUX_IMAGE" ] && [ "$GUEST_VM_TYPE" != "CVM" ]; then
     build_custom_linux
 fi
 
@@ -146,7 +147,9 @@ rm -rf "$VFIO_DIR" "$VFIO_DISK_IMAGE"
 mkdir -p "$VFIO_DIR"
 cp "$FOCAL_OS_RAW_IMAGE" "$VFIO_DIR"
 cp "$FW" "$VFIO_DIR"
-cp "$VMLINUX_IMAGE" "$VFIO_DIR" || exit 1
+if [ "$GUEST_VM_TYPE" != "CVM" ]; then
+    cp $VMLINUX_IMAGE $VFIO_DIR || exit 1
+fi
 
 cargo build --features "kvm,mshv,igvm,sev_snp" --all  --release --target $BUILD_TARGET
 

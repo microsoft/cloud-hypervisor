@@ -81,8 +81,9 @@ if [ "${TEST_ARCH}" == "aarch64" ]; then
 fi
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
+# We will build kernel only if we are not running perf-metrics test for CVM
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux"
-if [ ! -f "$VMLINUX_IMAGE" ]; then
+if [ ! -f "$VMLINUX_IMAGE" ] && [ "$GUEST_VM_TYPE" != "CVM" ]; then
     build_custom_linux
 fi
 
