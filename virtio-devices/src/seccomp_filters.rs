@@ -232,7 +232,11 @@ fn virtio_vhost_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 }
 
 fn create_vsock_ioctl_seccomp_rule() -> Vec<SeccompRule> {
-    or![and![Cond::new(1, ArgLen::Dword, Eq, FIONBIO,).unwrap()],]
+    or![
+        and![Cond::new(1, ArgLen::Dword, Eq, FIONBIO,).unwrap()],
+        #[cfg(feature = "mshv")]
+        mshv_ioctl_seccomp_rule(),
+    ]
 }
 
 fn virtio_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
