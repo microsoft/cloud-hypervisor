@@ -162,11 +162,7 @@ fn create_virtio_net_ctl_ioctl_seccomp_rule() -> Vec<SeccompRule> {
 }
 
 fn virtio_net_ctl_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
-    vec![
-        (libc::SYS_ioctl, create_virtio_net_ctl_ioctl_seccomp_rule()),
-        #[cfg(feature = "mshv")]
-        (libc::SYS_ioctl, create_mshv_ioctl_seccomp_rule()),
-    ]
+    vec![(libc::SYS_ioctl, create_virtio_net_ctl_ioctl_seccomp_rule())]
 }
 
 fn virtio_pmem_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
