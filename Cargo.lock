@@ -2589,6 +2589,7 @@ dependencies = [
  "log",
  "micro_http",
  "mshv-bindings",
+ "mshv-ioctls",
  "net_util",
  "once_cell",
  "option_parser",
