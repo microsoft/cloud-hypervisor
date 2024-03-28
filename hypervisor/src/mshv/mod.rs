@@ -13,8 +13,6 @@ use crate::hypervisor;
 use crate::vec_with_array_field;
 use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
-#[cfg(feature = "sev_snp")]
-use igvm_parser::page_table::X64_PAGE_SIZE as HV_PAGE_SIZE;
 pub use mshv_bindings::*;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
 use std::any::Any;
@@ -331,7 +329,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             #[cfg(feature = "sev_snp")]
             host_access_pages: Arc::new(SimpleAtomicBitmap::new_with_bytes(
                 mem_size_for_bitmap,
-                HV_PAGE_SIZE as usize,
+                HV_PAGE_SIZE,
             )),
         }))
     }
@@ -669,9 +667,9 @@ impl cpu::Vcpu for MshvVcpu {
                         "Releasing pages: gfn_start: {:x?}, gfn_count: {:?}",
                         gfn_start, gfn_count
                     );
-                    let gpa_start = gfn_start * HV_PAGE_SIZE;
+                    let gpa_start = gfn_start * HV_PAGE_SIZE as u64;
                     for i in 0..gfn_count {
-                        gpas.push(gpa_start + i * HV_PAGE_SIZE);
+                        gpas.push(gpa_start + i * HV_PAGE_SIZE as u64);
                     }
 
                     let mut gpa_list =
