@@ -53,7 +53,7 @@ variables:
       value: ""
     ${{ else }}:
       # Following are VM life cycle tests from ch integration tests
-      value: 'common_parallel::test_api_create_boot,common_parallel::test_api_shutdown,common_parallel::test_macvtap'
+      value: 'common_parallel::test_api_http_create_boot,common_parallel::test_api_http_shutdown,common_parallel::test_api_http_delete,common_parallel::test_macvtap'
   - name: ch_tests_exclude_list_cvm
     # Should be of comma separated strings format
     # Following are known failures
@@ -201,7 +201,7 @@ stages:
           use_ms_hypervisor_fw: "YES"
           use_ms_ovmf_fw: "YES"
           override_clh_ref: $(clh_ref)
-          ch_subtest_include_list: "$(ch_integration_tests),common_parallel::test_api_pause_resume"
+          ch_subtest_include_list: "$(ch_integration_tests),common_parallel::test_api_http_pause_resume"
           system_access_token: $(System.AccessToken)
           run_on_intel: ${{ parameters.run_on_intel }}
           run_on_amd: ${{ parameters.run_on_amd }}
