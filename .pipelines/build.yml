@@ -53,7 +53,7 @@ variables:
       value: ""
     ${{ else }}:
       # Following are VM life cycle tests from ch integration tests
-      value: 'common_parallel::test_api_http_create_boot,common_parallel::test_api_http_shutdown,common_parallel::test_api_http_delete,common_parallel::test_macvtap'
+      value: 'common_parallel::test_api_http_create_boot,common_parallel::test_api_http_shutdown,common_parallel::test_api_http_delete,common_parallel::test_macvtap,common_parallel::test_virtio_vsock,common_parallel::test_virtio_vsock_hotplug,common_parallel::test_pty_interaction'
   - name: ch_tests_exclude_list_cvm
     # Should be of comma separated strings format
     # Following are known failures
