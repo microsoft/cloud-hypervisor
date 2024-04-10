@@ -7658,6 +7658,209 @@ mod common_parallel {
 
         handle_child_output(r, &output);
     }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_guest_clock_sync_with_host() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let cpu_count: u8 = 1;
+
+        let mut cmd = GuestCommand::new(&guest);
+        cmd.args(["--cpus", &format!("boot={cpu_count}")])
+            .args(["--memory", "size=512M"])
+            .default_disks()
+            .default_net()
+            .capture_output();
+
+        let igvm = direct_igvm_boot_path(Some("hvc0"));
+        let kernel = direct_kernel_boot_path();
+        cmd = extend_guest_cmd(
+            cmd,
+            kernel.to_str().unwrap(),
+            Some(DIRECT_KERNEL_BOOT_CMDLINE),
+            igvm.to_str().unwrap(),
+            None,
+        );
+
+        let mut child = cmd.spawn().unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            let output = exec_host_command_output("date +%s");
+            let host_time_str = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u64>();
+            let guest_time_str = guest.ssh_command("date +%s").unwrap().trim().parse::<u64>();
+
+            assert!(host_time_str.is_ok(), "Can not parse Host time string");
+            assert!(guest_time_str.is_ok(), "Can not parse Guest time string");
+
+            let host_time: u64 = host_time_str.unwrap();
+            let guest_time: u64 = guest_time_str.unwrap();
+            let difference = host_time.abs_diff(guest_time);
+
+            assert!(
+                difference < 5,
+                "Host and Guest clock time has more than 5 seconds difference"
+            );
+        });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        handle_child_output(r, &output);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_multi_pci_disks_with_16_vcpu() {
+        test_multi_pci_disks(16, 32, 186)
+    }
+
+    fn test_multi_pci_disks(vcpus: u32, memory_gb: u32, total_pci_disk: u32) {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+
+        let mut cmd = GuestCommand::new(&guest);
+        cmd.args(["--cpus", format!("boot={}", vcpus).as_str()])
+            .args(["--memory", format!("size={}G", memory_gb).as_str()])
+            .default_disks()
+            .default_net()
+            .verbosity(VerbosityLevel::Info)
+            .capture_output();
+
+        // Attach 186 disk with readonly mode
+        let mut workload_path = dirs::home_dir().unwrap();
+        workload_path.push("workloads");
+        let mut blk_file_path = workload_path;
+        blk_file_path.push("blk.img");
+
+        let mut total_segments = total_pci_disk / 31;
+        total_segments += 1;
+
+        if total_segments >= MAX_NUM_PCI_SEGMENTS.into() {
+            panic!(
+                "{}",
+                format!(
+                    "Number of disks are {} overflows the total PCI segment",
+                    total_pci_disk
+                )
+            );
+        }
+
+        let remaining_disk_count = total_pci_disk % 31;
+        for segment in 1..total_segments {
+            for id in 0..31 {
+                let dev_id = format!("{}{}", segment, id);
+                cmd.args([
+                    "--disk",
+                    format!(
+                        "path={},readonly=true,pci_segment={},id={}",
+                        blk_file_path.to_str().unwrap(),
+                        segment,
+                        dev_id,
+                    )
+                    .as_str(),
+                ]);
+            }
+        }
+
+        let last_segment = total_segments;
+        for id in 0..remaining_disk_count {
+            let dev_id = format!("{}{}", last_segment, id);
+            cmd.args([
+                "--disk",
+                format!(
+                    "path={},readonly=true,pci_segment={},id={}",
+                    blk_file_path.to_str().unwrap(),
+                    last_segment,
+                    dev_id,
+                )
+                .as_str(),
+            ]);
+        }
+
+        let platform_string = format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}");
+        let platform = platform_string.as_str();
+
+        let igvm = direct_igvm_boot_path(Some("hvc0"));
+        let kernel = direct_kernel_boot_path();
+        cmd = extend_guest_cmd(
+            cmd,
+            kernel.to_str().unwrap(),
+            Some(DIRECT_KERNEL_BOOT_CMDLINE),
+            igvm.to_str().unwrap(),
+            Some(platform),
+        );
+
+        // Increase open files to test large num of PCI disk device attachment
+        exec_host_command_output("ulimit -n 65536");
+        let mut child = cmd.spawn().unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(Some(200)).unwrap();
+
+            assert_eq!(
+                guest
+                    .ssh_command("lspci | grep 'Mass storage controller' | grep -v 0000 | wc -l")
+                    .unwrap()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(1),
+                total_pci_disk
+            );
+
+            assert_eq!(
+                guest
+                    .ssh_command("lsblk | grep -c vd.*16M || true")
+                    .unwrap()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(1),
+                total_pci_disk
+            );
+        });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "mshv", feature = "igvm", feature = "sev_snp"))]
+    fn test_sev_snp_boot_without_host_data() {
+        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let guest = Guest::new(Box::new(focal));
+        let cpu_count: u8 = 1;
+
+        let mut child = GuestCommand::new(&guest)
+            .args(["--cpus", &format!("boot={cpu_count}")])
+            .args(["--memory", "size=512M"])
+            .args([
+                "--igvm",
+                direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
+            ])
+            .args(["--platform", "sev_snp=on"])
+            .default_disks()
+            .default_net()
+            .capture_output()
+            .spawn()
+            .unwrap();
+
+        let r = std::panic::catch_unwind(|| {
+            guest.wait_vm_boot(None).unwrap();
+
+            assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
+        });
+
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        handle_child_output(r, &output);
+    }
 }
 
 mod dbus_api {
@@ -8964,209 +9167,6 @@ mod vfio {
 
             // Check the VFIO device works after reboot
             guest.check_nvidia_gpu();
-        });
-
-        let _ = child.kill();
-        let output = child.wait_with_output().unwrap();
-
-        handle_child_output(r, &output);
-    }
-
-    #[test]
-    #[cfg(target_arch = "x86_64")]
-    #[cfg(all(feature = "mshv", feature = "igvm", feature = "sev_snp"))]
-    fn test_sev_snp_boot_without_host_data() {
-        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-        let guest = Guest::new(Box::new(focal));
-        let cpu_count: u8 = 1;
-
-        let mut child = GuestCommand::new(&guest)
-            .args(["--cpus", &format!("boot={cpu_count}")])
-            .args(["--memory", "size=512M"])
-            .args([
-                "--igvm",
-                direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
-            ])
-            .args(["--platform", "sev_snp=on"])
-            .default_disks()
-            .default_net()
-            .capture_output()
-            .spawn()
-            .unwrap();
-
-        let r = std::panic::catch_unwind(|| {
-            guest.wait_vm_boot(None).unwrap();
-
-            assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
-        });
-
-        let _ = child.kill();
-        let output = child.wait_with_output().unwrap();
-
-        handle_child_output(r, &output);
-    }
-
-    #[test]
-    #[cfg(target_arch = "x86_64")]
-    fn test_guest_clock_sync_with_host() {
-        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-        let guest = Guest::new(Box::new(focal));
-        let cpu_count: u8 = 1;
-
-        let mut cmd = GuestCommand::new(&guest);
-        cmd.args(["--cpus", &format!("boot={cpu_count}")])
-            .args(["--memory", "size=512M"])
-            .default_disks()
-            .default_net()
-            .capture_output();
-
-        let igvm = direct_igvm_boot_path(Some("hvc0"));
-        let kernel = direct_kernel_boot_path();
-        cmd = extend_guest_cmd(
-            cmd,
-            kernel.to_str().unwrap(),
-            Some(DIRECT_KERNEL_BOOT_CMDLINE),
-            igvm.to_str().unwrap(),
-            None,
-        );
-
-        let mut child = cmd.spawn().unwrap();
-
-        let r = std::panic::catch_unwind(|| {
-            guest.wait_vm_boot(None).unwrap();
-
-            let output = exec_host_command_output("date +%s");
-            let host_time_str = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<u64>();
-            let guest_time_str = guest.ssh_command("date +%s").unwrap().trim().parse::<u64>();
-
-            assert!(host_time_str.is_ok(), "Can not parse Host time string");
-            assert!(guest_time_str.is_ok(), "Can not parse Guest time string");
-
-            let host_time: u64 = host_time_str.unwrap();
-            let guest_time: u64 = guest_time_str.unwrap();
-            let difference = host_time.abs_diff(guest_time);
-
-            assert!(
-                difference < 5,
-                "Host and Guest clock time has more than 5 seconds difference"
-            );
-        });
-
-        let _ = child.kill();
-        let output = child.wait_with_output().unwrap();
-        handle_child_output(r, &output);
-    }
-
-    #[test]
-    #[cfg(target_arch = "x86_64")]
-    fn test_multi_pci_disks_with_16_vcpu() {
-        test_multi_pci_disks(16, 32, 186)
-    }
-
-    fn test_multi_pci_disks(vcpus: u32, memory_gb: u32, total_pci_disk: u32) {
-        let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
-        let guest = Guest::new(Box::new(focal));
-
-        let mut cmd = GuestCommand::new(&guest);
-        cmd.args(["--cpus", format!("boot={}", vcpus).as_str()])
-            .args(["--memory", format!("size={}G", memory_gb).as_str()])
-            .default_disks()
-            .default_net()
-            .verbosity(VerbosityLevel::Info)
-            .capture_output();
-
-        // Attach 186 disk with readonly mode
-        let mut workload_path = dirs::home_dir().unwrap();
-        workload_path.push("workloads");
-        let mut blk_file_path = workload_path;
-        blk_file_path.push("blk.img");
-
-        let mut total_segments = total_pci_disk / 31;
-        total_segments += 1;
-
-        if total_segments >= MAX_NUM_PCI_SEGMENTS.into() {
-            panic!(
-                "{}",
-                format!(
-                    "Number of disks are {} overflows the total PCI segment",
-                    total_pci_disk
-                )
-            );
-        }
-
-        let remaining_disk_count = total_pci_disk % 31;
-        for segment in 1..total_segments {
-            for id in 0..31 {
-                let dev_id = format!("{}{}", segment, id);
-                cmd.args([
-                    "--disk",
-                    format!(
-                        "path={},readonly=true,pci_segment={},id={}",
-                        blk_file_path.to_str().unwrap(),
-                        segment,
-                        dev_id,
-                    )
-                    .as_str(),
-                ]);
-            }
-        }
-
-        let last_segment = total_segments;
-        for id in 0..remaining_disk_count {
-            let dev_id = format!("{}{}", last_segment, id);
-            cmd.args([
-                "--disk",
-                format!(
-                    "path={},readonly=true,pci_segment={},id={}",
-                    blk_file_path.to_str().unwrap(),
-                    last_segment,
-                    dev_id,
-                )
-                .as_str(),
-            ]);
-        }
-
-        let platform_string = format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}");
-        let platform = platform_string.as_str();
-
-        let igvm = direct_igvm_boot_path(Some("hvc0"));
-        let kernel = direct_kernel_boot_path();
-        cmd = extend_guest_cmd(
-            cmd,
-            kernel.to_str().unwrap(),
-            Some(DIRECT_KERNEL_BOOT_CMDLINE),
-            igvm.to_str().unwrap(),
-            Some(platform),
-        );
-
-        // Increase open files to test large num of PCI disk device attachment
-        exec_host_command_output("ulimit -n 65536");
-        let mut child = cmd.spawn().unwrap();
-
-        let r = std::panic::catch_unwind(|| {
-            guest.wait_vm_boot(Some(200)).unwrap();
-
-            assert_eq!(
-                guest
-                    .ssh_command("lspci | grep 'Mass storage controller' | grep -v 0000 | wc -l")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                total_pci_disk
-            );
-
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c vd.*16M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                total_pci_disk
-            );
         });
 
         let _ = child.kill();
