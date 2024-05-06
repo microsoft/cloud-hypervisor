@@ -1078,6 +1078,10 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
         kernel_path = fw_path.as_str();
     }
 
+    println!("CPUS: {}", &format!(
+        "boot={total_vcpus},topology={threads_per_core}:{cores_per_package}:1:{packages}"
+    ));
+
     let mut cmd = GuestCommand::new(&guest);
     cmd.args([
         "--cpus",

@@ -843,12 +843,18 @@ impl CpuManager {
             || {
                 #[cfg(feature = "mshv")]
                 if matches!(self.hypervisor.hypervisor_type(), HypervisorType::Mshv) {
+                    println!("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
                     return Some((1, self.boot_vcpus(), 1));
                 }
                 None
             },
             |t| Some((t.threads_per_core, t.cores_per_die, t.dies_per_package)),
         );
+        if let Some(tp) = topology {
+            println!("AAAAAAAAAAAAAAAAAAAAA: Topology: {:?}, {:?}, {:?}", tp.0, tp.1, tp.2);
+        }
+        
+        #[cfg(target_arch = "x86_64")]
         #[cfg(target_arch = "x86_64")]
         vcpu.configure(
             boot_setup,

@@ -626,13 +626,16 @@ pub fn generate_common_cpuid(
         },
     ];
 
+    let func_01 = unsafe { x86_64::__cpuid(1) };
+    warn!("RUSSELL: Function 01: {:0x?}", func_01);
     // Supported CPUID
     let mut cpuid = hypervisor
         .get_supported_cpuid()
         .map_err(Error::CpuidGetSupported)?;
-
+    warn!("RUSSELL: Supported CPUIDs");
+    print_cpuid(cpuid.clone(), false);
     CpuidPatch::patch_cpuid(&mut cpuid, cpuid_patches);
-
+    print_cpuid(cpuid.clone(), false);
     if let Some(sgx_epc_sections) = &config.sgx_epc_sections {
         update_cpuid_sgx(&mut cpuid, sgx_epc_sections)?;
     }
@@ -775,6 +778,37 @@ pub fn generate_common_cpuid(
     Ok(cpuid)
 }
 
+fn print_cpuid(cpuid: Vec<CpuIdEntry>, only_topology: bool) {
+    debug!("Russell: topology {}", only_topology);
+    debug!(" eax in    eax      ebx      ecx      edx      index     Flag");
+    let topol: Vec<u32> = vec![0x1, 0xb, 0x1f, 0x8000_001e, 0x8000_0001, 0x8000_0008];
+    for cp in cpuid {
+        if only_topology {
+            if topol.iter().any(|&i| i == cp.function)  {
+                debug!("{:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", cp.function, cp.eax, cp.ebx, cp.ecx, cp.edx, cp.index, cp.flags);
+            }
+        } else {
+            debug!("{:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", cp.function, cp.eax, cp.ebx, cp.ecx, cp.edx, cp.index, cp.flags);
+        }
+
+        
+    }
+}
+
+
+fn print_cpuid_fun(cpuid: Vec<CpuIdEntry>, fnc: u32) {
+    debug!("Russell: cpuid fn {}", fnc);
+    debug!(" eax in    eax      ebx      ecx      edx      index     Flag");
+
+    for cp in cpuid {
+        if cp.function == fnc {
+            debug!("{:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", cp.function, cp.eax, cp.ebx, cp.ecx, cp.edx, cp.index, cp.flags);
+            return;
+        }
+    }
+    debug!("FUnction Not Found")
+}
+
 pub fn configure_vcpu(
     vcpu: &Arc<dyn hypervisor::Vcpu>,
     id: u8,
@@ -796,13 +830,15 @@ pub fn configure_vcpu(
 
     // Set ApicId in cpuid for each vcpu
     // SAFETY: get host cpuid when eax=1
+
     let mut cpu_ebx = unsafe { core::arch::x86_64::__cpuid(1) }.ebx;
     cpu_ebx &= 0xffffff;
     cpu_ebx |= x2apic_id << 24;
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1, None, CpuidReg::EBX, cpu_ebx);
-
     if let Some(t) = topology {
+        print_cpuid(cpuid.clone(), true);
         update_cpuid_topology(&mut cpuid, t.0, t.1, t.2, cpu_vendor, id);
+        print_cpuid(cpuid.clone(), true);
     }
 
     // The TSC frequency CPUID leaf should not be included when running with HyperV emulation
@@ -832,7 +868,8 @@ pub fn configure_vcpu(
             };
         }
     }
-
+    debug!("-------------------------------Printing set cpuid--------------------------------------------");
+    print_cpuid(cpuid.clone(), true);
     vcpu.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
 
@@ -1200,19 +1237,23 @@ fn update_cpuid_topology(
         Some((threads_per_core, cores_per_die, dies_per_package)),
     );
 
+    debug!("Russell: threads:{}, core: {}, die:{}", threads_per_core, cores_per_die, dies_per_package);
     let thread_width = 8 - (threads_per_core - 1).leading_zeros();
     let core_width = (8 - (cores_per_die - 1).leading_zeros()) + thread_width;
     let die_width = (8 - (dies_per_package - 1).leading_zeros()) + core_width;
-
+    debug!("Russell: thread_width:{}, core_width: {}, die_width:{}", thread_width, core_width, die_width);
+    //print_cpuid_fun(cpuid.clone(), 0x1);
     let mut cpu_ebx = CpuidPatch::get_cpuid_reg(cpuid, 0x1, None, CpuidReg::EBX).unwrap_or(0);
+    debug!("Russell: cpu_ebx: {:08x}", cpu_ebx);
     cpu_ebx |= ((dies_per_package as u32) * (cores_per_die as u32) * (threads_per_core as u32))
         & 0xff << 16;
     CpuidPatch::set_cpuid_reg(cpuid, 0x1, None, CpuidReg::EBX, cpu_ebx);
-
+    debug!("Russell: cpu_ebx: {:08x}", cpu_ebx);
     let mut cpu_edx = CpuidPatch::get_cpuid_reg(cpuid, 0x1, None, CpuidReg::EDX).unwrap_or(0);
+    debug!("Russell: cpu_edx: {:08x}", cpu_edx);
     cpu_edx |= 1 << 28;
     CpuidPatch::set_cpuid_reg(cpuid, 0x1, None, CpuidReg::EDX, cpu_edx);
-
+    debug!("Russell: cpu_edx: {:08x}", cpu_edx);
     // CPU Topology leaf 0xb
     CpuidPatch::set_cpuid_reg(cpuid, 0xb, Some(0), CpuidReg::EAX, thread_width);
     CpuidPatch::set_cpuid_reg(

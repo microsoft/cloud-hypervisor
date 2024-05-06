@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
+use crate::cpu::CpuVendor;
 
 #[cfg(feature = "sev_snp")]
 mod bitmap;
@@ -360,7 +361,27 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> hypervisor::Result<Vec<CpuIdEntry>> {
-        Ok(Vec::new())
+        let mut cpuid: Vec<CpuIdEntry> = Vec::new();
+        let mut funcs: Vec<u32> = Vec::new();
+        funcs.extend([0x1, 0xb, 0x1f]);
+        if matches!(self.get_cpu_vendor(), CpuVendor::AMD) {
+            funcs.extend([0x8000_001e, 0x8000_0001, 0x8000_0008]);
+        }
+        for fnc in funcs {
+            let leaf = unsafe {std::arch::x86_64::__cpuid(fnc) };
+            cpuid.push(
+                CpuIdEntry {
+                    function: fnc,
+                    eax: leaf.eax,
+                    ebx: leaf.ebx,
+                    edx: leaf.edx,
+                    ecx: leaf.ecx,
+                    flags: 1,
+                    ..Default::default()
+                }
+            );
+        }
+        Ok(cpuid)
     }
 
     /// Get maximum number of vCPUs
