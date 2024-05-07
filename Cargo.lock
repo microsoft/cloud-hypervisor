@@ -2593,6 +2593,7 @@ dependencies = [
  "cfg-if",
  "clap",
  "devices",
+ "dhat",
  "epoll",
  "event_monitor",
  "flume",
