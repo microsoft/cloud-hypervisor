@@ -7892,13 +7892,23 @@ mod dbus_api {
 
         // Create the VM first
         let cpu_count: u8 = 4;
-        let request_body = guest.api_create_body(
-            cpu_count,
-            direct_kernel_boot_path().to_str().unwrap(),
-            DIRECT_KERNEL_BOOT_CMDLINE,
-            true,
-            generate_host_data().as_str(),
-        );
+        let request_body = if is_guest_vm_type_cvm() {
+            guest.api_create_body(
+                cpu_count,
+                direct_igvm_boot_path(Some("hvc0")).to_str().unwrap(),
+                DIRECT_KERNEL_BOOT_CMDLINE,
+                true,
+                generate_host_data().as_str(),
+            )
+        } else {
+            guest.api_create_body(
+                cpu_count,
+                direct_kernel_boot_path().to_str().unwrap(),
+                DIRECT_KERNEL_BOOT_CMDLINE,
+                false,
+                "",
+            )
+        };
 
         let temp_config_path = guest.tmp_dir.as_path().join("config");
         std::fs::write(&temp_config_path, request_body).unwrap();
