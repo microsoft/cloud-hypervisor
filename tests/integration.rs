@@ -3131,12 +3131,6 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", "boot=1"])
             .args(["--memory", "size=512M"])
-            .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", DIRECT_KERNEL_BOOT_CMDLINE])
-            .args([
-                "--platform",
-                &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}"),
-            ])
             .args([
                 "--disk",
                 format!(
@@ -3153,6 +3147,17 @@ mod common_parallel {
             ])
             .capture_output()
             .default_net();
+
+        let igvm = direct_igvm_boot_path(Some("hvc0"));
+        let kernel_path = direct_kernel_boot_path();
+        let platform: &str = &format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}");
+        cmd = extend_guest_cmd(
+            cmd,
+            kernel_path.to_str().unwrap(),
+            Some(DIRECT_KERNEL_BOOT_CMDLINE),
+            igvm.to_str().unwrap(),
+            Some(platform),
+        );
 
         let mut child = cmd.spawn().unwrap();
 
