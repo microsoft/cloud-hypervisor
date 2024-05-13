@@ -100,7 +100,7 @@ TOTAL_MEM_GB=$(free -g | grep Mem | awk '{print $2}')
 
 # setup hugepages
 HUGEPAGESIZE=`grep Hugepagesize /proc/meminfo | awk '{print $2}'`
-if [ "$TOTAL_MEM_GB" -lt 256 ]; then
+if [ "$TOTAL_MEM_GB" -lt 192 ]; then
     PAGE_NUM=`echo $((12288 * 1024 / $HUGEPAGESIZE))`
 else
     PAGE_NUM=`echo $((128 * 1024 * 1024 / $HUGEPAGESIZE))`
