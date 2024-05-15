@@ -1046,10 +1046,14 @@ impl DeviceManager {
         let phys_width =
             crate::vm::physical_bits(&hypervisor, config.lock().unwrap().cpus.max_phys_bits);
 
+        #[cfg(not(feature = "sev_snp"))]
+        let sev_snp_enabled = false;
+        #[cfg(feature = "sev_snp")]
+        let sev_snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
+
         let mut start_of_device_area = 0x10000000000;
         if phys_width < 41 {
-            #[cfg(feature = "sev_snp")]
-            if config.lock().unwrap().is_sev_snp_enabled() {
+            if sev_snp_enabled {
                 error!(
                     "Cannot start a SEV-SNP guest with max gpa_width: {:?} < 41",
                     phys_width
@@ -1060,8 +1064,16 @@ impl DeviceManager {
 
         let end_of_device_area = start_of_device_area + (num_pci_segments as u64 * (4 << 30)) - 1;
 
-        let start_of_mmio64_area = start_of_device_area;
-        let end_of_mmio64_area = end_of_device_area;
+        #[allow(unused_assignments, unused_mut)]
+        let mut start_of_mmio64_area = start_of_device_area;
+        #[allow(unused_assignments, unused_mut)]
+        let mut end_of_mmio64_area = end_of_device_area;
+
+        if !sev_snp_enabled {
+            start_of_mmio64_area = memory_manager.lock().unwrap().start_of_device_area().0;
+            end_of_mmio64_area = memory_manager.lock().unwrap().end_of_device_area().0;
+        }
+
         let pci_mmio64_allocators = create_mmio_allocators(
             start_of_mmio64_area,
             end_of_mmio64_area,
