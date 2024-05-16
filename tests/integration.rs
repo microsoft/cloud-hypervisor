@@ -7730,7 +7730,6 @@ mod common_parallel {
         let mut cmd = GuestCommand::new(&guest);
         cmd.args(["--cpus", format!("boot={}", vcpus).as_str()])
             .args(["--memory", format!("size={}G", memory_gb).as_str()])
-            .default_disks()
             .default_net()
             .verbosity(VerbosityLevel::Info)
             .capture_output();
@@ -7755,36 +7754,40 @@ mod common_parallel {
         }
 
         let remaining_disk_count = total_pci_disk % 31;
+        let mut disk_arg: Vec<String> = vec![
+            "--disk".to_string(),
+            format!(
+                "path={}",
+                guest.disk_config.disk(DiskType::OperatingSystem).unwrap()
+            ),
+            format!(
+                "path={}",
+                guest.disk_config.disk(DiskType::CloudInit).unwrap()
+            ),
+        ];
         for segment in 1..total_segments {
             for id in 0..31 {
                 let dev_id = format!("{}{}", segment, id);
-                cmd.args([
-                    "--disk",
-                    format!(
-                        "path={},readonly=true,pci_segment={},id={}",
-                        blk_file_path.to_str().unwrap(),
-                        segment,
-                        dev_id,
-                    )
-                    .as_str(),
-                ]);
+                disk_arg.push(format!(
+                    "path={},readonly=true,pci_segment={},id={}",
+                    blk_file_path.to_str().unwrap(),
+                    segment,
+                    dev_id,
+                ));
             }
         }
 
         let last_segment = total_segments;
         for id in 0..remaining_disk_count {
             let dev_id = format!("{}{}", last_segment, id);
-            cmd.args([
-                "--disk",
-                format!(
-                    "path={},readonly=true,pci_segment={},id={}",
-                    blk_file_path.to_str().unwrap(),
-                    last_segment,
-                    dev_id,
-                )
-                .as_str(),
-            ]);
+            disk_arg.push(format!(
+                "path={},readonly=true,pci_segment={},id={}",
+                blk_file_path.to_str().unwrap(),
+                last_segment,
+                dev_id,
+            ));
         }
+        cmd.args(disk_arg);
 
         let platform_string = format!("num_pci_segments={MAX_NUM_PCI_SEGMENTS}");
         let platform = platform_string.as_str();
