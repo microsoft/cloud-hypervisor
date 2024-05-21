@@ -59,8 +59,8 @@ kvm-bindings = { git = "https://github.com/cloud-hypervisor/kvm-bindings", branc
 versionize_derive = { git = "https://github.com/cloud-hypervisor/versionize_derive", branch = "ch-0.1.6" }
 
 [patch."https://github.com/rust-vmm/vfio"]
-vfio-ioctls = { git = "https://github.com/NunoDasNeves/vfio", branch = "nudasnev/mshv-v0.2.0" }
-vfio-bindings = { git = "https://github.com/NunoDasNeves/vfio", branch = "nudasnev/mshv-v0.2.0" }
+vfio-ioctls = { git = "https://github.com/NunoDasNeves/vfio", branch = "nudasnev/mshv-v0.3.0" }
+vfio-bindings = { git = "https://github.com/NunoDasNeves/vfio", branch = "nudasnev/mshv-v0.3.0" }
 
 [dev-dependencies]
 dirs = "5.0.0"
