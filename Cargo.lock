@@ -1298,10 +1298,11 @@ dependencies = [
 
 [[package]]
 name = "mshv-bindings"
-version = "0.1.1"
-source = "git+https://github.com/rust-vmm/mshv?branch=main#9f1e0cd775b30f36044bd045b27863b953c5988a"
+version = "0.2.0"
+source = "git+https://github.com/rust-vmm/mshv?tag=v0.2.0#dd0a9f5ab9c32673e88d6de200af788dbfca6a72"
 dependencies = [
  "libc",
+ "num_enum",
  "serde",
  "serde_derive",
  "vmm-sys-util",
@@ -1310,11 +1311,12 @@ dependencies = [
 
 [[package]]
 name = "mshv-ioctls"
-version = "0.1.1"
-source = "git+https://github.com/rust-vmm/mshv?branch=main#9f1e0cd775b30f36044bd045b27863b953c5988a"
+version = "0.2.0"
+source = "git+https://github.com/rust-vmm/mshv?tag=v0.2.0#dd0a9f5ab9c32673e88d6de200af788dbfca6a72"
 dependencies = [
  "libc",
  "mshv-bindings",
+ "thiserror",
  "vmm-sys-util",
 ]
 
@@ -1385,6 +1387,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39e3200413f237f41ab11ad6d161bc7239c84dcb631773ccd7de3dfe4b5c267c"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_enum"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02339744ee7253741199f897151b38e72257d13802d4ee837285cc2990a90845"
+dependencies = [
+ "num_enum_derive",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "681030a937600a36906c185595136d26abfebb4aa9c65701cefcaf8578bb982b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.48",
 ]
 
 [[package]]
@@ -2340,7 +2362,7 @@ dependencies = [
 [[package]]
 name = "vfio-bindings"
 version = "0.4.0"
-source = "git+https://github.com/rust-vmm/vfio?branch=main#0daff4d4c159e842cf18b8b90457a45032b2df5a"
+source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.2.0#124c596d5521c28ecbd1376fce4c7432d882ed0a"
 dependencies = [
  "vmm-sys-util",
 ]
@@ -2348,7 +2370,7 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.2.0"
-source = "git+https://github.com/rust-vmm/vfio?branch=main#0daff4d4c159e842cf18b8b90457a45032b2df5a"
+source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.2.0#124c596d5521c28ecbd1376fce4c7432d882ed0a"
 dependencies = [
  "byteorder",
  "kvm-bindings",
