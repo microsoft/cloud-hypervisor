@@ -191,11 +191,12 @@ if [ $RES -eq 0 ]; then
 fi
 
 # Run tests on dbus_api
-if [ $RES -eq 0 ]; then
-    cargo build --features "mshv,dbus_api,igvm,sev_snp" --all --release --target "$BUILD_TARGET"
-    export RUST_BACKTRACE=1
-    # integration tests now do not reply on build feature "dbus_api"
-    time cargo test $test_features "dbus_api::$test_filter" -- ${test_binary_args[*]}
+cargo build --features "mshv,dbus_api,igvm,sev_snp" --all --release --target "$BUILD_TARGET"
+export RUST_BACKTRACE=1
+# integration tests now do not reply on build feature "dbus_api"
+time cargo test $test_features "dbus_api::$test_filter" -- ${test_binary_args[*]}
+
+if [ $? -ne 0 ]; then
     RES=$?
 fi
 
