@@ -32,6 +32,10 @@ parameters:
     displayName: LISA Github ref
     type: string
     default: " "
+  - name: lsg_virt_mariner_build_id
+    displayName: Build ID of lsg-virt-mariner pipeline
+    type: string
+    default: " "
 
 variables:
   - group: azure_subscription_testonly
@@ -205,6 +209,7 @@ stages:
           system_access_token: $(System.AccessToken)
           run_on_intel: ${{ parameters.run_on_intel }}
           run_on_amd: ${{ parameters.run_on_amd }}
+          build_source: ${{ parameters.lsg_virt_mariner_build_id }}
           ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
             intel_vm_size_func: "Standard_D16ds_v5"
             amd_vm_size_func: "Standard_D16ads_v5"
@@ -231,6 +236,7 @@ stages:
           clh_guest_vm_type: "CVM"
           override_clh_ref: $(clh_ref)
           run_on_amd: true
+          build_source: ${{ parameters.lsg_virt_mariner_build_id }}
           ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
             amd_vm_size_func: "Standard_DC16ads_cc_v5"
           ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
