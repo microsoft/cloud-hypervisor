@@ -15,6 +15,7 @@ use crate::vm::{self, InterruptSourceConfig, VmOps};
 use crate::HypervisorType;
 use iced_x86::Register;
 pub use mshv_bindings::*;
+pub use mshv_ioctls;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd, VmType};
 use std::any::Any;
 use std::collections::HashMap;
