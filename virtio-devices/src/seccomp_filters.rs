@@ -54,15 +54,19 @@ const FIONBIO: u64 = 0x5421;
 const VFIO_IOMMU_MAP_DMA: u64 = 0x3b71;
 const VFIO_IOMMU_UNMAP_DMA: u64 = 0x3b72;
 
-#[cfg(feature = "mshv")]
-pub const MSHV_MODIFY_GPA_HOST_ACCESS: u64 = 0x4018_b828;
-
 // See include/uapi/linux/if_tun.h in the kernel code.
 const TUNSETOFFLOAD: u64 = 0x4004_54d0;
 
 #[cfg(feature = "mshv")]
 fn mshv_ioctl_seccomp_rule() -> SeccompRule {
-    and![Cond::new(1, ArgLen::Dword, Eq, MSHV_MODIFY_GPA_HOST_ACCESS).unwrap()]
+    use hypervisor::mshv::mshv_ioctls;
+    and![Cond::new(
+        1,
+        ArgLen::Dword,
+        Eq,
+        mshv_ioctls::MSHV_MODIFY_GPA_HOST_ACCESS()
+    )
+    .unwrap()]
 }
 
 #[cfg(feature = "mshv")]

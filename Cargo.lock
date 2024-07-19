@@ -1295,8 +1295,8 @@ dependencies = [
 
 [[package]]
 name = "mshv-bindings"
-version = "0.2.0"
-source = "git+https://github.com/rust-vmm/mshv?tag=v0.2.0#dd0a9f5ab9c32673e88d6de200af788dbfca6a72"
+version = "0.3.0"
+source = "git+https://github.com/rust-vmm/mshv?tag=v0.3.0#fda05380ea4c68b807996299d5ffb2854ca6d01d"
 dependencies = [
  "libc",
  "num_enum",
@@ -1308,8 +1308,8 @@ dependencies = [
 
 [[package]]
 name = "mshv-ioctls"
-version = "0.2.0"
-source = "git+https://github.com/rust-vmm/mshv?tag=v0.2.0#dd0a9f5ab9c32673e88d6de200af788dbfca6a72"
+version = "0.3.0"
+source = "git+https://github.com/rust-vmm/mshv?tag=v0.3.0#fda05380ea4c68b807996299d5ffb2854ca6d01d"
 dependencies = [
  "libc",
  "mshv-bindings",
@@ -2359,7 +2359,7 @@ dependencies = [
 [[package]]
 name = "vfio-bindings"
 version = "0.4.0"
-source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.2.0#124c596d5521c28ecbd1376fce4c7432d882ed0a"
+source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.3.0#16014706ebdf1954cb464a262f3503a5e8611edd"
 dependencies = [
  "vmm-sys-util",
 ]
@@ -2367,7 +2367,7 @@ dependencies = [
 [[package]]
 name = "vfio-ioctls"
 version = "0.2.0"
-source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.2.0#124c596d5521c28ecbd1376fce4c7432d882ed0a"
+source = "git+https://github.com/NunoDasNeves/vfio?branch=nudasnev/mshv-v0.3.0#16014706ebdf1954cb464a262f3503a5e8611edd"
 dependencies = [
  "byteorder",
  "kvm-bindings",
@@ -2608,6 +2608,7 @@ dependencies = [
  "log",
  "micro_http",
  "mshv-bindings",
+ "mshv-ioctls",
  "net_util",
  "once_cell",
  "option_parser",
