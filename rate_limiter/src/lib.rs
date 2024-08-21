@@ -307,14 +307,14 @@ impl RateLimiter {
     ///
     /// * `bytes_total_capacity` - the total capacity of the `TokenType::Bytes` token bucket.
     /// * `bytes_one_time_burst` - initial extra credit on top of `bytes_total_capacity`,
-    /// that does not replenish and which can be used for an initial burst of data.
+    ///   that does not replenish and which can be used for an initial burst of data.
     /// * `bytes_complete_refill_time_ms` - number of milliseconds for the `TokenType::Bytes`
-    /// token bucket to go from zero Bytes to `bytes_total_capacity` Bytes.
+    ///   token bucket to go from zero Bytes to `bytes_total_capacity` Bytes.
     /// * `ops_total_capacity` - the total capacity of the `TokenType::Ops` token bucket.
     /// * `ops_one_time_burst` - initial extra credit on top of `ops_total_capacity`,
-    /// that does not replenish and which can be used for an initial burst of data.
+    ///   that does not replenish and which can be used for an initial burst of data.
     /// * `ops_complete_refill_time_ms` - number of milliseconds for the `TokenType::Ops` token
-    /// bucket to go from zero Ops to `ops_total_capacity` Ops.
+    ///   bucket to go from zero Ops to `ops_total_capacity` Ops.
     ///
     /// If either bytes/ops *size* or *refill_time* are **zero**, the limiter
     /// is **disabled** for that respective token type.
@@ -663,8 +663,8 @@ pub(crate) mod tests {
         // limiter should not be blocked
         assert!(!l.is_blocked());
         // limiter should be disabled so consume(whatever) should work
-        assert!(l.consume(u64::max_value(), TokenType::Ops));
-        assert!(l.consume(u64::max_value(), TokenType::Bytes));
+        assert!(l.consume(u64::MAX, TokenType::Ops));
+        assert!(l.consume(u64::MAX, TokenType::Bytes));
         // calling the handler without there having been an event should error
         assert!(l.event_handler().is_err());
         assert_eq!(
@@ -722,7 +722,7 @@ pub(crate) mod tests {
         assert!(l.as_raw_fd() > 0);
 
         // ops/s limiter should be disabled so consume(whatever) should work
-        assert!(l.consume(u64::max_value(), TokenType::Ops));
+        assert!(l.consume(u64::MAX, TokenType::Ops));
 
         // do full 1000 bytes
         assert!(l.consume(1000, TokenType::Bytes));
@@ -755,7 +755,7 @@ pub(crate) mod tests {
         assert!(l.as_raw_fd() > 0);
 
         // bytes/s limiter should be disabled so consume(whatever) should work
-        assert!(l.consume(u64::max_value(), TokenType::Bytes));
+        assert!(l.consume(u64::MAX, TokenType::Bytes));
 
         // do full 1000 ops
         assert!(l.consume(1000, TokenType::Ops));
