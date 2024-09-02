@@ -34,6 +34,9 @@ HV_FW_PATH="${HV_FW_PATH:-${USE_MS_HV_FW:+${MS_CLH_FILES_PATH}/hypervisor-fw}}"
 # Assign OVMF_FW_PATH to default MSFT CLOUDHV_EFI.fd if unset and if USE_MS_OVMF_FW is set
 OVMF_FW_PATH="${OVMF_FW_PATH:-${USE_MS_OVMF_FW:+${MS_CLH_FILES_PATH}/CLOUDHV_EFI.fd}}"
 
+# Assign BZ_IMAGE_PATH to default MSFT bzImage if unset and if USE_MS_BZ_IMAGE is set
+BZ_IMAGE_PATH="${BZ_IMAGE_PATH:-${USE_MS_BZ_IMAGE:+${MS_CLH_FILES_PATH}/bzImage}}"
+
 # Container paths
 CTR_CLH_ROOT_DIR="/cloud-hypervisor"
 CTR_CLH_CARGO_BUILT_DIR="${CTR_CLH_ROOT_DIR}/build"
@@ -472,6 +475,15 @@ cmd_tests() {
 		    exit 1
 	    fi
 	    sudo cp $OVMF_FW_PATH $CLH_INTEGRATION_WORKLOADS/CLOUDHV.fd
+    fi
+
+    if [ -n "$BZ_IMAGE_PATH" ]; then
+	    echo "Using custom bzImage: $BZ_IMAGE_PATH"
+	    if [ ! -f "$BZ_IMAGE_PATH" ]; then
+		    echo "File not found: $BZ_IMAGE_PATH"
+		    exit 1
+	    fi
+	    sudo cp $BZ_IMAGE_PATH $CLH_INTEGRATION_WORKLOADS/bzImage
     fi
 
     if [ "$integration" = true ]; then
