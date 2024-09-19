@@ -249,9 +249,8 @@ impl Request {
         let hdr_desc = desc_chain
             .next()
             .ok_or(Error::DescriptorChainTooShort)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 error!("Missing head descriptor");
-                e
             })?;
 
         // The head contains the request type which MUST be readable.
@@ -280,9 +279,8 @@ impl Request {
         let mut desc = desc_chain
             .next()
             .ok_or(Error::DescriptorChainTooShort)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 error!("Only head descriptor present: request = {:?}", req);
-                e
             })?;
 
         if !desc.has_next() {
@@ -317,9 +315,8 @@ impl Request {
                 desc = desc_chain
                     .next()
                     .ok_or(Error::DescriptorChainTooShort)
-                    .map_err(|e| {
+                    .inspect_err(|_| {
                         error!("DescriptorChain corrupted: request = {:?}", req);
-                        e
                     })?;
             }
             status_desc = desc;

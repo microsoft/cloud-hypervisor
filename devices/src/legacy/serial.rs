@@ -416,14 +416,11 @@ mod tests {
             None,
         );
 
-        serial.write(0, DATA as u64, &[b'x', b'y']);
-        serial.write(0, DATA as u64, &[b'a']);
-        serial.write(0, DATA as u64, &[b'b']);
-        serial.write(0, DATA as u64, &[b'c']);
-        assert_eq!(
-            serial_out.buf.lock().unwrap().as_slice(),
-            &[b'a', b'b', b'c']
-        );
+        serial.write(0, DATA as u64, b"xy");
+        serial.write(0, DATA as u64, b"a");
+        serial.write(0, DATA as u64, b"b");
+        serial.write(0, DATA as u64, b"c");
+        assert_eq!(serial_out.buf.lock().unwrap().as_slice(), b"abc");
     }
 
     #[test]
@@ -441,7 +438,7 @@ mod tests {
         // counter doesn't change (for 0 it blocks)
         assert!(intr_evt.write(1).is_ok());
         serial.write(0, IER as u64, &[IER_RECV_BIT]);
-        serial.queue_input_bytes(&[b'a', b'b', b'c']).unwrap();
+        serial.queue_input_bytes(b"abc").unwrap();
 
         assert_eq!(intr_evt.read().unwrap(), 2);
 
@@ -478,7 +475,7 @@ mod tests {
         // counter doesn't change (for 0 it blocks)
         assert!(intr_evt.write(1).is_ok());
         serial.write(0, IER as u64, &[IER_THR_BIT]);
-        serial.write(0, DATA as u64, &[b'a']);
+        serial.write(0, DATA as u64, b"a");
 
         assert_eq!(intr_evt.read().unwrap(), 2);
         let mut data = [0u8];
@@ -520,9 +517,9 @@ mod tests {
         );
 
         serial.write(0, MCR as u64, &[MCR_LOOP_BIT]);
-        serial.write(0, DATA as u64, &[b'a']);
-        serial.write(0, DATA as u64, &[b'b']);
-        serial.write(0, DATA as u64, &[b'c']);
+        serial.write(0, DATA as u64, b"a");
+        serial.write(0, DATA as u64, b"b");
+        serial.write(0, DATA as u64, b"c");
 
         let mut data = [0u8];
         serial.read(0, MSR as u64, &mut data[..]);
