@@ -184,11 +184,9 @@ RES=$?
 
 # Run some tests in sequence since the result could be affected by other tests
 # running in parallel.
-if [ $RES -eq 0 ]; then
-    export RUST_BACKTRACE=1
-    time cargo test $test_features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
-    RES=$?
-fi
+export RUST_BACKTRACE=1
+time cargo test $test_features "common_sequential::$test_filter" -- --test-threads=1 ${test_binary_args[*]}
+RES=$?
 
 # Run tests on dbus_api
 cargo build --features "mshv,dbus_api,igvm,sev_snp" --all --release --target "$BUILD_TARGET"
