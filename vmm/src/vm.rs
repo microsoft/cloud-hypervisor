@@ -482,7 +482,6 @@ pub struct Vm {
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     stop_on_boot: bool,
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
-    sev_snp_enabled: bool,
 }
 
 impl Vm {
@@ -521,8 +520,6 @@ impl Vm {
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
-        #[cfg(not(feature = "sev_snp"))]
-        let sev_snp_enabled = false;
         #[cfg(feature = "sev_snp")]
         let sev_snp_enabled = config.lock().unwrap().is_sev_snp_enabled();
         #[cfg(feature = "tdx")]
@@ -626,6 +623,24 @@ impl Vm {
         )
         .map_err(Error::DeviceManager)?;
 
+        // Loading the igvm file is pushed down here because
+        // igvm parser needs cpu_manager to retrieve cpuid leaf.
+        // Currently, Microsoft Hypervisor does not provide any
+        // Hypervisor specific common cpuid, we need to call get_cpuid_values
+        // per cpuid through cpu_manager.
+        let load_payload_handle = if snapshot.is_none() {
+            Self::load_payload_async(
+                &memory_manager,
+                &config,
+                #[cfg(feature = "igvm")]
+                &cpu_manager,
+                #[cfg(feature = "sev_snp")]
+                sev_snp_enabled,
+            )?
+        } else {
+            None
+        };
+
         // For MSHV, we need to create the interrupt controller before we initialize the VM.
         // Because we need to set the base address of GICD before we initialize the VM.
         #[cfg(feature = "mshv")]
@@ -664,24 +679,6 @@ impl Vm {
             .unwrap()
             .add_uefi_flash()
             .map_err(Error::MemoryManager)?;
-
-        // Loading the igvm file is pushed down here because
-        // igvm parser needs cpu_manager to retrieve cpuid leaf.
-        // Currently, Microsoft Hypervisor does not provide any
-        // Hypervisor specific common cpuid, we need to call get_cpuid_values
-        // per cpuid through cpu_manager.
-        let load_payload_handle = if snapshot.is_none() {
-            Self::load_payload_async(
-                &memory_manager,
-                &config,
-                #[cfg(feature = "igvm")]
-                &cpu_manager,
-                #[cfg(feature = "sev_snp")]
-                sev_snp_enabled,
-            )?
-        } else {
-            None
-        };
 
         cpu_manager
             .lock()
@@ -773,7 +770,6 @@ impl Vm {
             hypervisor,
             stop_on_boot,
             load_payload_handle,
-            sev_snp_enabled,
         })
     }
 
