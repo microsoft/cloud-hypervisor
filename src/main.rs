@@ -1138,8 +1138,7 @@ mod unit_tests {
 
     #[test]
     fn test_valid_vm_config_memory() {
-        vec![
-            (
+        [(
                 vec!["cloud-hypervisor", "--kernel", "/path/to/kernel", "--memory", "size=1073741824"],
                 r#"{
                     "payload": {"kernel": "/path/to/kernel"},
@@ -1194,8 +1193,7 @@ mod unit_tests {
                     "memory": {"size": 1073741824, "hotplug_method": "VirtioMem", "hotplug_size": 1073741824}
                 }"#,
                 true,
-            ),
-        ]
+            )]
         .iter()
         .for_each(|(cli, openapi, equal)| {
             compare_vm_config_cli_vs_json(cli, openapi, *equal);
@@ -1346,7 +1344,7 @@ mod unit_tests {
 
     #[test]
     fn test_valid_vm_config_net() {
-        vec![
+        [
             // This test is expected to fail because the default MAC address is
             // randomly generated. There's no way we can have twice the same
             // default value.
@@ -1824,7 +1822,7 @@ mod unit_tests {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_valid_vm_config_devices() {
-        vec![
+        [
             (
                 vec![
                     "cloud-hypervisor",
