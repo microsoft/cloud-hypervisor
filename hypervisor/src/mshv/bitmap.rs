@@ -74,7 +74,8 @@ impl Default for SimpleAtomicBitmap {
 #[allow(clippy::len_without_is_empty)]
 impl SimpleAtomicBitmap {
     pub fn new(size: usize) -> Self {
-        let map_size = size / AtomicU64::capacity() + usize::from(size % AtomicU64::capacity() > 0);
+        let map_size =
+            size / AtomicU64::capacity() + usize::from(!size.is_multiple_of(AtomicU64::capacity()));
         let map: Vec<AtomicU64> = (0..map_size).map(|_| AtomicU64::new(0)).collect();
         SimpleAtomicBitmap {
             map,
@@ -85,7 +86,7 @@ impl SimpleAtomicBitmap {
 
     pub fn new_with_bytes(size: usize, page_size: usize) -> Self {
         let mut num_pages = size / page_size;
-        if size % page_size > 0 {
+        if !size.is_multiple_of(page_size) {
             num_pages += 1;
         }
         SimpleAtomicBitmap::new(num_pages)
