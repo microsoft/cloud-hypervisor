@@ -2751,6 +2751,7 @@ mod unit_tests {
             iommu: false,
             numa: None,
             watchdog: false,
+            rtc: None,
             #[cfg(feature = "guest_debug")]
             gdb: false,
             pci_segments: None,
