@@ -3334,7 +3334,6 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     fn test_pci_multiple_segments() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -8832,7 +8831,6 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     fn test_net_multi_segment_hotplug() {
         _test_net_hotplug(Some(15));
     }
