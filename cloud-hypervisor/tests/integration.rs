@@ -2751,8 +2751,9 @@ mod common_parallel {
     use std::fs::{File, OpenOptions, copy};
     use std::io::{self, SeekFrom};
 
-    use crate::*;
     use block::ImageType;
+
+    use crate::*;
 
     #[test]
     #[cfg(target_arch = "x86_64")]
