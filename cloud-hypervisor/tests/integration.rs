@@ -3334,7 +3334,6 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     fn test_pci_multiple_segments() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -5092,7 +5091,7 @@ mod common_parallel {
 
     #[test]
     fn test_virtio_block_direct_and_firmware() {
-        let disk_config = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+        let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
 
         // The OS disk must be copied to a location that is not backed by
@@ -8832,7 +8831,6 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     fn test_net_multi_segment_hotplug() {
         _test_net_hotplug(Some(15));
     }
@@ -10034,7 +10032,6 @@ mod common_parallel {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
-    #[ignore = "See #5756"]
     fn test_vdpa_net() {
         // Before trying to run the test, verify the vdpa_sim_net module is correctly loaded.
         if !exec_host_command_status("lsmod | grep vdpa_sim_net").success() {
@@ -10494,7 +10491,6 @@ mod dbus_api {
     // to create a VM, boot it, and verify that it can be shut down and then
     // booted again.
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     #[cfg_attr(
         all(feature = "mshv", target_arch = "aarch64"),
         ignore = "disabled for mshv arm64, see ADO #60239414"
@@ -10589,7 +10585,6 @@ mod dbus_api {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     #[cfg_attr(
         all(feature = "mshv", target_arch = "aarch64"),
         ignore = "disabled for mshv arm64, see ADO #60239414"
@@ -10603,7 +10598,6 @@ mod dbus_api {
     }
 
     #[test]
-    #[cfg(not(feature = "sev_snp"))]
     #[cfg_attr(
         all(feature = "mshv", target_arch = "aarch64"),
         ignore = "disabled for mshv arm64, see ADO #60239414"
