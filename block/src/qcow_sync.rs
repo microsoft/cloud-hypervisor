@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -259,6 +260,8 @@ pub struct QcowSync {
     /// See the backing_file field on QcowDiskSync.
     backing_file: Option<Arc<dyn BackingRead>>,
     sparse: bool,
+    /// O_DIRECT alignment requirement (0 = no alignment needed).
+    alignment: usize,
     eventfd: EventFd,
     completion_list: VecDeque<(u64, i32)>,
 }
@@ -270,11 +273,13 @@ impl QcowSync {
         backing_file: Option<Arc<dyn BackingRead>>,
         sparse: bool,
     ) -> Self {
+        let alignment = data_file.file().alignment();
         QcowSync {
             metadata,
             data_file,
             backing_file,
             sparse,
+            alignment,
             eventfd: EventFd::new(libc::EFD_NONBLOCK)
                 .expect("Failed creating EventFd for QcowSync"),
             completion_list: VecDeque::new(),
@@ -334,6 +339,88 @@ fn pwrite_all(fd: RawFd, buf: &[u8], offset: u64) -> io::Result<()> {
         total += ret as usize;
     }
     Ok(())
+}
+
+/// RAII wrapper for an aligned heap buffer required by O_DIRECT.
+struct AlignedBuf {
+    ptr: *mut u8,
+    layout: Layout,
+}
+
+impl AlignedBuf {
+    fn new(size: usize, alignment: usize) -> io::Result<Self> {
+        let size = size.max(1).next_multiple_of(alignment);
+        let layout = Layout::from_size_align(size, alignment)
+            .map_err(|e| io::Error::other(format!("invalid aligned layout: {e}")))?;
+        // SAFETY: layout has non-zero size.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        if ptr.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "aligned allocation failed",
+            ));
+        }
+        Ok(AlignedBuf { ptr, layout })
+    }
+
+    fn as_mut_slice(&mut self, len: usize) -> &mut [u8] {
+        let len = len.min(self.layout.size());
+        // SAFETY: ptr is valid for layout.size() bytes; len <= layout.size().
+        unsafe { slice::from_raw_parts_mut(self.ptr, len) }
+    }
+
+    fn as_slice(&self, len: usize) -> &[u8] {
+        let len = len.min(self.layout.size());
+        // SAFETY: ptr is valid for layout.size() bytes; len <= layout.size().
+        unsafe { slice::from_raw_parts(self.ptr, len) }
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: ptr was allocated by alloc_zeroed with self.layout.
+        unsafe { dealloc(self.ptr, self.layout) };
+    }
+}
+
+/// Read into `buf` via an aligned bounce buffer when O_DIRECT requires it.
+fn aligned_pread(fd: RawFd, buf: &mut [u8], offset: u64, alignment: usize) -> io::Result<()> {
+    if alignment == 0
+        || ((buf.as_ptr() as usize).is_multiple_of(alignment)
+            && buf.len().is_multiple_of(alignment)
+            && (offset as usize).is_multiple_of(alignment))
+    {
+        return pread_exact(fd, buf, offset);
+    }
+
+    let aligned_offset = offset & !(alignment as u64 - 1);
+    let head = (offset - aligned_offset) as usize;
+    let aligned_len = (head + buf.len()).next_multiple_of(alignment);
+    let mut bounce = AlignedBuf::new(aligned_len, alignment)?;
+    pread_exact(fd, bounce.as_mut_slice(aligned_len), aligned_offset)?;
+    buf.copy_from_slice(&bounce.as_slice(aligned_len)[head..head + buf.len()]);
+    Ok(())
+}
+
+/// Write `buf` via an aligned bounce buffer when O_DIRECT requires it.
+fn aligned_pwrite(fd: RawFd, buf: &[u8], offset: u64, alignment: usize) -> io::Result<()> {
+    if alignment == 0
+        || ((buf.as_ptr() as usize).is_multiple_of(alignment)
+            && buf.len().is_multiple_of(alignment)
+            && (offset as usize).is_multiple_of(alignment))
+    {
+        return pwrite_all(fd, buf, offset);
+    }
+
+    let aligned_offset = offset & !(alignment as u64 - 1);
+    let head = (offset - aligned_offset) as usize;
+    let aligned_len = (head + buf.len()).next_multiple_of(alignment);
+    let mut bounce = AlignedBuf::new(aligned_len, alignment)?;
+
+    // Read-modify-write: read the existing aligned region, overlay our data.
+    pread_exact(fd, bounce.as_mut_slice(aligned_len), aligned_offset)?;
+    bounce.as_mut_slice(aligned_len)[head..head + buf.len()].copy_from_slice(buf);
+    pwrite_all(fd, bounce.as_slice(aligned_len), aligned_offset)
 }
 
 // -- iovec helper functions --
@@ -398,34 +485,44 @@ unsafe fn zero_fill_iovecs(iovecs: &[libc::iovec], start: usize, len: usize) {
     }
 }
 
-/// Gather bytes from iovecs starting at the given byte offset into a Vec.
+/// Gather bytes from iovecs starting at the given byte offset into a caller-provided buffer.
 ///
 /// # Safety
 /// Caller must ensure iovecs point to valid, readable memory of sufficient size.
-unsafe fn gather_from_iovecs(iovecs: &[libc::iovec], start: usize, len: usize) -> Vec<u8> {
-    let mut result = Vec::with_capacity(len);
-    let mut remaining = len;
+unsafe fn gather_from_iovecs_into(iovecs: &[libc::iovec], start: usize, dst: &mut [u8]) {
+    let len = dst.len();
+    let mut written = 0usize;
     let mut pos = 0usize;
     for iov in iovecs {
         let iov_end = pos + iov.iov_len;
-        if iov_end <= start || remaining == 0 {
+        if iov_end <= start || written == len {
             pos = iov_end;
             continue;
         }
         let iov_start = start.saturating_sub(pos);
         let available = iov.iov_len - iov_start;
-        let count = min(available, remaining);
+        let count = min(available, len - written);
         // SAFETY: iov_base is valid for iov_len bytes per caller contract.
         unsafe {
             let src = (iov.iov_base as *const u8).add(iov_start);
-            result.extend_from_slice(slice::from_raw_parts(src, count));
+            ptr::copy_nonoverlapping(src, dst.as_mut_ptr().add(written), count);
         }
-        remaining -= count;
-        if remaining == 0 {
+        written += count;
+        if written == len {
             break;
         }
         pos = iov_end;
     }
+}
+
+/// Gather bytes from iovecs starting at the given byte offset into a Vec.
+///
+/// # Safety
+/// Caller must ensure iovecs point to valid, readable memory of sufficient size.
+unsafe fn gather_from_iovecs(iovecs: &[libc::iovec], start: usize, len: usize) -> Vec<u8> {
+    let mut result = vec![0u8; len];
+    // SAFETY: caller guarantees iovecs are valid; result has len bytes.
+    unsafe { gather_from_iovecs_into(iovecs, start, &mut result) };
     result
 }
 
@@ -461,12 +558,29 @@ impl AsyncIo for QcowSync {
                     offset: host_offset,
                     length,
                 } => {
-                    let mut buf = vec![0u8; length as usize];
-                    pread_exact(self.data_file.as_raw_fd(), &mut buf, host_offset)
+                    let len = length as usize;
+                    if self.alignment > 0 {
+                        // O_DIRECT, aligned buffer avoids bounce copy.
+                        let mut abuf = AlignedBuf::new(len, self.alignment)
+                            .map_err(AsyncIoError::ReadVectored)?;
+                        aligned_pread(
+                            self.data_file.as_raw_fd(),
+                            abuf.as_mut_slice(len),
+                            host_offset,
+                            self.alignment,
+                        )
                         .map_err(AsyncIoError::ReadVectored)?;
-                    // SAFETY: iovecs point to valid guest memory buffers
-                    unsafe { scatter_to_iovecs(iovecs, buf_offset, &buf) };
-                    buf_offset += length as usize;
+                        // SAFETY: iovecs point to valid guest memory buffers
+                        unsafe { scatter_to_iovecs(iovecs, buf_offset, abuf.as_slice(len)) };
+                    } else {
+                        // No O_DIRECT, plain buffer is fine.
+                        let mut buf = vec![0u8; len];
+                        pread_exact(self.data_file.as_raw_fd(), &mut buf, host_offset)
+                            .map_err(AsyncIoError::ReadVectored)?;
+                        // SAFETY: iovecs point to valid guest memory buffers
+                        unsafe { scatter_to_iovecs(iovecs, buf_offset, &buf) };
+                    }
+                    buf_offset += len;
                 }
                 ClusterReadMapping::Compressed { data } => {
                     let len = data.len();
@@ -540,10 +654,28 @@ impl AsyncIo for QcowSync {
                 ClusterWriteMapping::Allocated {
                     offset: host_offset,
                 } => {
-                    // SAFETY: iovecs point to valid guest memory buffers
-                    let buf = unsafe { gather_from_iovecs(iovecs, buf_offset, count) };
-                    pwrite_all(self.data_file.as_raw_fd(), &buf, host_offset)
+                    if self.alignment > 0 {
+                        // O_DIRECT, gather directly into aligned buffer.
+                        let mut abuf = AlignedBuf::new(count, self.alignment)
+                            .map_err(AsyncIoError::WriteVectored)?;
+                        // SAFETY: iovecs point to valid guest memory buffers
+                        unsafe {
+                            gather_from_iovecs_into(iovecs, buf_offset, abuf.as_mut_slice(count));
+                        }
+                        aligned_pwrite(
+                            self.data_file.as_raw_fd(),
+                            abuf.as_slice(count),
+                            host_offset,
+                            self.alignment,
+                        )
                         .map_err(AsyncIoError::WriteVectored)?;
+                    } else {
+                        // No O_DIRECT, plain buffer is fine.
+                        // SAFETY: iovecs point to valid guest memory buffers
+                        let buf = unsafe { gather_from_iovecs(iovecs, buf_offset, count) };
+                        pwrite_all(self.data_file.as_raw_fd(), &buf, host_offset)
+                            .map_err(AsyncIoError::WriteVectored)?;
+                    }
                 }
             }
             buf_offset += count;
