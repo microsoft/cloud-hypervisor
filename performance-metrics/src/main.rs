@@ -1255,6 +1255,7 @@ fn run_test_with_timeout(
 }
 
 fn cleanup_stale_processes() {
+    // Linux limits process names to 15 characters so use truncated name for cloud-hypervisor
     for proc in &["cloud-hyperviso", "iperf3", "ethr"] {
         let _ = Command::new("pkill").args(["-9", proc]).status();
     }
