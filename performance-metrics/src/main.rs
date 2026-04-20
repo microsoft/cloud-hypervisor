@@ -26,44 +26,73 @@ enum Error {
     TestFailed,
 }
 
-#[derive(Deserialize, Serialize)]
+enum PerfAttrib {
+    Mean,
+    StdDev,
+    Max,
+    Min,
+}
+
+#[derive(Default, Deserialize, Serialize)]
 enum TestStatus {
+    #[default]
     #[serde(rename = "PASSED")]
     Passed,
     #[serde(rename = "FAILED")]
     Failed,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 pub struct PerformanceTestResult {
     name: String,
+    status: TestStatus,
     mean: f64,
     std_dev: f64,
     max: f64,
     min: f64,
-    status: TestStatus,
+    address_space_time_mean: f64,
+    address_space_time_max: f64,
+    address_space_time_min: f64,
+    hashing_page_time_mean: f64,
+    hashing_page_time_max: f64,
+    hashing_page_time_min: f64,
+    hashing_page_count_mean: f64,
+    hashing_page_count_max: f64,
+    hashing_page_count_min: f64,
+    launch_command_time_mean: f64,
+    launch_command_time_max: f64,
+    launch_command_time_min: f64,
 }
 
 impl PerformanceTestResult {
-    fn passed(name: &str, mean: f64, std_dev: f64, max: f64, min: f64) -> Self {
+    fn passed(name: &str, values: &[f64]) -> Self {
         Self {
             name: name.to_string(),
-            mean,
-            std_dev,
-            max,
-            min,
             status: TestStatus::Passed,
+            mean: values[0],
+            std_dev: values[1],
+            max: values[2],
+            min: values[3],
+            address_space_time_mean: values[4],
+            address_space_time_max: values[5],
+            address_space_time_min: values[6],
+            hashing_page_time_mean: values[7],
+            hashing_page_time_max: values[8],
+            hashing_page_time_min: values[9],
+            hashing_page_count_mean: values[10],
+            hashing_page_count_max: values[11],
+            hashing_page_count_min: values[12],
+            launch_command_time_mean: values[13],
+            launch_command_time_max: values[14],
+            launch_command_time_min: values[15],
         }
     }
 
     fn failed(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            mean: 0.0,
-            std_dev: 0.0,
-            max: 0.0,
-            min: 0.0,
             status: TestStatus::Failed,
+            ..Default::default()
         }
     }
 }
@@ -261,25 +290,20 @@ impl PerformanceTestControl {
 /// standard deviation)
 struct PerformanceTest {
     pub name: &'static str,
-    pub func_ptr: fn(&PerformanceTestControl) -> f64,
+    pub func_ptr: fn(&PerformanceTestControl) -> Vec<f64>,
     pub control: PerformanceTestControl,
     unit_adjuster: fn(f64) -> f64,
 }
 
 impl PerformanceTest {
     pub fn run(&self, overrides: &PerformanceTestOverrides) -> PerformanceTestResult {
-        // Run warmup iterations if configured (results discarded)
-        for _ in 0..self.control.warmup_iterations {
-            if let Some(test_timeout) = overrides.test_timeout {
-                let mut control: PerformanceTestControl = self.control.clone();
-                control.test_timeout = test_timeout;
-                let _ = (self.func_ptr)(&control);
-            } else {
-                let _ = (self.func_ptr)(&self.control);
-            }
-        }
+        let mut metrics: Vec<f64> = Vec::new();
+        let mut address_space_time: Vec<f64> = Vec::new();
+        let mut hashing_page_time: Vec<f64> = Vec::new();
+        let mut hashing_page_count: Vec<f64> = Vec::new();
+        let mut launch_command_time: Vec<f64> = Vec::new();
+        let mut res: Vec<f64>;
 
-        let mut metrics = Vec::new();
         for _ in 0..overrides
             .test_iterations
             .unwrap_or(self.control.test_iterations)
@@ -288,18 +312,96 @@ impl PerformanceTest {
             if let Some(test_timeout) = overrides.test_timeout {
                 let mut control: PerformanceTestControl = self.control.clone();
                 control.test_timeout = test_timeout;
-                metrics.push((self.func_ptr)(&control));
+                res = (self.func_ptr)(&control);
             } else {
-                metrics.push((self.func_ptr)(&self.control));
+                res = (self.func_ptr)(&self.control);
             }
+            metrics.push(res[0]);
+            address_space_time.push(res[1]);
+            hashing_page_time.push(res[2]);
+            hashing_page_count.push(res[3]);
+            launch_command_time.push(res[4]);
         }
 
-        let mean = (self.unit_adjuster)(mean(&metrics).unwrap());
-        let std_dev = (self.unit_adjuster)(std_deviation(&metrics).unwrap());
-        let max = (self.unit_adjuster)(metrics.clone().into_iter().reduce(f64::max).unwrap());
-        let min = (self.unit_adjuster)(metrics.clone().into_iter().reduce(f64::min).unwrap());
+        let address_space_time_mean = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Mean,
+            &address_space_time,
+        )
+        .unwrap();
+        let address_space_time_max = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Max,
+            &address_space_time,
+        )
+        .unwrap();
+        let address_space_time_min = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Min,
+            &address_space_time,
+        )
+        .unwrap();
 
-        PerformanceTestResult::passed(self.name, mean, std_dev, max, min)
+        let hashing_page_time_mean = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Mean,
+            &hashing_page_time,
+        )
+        .unwrap();
+        let hashing_page_time_max = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Max,
+            &hashing_page_time,
+        )
+        .unwrap();
+        let hashing_page_time_min = get_perf_attrb(
+            Some(adjuster::s_to_ms),
+            &PerfAttrib::Min,
+            &hashing_page_time,
+        )
+        .unwrap();
+
+        let hashing_page_count_mean =
+            get_perf_attrb(None, &PerfAttrib::Mean, &hashing_page_count).unwrap();
+        let hashing_page_count_max =
+            get_perf_attrb(None, &PerfAttrib::Max, &hashing_page_count).unwrap();
+        let hashing_page_count_min =
+            get_perf_attrb(None, &PerfAttrib::Min, &hashing_page_count).unwrap();
+
+        let launch_command_time_mean =
+            get_perf_attrb(None, &PerfAttrib::Mean, &launch_command_time).unwrap();
+        let launch_command_time_max =
+            get_perf_attrb(None, &PerfAttrib::Max, &launch_command_time).unwrap();
+        let launch_command_time_min =
+            get_perf_attrb(None, &PerfAttrib::Min, &launch_command_time).unwrap();
+
+        let mean = get_perf_attrb(Some(self.unit_adjuster), &PerfAttrib::Mean, &metrics).unwrap();
+        let std_dev =
+            get_perf_attrb(Some(self.unit_adjuster), &PerfAttrib::StdDev, &metrics).unwrap();
+        let max = get_perf_attrb(Some(self.unit_adjuster), &PerfAttrib::Max, &metrics).unwrap();
+        let min = get_perf_attrb(Some(self.unit_adjuster), &PerfAttrib::Min, &metrics).unwrap();
+
+        PerformanceTestResult::passed(
+            self.name,
+            &[
+                mean,
+                std_dev,
+                max,
+                min,
+                address_space_time_mean,
+                address_space_time_max,
+                address_space_time_min,
+                hashing_page_time_mean,
+                hashing_page_time_max,
+                hashing_page_time_min,
+                hashing_page_count_mean,
+                hashing_page_count_max,
+                hashing_page_count_min,
+                launch_command_time_mean,
+                launch_command_time_max,
+                launch_command_time_min,
+            ],
+        )
     }
 
     // Calculate the timeout for each test
@@ -341,6 +443,23 @@ fn std_deviation(data: &[f64]) -> Option<f64> {
     }
 }
 
+fn get_perf_attrb(
+    unit_adjuster: Option<fn(f64) -> f64>,
+    perf_attrb: &PerfAttrib,
+    data: &[f64],
+) -> Option<f64> {
+    let res: f64 = match perf_attrb {
+        PerfAttrib::Mean => mean(data).unwrap(),
+        PerfAttrib::StdDev => std_deviation(data).unwrap(),
+        PerfAttrib::Max => data.to_owned().iter().copied().reduce(f64::max).unwrap(),
+        PerfAttrib::Min => data.to_owned().iter().copied().reduce(f64::min).unwrap(),
+    };
+    match unit_adjuster {
+        Some(f) => Some(f(res)),
+        None => Some(res),
+    }
+}
+
 mod adjuster {
     pub fn identity(v: f64) -> f64 {
         v
@@ -360,7 +479,7 @@ mod adjuster {
     }
 }
 
-const TEST_LIST: [PerformanceTest; 60] = [
+const TEST_LIST: [PerformanceTest; 61] = [
     PerformanceTest {
         name: "boot_time_ms",
         func_ptr: performance_boot_time,
@@ -388,6 +507,17 @@ const TEST_LIST: [PerformanceTest; 60] = [
             test_timeout: 24,
             test_iterations: 10,
             num_boot_vcpus: Some(16),
+            ..PerformanceTestControl::default()
+        },
+        unit_adjuster: adjuster::s_to_ms,
+    },
+    PerformanceTest {
+        name: "boot_time_32_vcpus_hugepage_ms",
+        func_ptr: performance_boot_time_hugepage,
+        control: PerformanceTestControl {
+            test_timeout: 30,
+            test_iterations: 10,
+            num_boot_vcpus: Some(32),
             ..PerformanceTestControl::default()
         },
         unit_adjuster: adjuster::s_to_ms,
