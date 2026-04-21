@@ -5,6 +5,7 @@ set -x
 
 hypervisor="kvm"
 test_filter=""
+test_exclude=""
 build_kernel=false
 
 # Download from a url with retries
@@ -100,6 +101,7 @@ cmd_help() {
     echo ""
     echo "    --hypervisor  Underlying hypervisor. Options kvm, mshv"
     echo "    --test-filter Tests to run"
+    echo "    --test-exclude Tests to exclude"
     echo "    --build-guest-kernel Build guest kernel from source instead of downloading pre-built"
     echo ""
     echo "    --help        Display this help message."
@@ -121,6 +123,10 @@ process_common_args() {
         "--test-filter")
             shift
             test_filter="$1"
+            ;;
+        "--test-exclude")
+            shift
+            test_exclude="$1"
             ;;
         "--build-guest-kernel")
             build_kernel=true
