@@ -95,7 +95,7 @@ RES=$?
 # running in parallel.
 if [ $RES -eq 0 ]; then
     export RUST_BACKTRACE=1
-    time cargo test live_migration_sequential::$test_filter" $test_features --target "$BUILD_TARGET" -- --test-threads=1 -- ${test_binary_args[*]}
+    time cargo test "live_migration_sequential::$test_filter" $test_features --target "$BUILD_TARGET" -- --test-threads=1 -- ${test_binary_args[*]}
     RES=$?
 fi
 
