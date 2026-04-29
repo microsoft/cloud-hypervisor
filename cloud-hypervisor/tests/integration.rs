@@ -10033,6 +10033,7 @@ mod common_parallel {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
+    #[ignore = "Bug 62068292: zero-packet assertion fails with internal guest kernel"]
     fn test_vdpa_net() {
         // Before trying to run the test, verify the vdpa_sim_net module is correctly loaded.
         if !exec_host_command_status("lsmod | grep vdpa_sim_net").success() {
