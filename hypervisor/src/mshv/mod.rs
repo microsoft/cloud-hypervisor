@@ -331,7 +331,20 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 create_args.pt_cpu_fbanks[i as usize] = disable_proc_features.as_uint64[i as usize];
             }
         }
-        let synthetic_features_mask = make_default_synthetic_features_mask();
+        let mut synthetic_features_mask = make_default_synthetic_features_mask();
+
+        // When nested virtualization is enabled, disable Hyper-V enlightenments
+        // that conflict with KVM's nested SVM management:
+        // - bit 25 (tb_flush_hypercalls): enlightened TLB flush bypasses KVM's
+        //   VMCB TLB state tracking, causing stale translations
+        // - bit 26 (synthetic_cluster_ipi): enlightened IPI delivery bypasses
+        //   KVM's nested SVM interrupt injection, causing missed TLB shootdowns
+        //   between vCPUs and memory corruption in SMP L3 guests
+        #[cfg(target_arch = "x86_64")]
+        if _config.nested {
+            synthetic_features_mask &= !(1u64 << 25);
+            synthetic_features_mask &= !(1u64 << 26);
+        }
         let fd: VmFd;
         loop {
             match self.mshv.create_vm_with_args(&create_args) {
@@ -388,15 +401,128 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// Get the supported CpuID
     ///
     fn get_supported_cpuid(&self) -> hypervisor::Result<Vec<CpuIdEntry>> {
-        let mut cpuid = Vec::new();
-        let functions: [u32; 2] = [0x1, 0xb];
+        use std::arch::x86_64::{__cpuid, __cpuid_count};
 
-        for function in functions {
+        use crate::arch::x86::CPUID_FLAG_VALID_INDEX;
+
+        let mut cpuid = Vec::new();
+
+        // Helper to check if a leaf is in MSHV's reserved hypervisor range
+        let is_mshv_reserved =
+            |function: u32| -> bool { (0x4000_0000..=0x4000_00FF).contains(&function) };
+
+        // --- Standard leaves ---
+        let leaf0 = __cpuid(0x0);
+        let max_standard = leaf0.eax;
+
+        cpuid.push(CpuIdEntry {
+            function: 0x0,
+            eax: leaf0.eax,
+            ebx: leaf0.ebx,
+            ecx: leaf0.ecx,
+            edx: leaf0.edx,
+            ..Default::default()
+        });
+
+        for function in 1..=max_standard {
+            if is_mshv_reserved(function) {
+                continue;
+            }
+            match function {
+                // Sub-leaf enumerated leaves
+                0x4 | 0x7 | 0xb | 0xd | 0x1f => {
+                    for index in 0..64 {
+                        let result = __cpuid_count(function, index);
+                        // Stop when sub-leaf is invalid
+                        match function {
+                            0x4 => {
+                                if result.eax & 0x1f == 0 {
+                                    break;
+                                }
+                            }
+                            0x7 => {
+                                if index > result.eax && index > 0 {
+                                    break;
+                                }
+                            }
+                            0xb | 0x1f => {
+                                if result.eax == 0 && result.ebx == 0 {
+                                    break;
+                                }
+                            }
+                            0xd => {
+                                if index > 63 {
+                                    break;
+                                }
+                                if index >= 2
+                                    && result.eax == 0
+                                    && result.ebx == 0
+                                    && result.ecx == 0
+                                    && result.edx == 0
+                                {
+                                    continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                        cpuid.push(CpuIdEntry {
+                            function,
+                            index,
+                            flags: CPUID_FLAG_VALID_INDEX,
+                            eax: result.eax,
+                            ebx: result.ebx,
+                            ecx: result.ecx,
+                            edx: result.edx,
+                        });
+                    }
+                }
+                // Leaf 0xA (PMU) - zero it out to avoid guest issues
+                0xa => {
+                    cpuid.push(CpuIdEntry {
+                        function,
+                        ..Default::default()
+                    });
+                }
+                // Simple leaves
+                _ => {
+                    let result = __cpuid(function);
+                    cpuid.push(CpuIdEntry {
+                        function,
+                        eax: result.eax,
+                        ebx: result.ebx,
+                        ecx: result.ecx,
+                        edx: result.edx,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // --- Extended leaves ---
+        let ext0 = __cpuid(0x8000_0000);
+        let max_extended = ext0.eax;
+
+        cpuid.push(CpuIdEntry {
+            function: 0x8000_0000,
+            eax: ext0.eax,
+            ebx: ext0.ebx,
+            ecx: ext0.ecx,
+            edx: ext0.edx,
+            ..Default::default()
+        });
+
+        for function in 0x8000_0001..=max_extended {
+            let result = __cpuid(function);
             cpuid.push(CpuIdEntry {
                 function,
+                eax: result.eax,
+                ebx: result.ebx,
+                ecx: result.ecx,
+                edx: result.edx,
                 ..Default::default()
             });
         }
+
         Ok(cpuid)
     }
 
@@ -858,17 +984,109 @@ impl cpu::Vcpu for MshvVcpu {
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
                     let info = x.to_cpuid_info().unwrap();
-                    debug!("cpuid eax: {:x}", { info.rax });
+                    debug!("cpuid intercept: leaf={:x} subleaf={:x}", { info.rax }, {
+                        info.rcx
+                    });
+
+                    // Use the default results provided by the hypervisor
+                    let insn_len = info.header.instruction_length() as u64;
+                    let arr_reg_name_value = [
+                        (
+                            hv_register_name_HV_X64_REGISTER_RAX,
+                            info.default_result_rax,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RBX,
+                            info.default_result_rbx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RCX,
+                            info.default_result_rcx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RDX,
+                            info.default_result_rdx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RIP,
+                            info.header.rip + insn_len,
+                        ),
+                    ];
+                    set_registers_64!(self.fd, arr_reg_name_value)
+                        .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+
                     Ok(cpu::VmExit::Ignore)
                 }
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
                     let info = x.to_msr_info().unwrap();
+
+                    // MSRs that should return 0 on read and silently drop writes
+                    // in nested virtualization to avoid issues in nested KVM guests.
+                    const MSR_K7_HWCR: u32 = 0xc001_0007;
+                    let ignore_msr = matches!(info.msr_number, MSR_K7_HWCR);
+
                     if info.header.intercept_access_type == 0 {
+                        // MSR read
                         debug!("msr read: {:x}", { info.msr_number });
+                        if !ignore_msr {
+                            let mut msr_entries = vec![MsrEntry {
+                                index: info.msr_number,
+                                data: 0,
+                            }];
+                            if self.get_msrs(&mut msr_entries).is_ok() {
+                                let data = msr_entries[0].data;
+                                let rax = data & 0xffff_ffff;
+                                let rdx = data >> 32;
+                                // Set RAX and RDX with MSR value
+                                let regs = [
+                                    (hv_register_name_HV_X64_REGISTER_RAX, rax),
+                                    (hv_register_name_HV_X64_REGISTER_RDX, rdx),
+                                ];
+                                for (name, value) in regs {
+                                    let reg = hv_register_assoc {
+                                        name,
+                                        value: hv_register_value { reg64: value },
+                                        ..Default::default()
+                                    };
+                                    self.fd.set_reg(&[reg]).map_err(|e| {
+                                        cpu::HypervisorCpuError::SetRegister(e.into())
+                                    })?;
+                                }
+                            } else {
+                                debug!("msr read failed for {:x}, returning 0", {
+                                    info.msr_number
+                                });
+                            }
+                        }
                     } else {
+                        // MSR write
                         debug!("msr write: {:x}", { info.msr_number });
+                        if !ignore_msr {
+                            let data = (info.rax & 0xffff_ffff) | (info.rdx << 32);
+                            let msr_entries = [MsrEntry {
+                                index: info.msr_number,
+                                data,
+                            }];
+                            if self.set_msrs(&msr_entries).is_err() {
+                                debug!("msr write failed for {:x}, ignoring", {
+                                    info.msr_number
+                                });
+                            }
+                        }
                     }
+                    // Advance RIP past the RDMSR/WRMSR instruction
+                    let insn_len = info.header.instruction_length() as u64;
+                    let reg = hv_register_assoc {
+                        name: hv_register_name_HV_X64_REGISTER_RIP,
+                        value: hv_register_value {
+                            reg64: info.header.rip + insn_len,
+                        },
+                        ..Default::default()
+                    };
+                    self.fd
+                        .set_reg(&[reg])
+                        .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
                     Ok(cpu::VmExit::Ignore)
                 }
                 #[cfg(target_arch = "x86_64")]
@@ -1443,9 +1661,17 @@ impl cpu::Vcpu for MshvVcpu {
         let mshv_cpuid = <CpuId>::from_entries(&cpuid)
             .map_err(|_| cpu::HypervisorCpuError::SetCpuid(anyhow!("failed to create CpuId")))?;
 
-        self.fd
-            .register_intercept_result_cpuid(&mshv_cpuid)
-            .map_err(|e| cpu::HypervisorCpuError::SetCpuid(e.into()))
+        // register_intercept_result_cpuid processes ALL entries even on error
+        // (it continues past failures). MSHV rejects registration for certain
+        // leaves it handles internally (e.g. leaf 0x0). Those leaves will use
+        // the hypervisor's default values, which is correct behavior.
+        if let Err(e) = self.fd.register_intercept_result_cpuid(&mshv_cpuid) {
+            warn!(
+                "Some CPUID leaves could not be registered (will use hypervisor defaults): {}",
+                e
+            );
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
