@@ -29,23 +29,7 @@ if [ -n "${MIGRATABLE_VERSION}" ]; then
     migratable_version=${MIGRATABLE_VERSION}
 fi
 cp scripts/sha1sums-x86_64* "$WORKLOADS_DIR"
-
-FOCAL_OS_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0.qcow2"
-FOCAL_OS_IMAGE_URL="https://ch-images.azureedge.net/$FOCAL_OS_IMAGE_NAME"
-FOCAL_OS_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_IMAGE_NAME"
-if [ ! -f "$FOCAL_OS_IMAGE" ]; then
-    pushd "$WORKLOADS_DIR" || exit
-    time wget --quiet $FOCAL_OS_IMAGE_URL || exit 1
-    popd || exit
-fi
-
-FOCAL_OS_RAW_IMAGE_NAME="focal-server-cloudimg-amd64-custom-20210609-0.raw"
-FOCAL_OS_RAW_IMAGE="$WORKLOADS_DIR/$FOCAL_OS_RAW_IMAGE_NAME"
-if [ ! -f "$FOCAL_OS_RAW_IMAGE" ]; then
-    pushd "$WORKLOADS_DIR" || exit
-    time qemu-img convert -p -f qcow2 -O raw $FOCAL_OS_IMAGE_NAME $FOCAL_OS_RAW_IMAGE_NAME || exit 1
-    popd || exit
-fi
+download_x86_guest_images
 
 pushd "$WORKLOADS_DIR" || exit
 if ! grep focal sha1sums-x86_64-common | sha1sum --check; then

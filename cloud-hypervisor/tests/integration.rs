@@ -10797,8 +10797,11 @@ mod ivshmem {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(
+            live_migration::SOURCE_VM_SETTLE_TIMEOUT,
+            0,
+        ));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             live_migration::print_and_panic(
                 src_child,
@@ -13072,6 +13075,9 @@ mod vfio {
 mod live_migration {
     use crate::*;
 
+    // Time to wait for the source VM to terminate after live-migration
+    pub const SOURCE_VM_SETTLE_TIMEOUT: u64 = 10;
+
     pub fn start_live_migration(
         migration_socket: &str,
         src_api_socket: &str,
@@ -13337,8 +13343,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -13511,8 +13517,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -13729,8 +13735,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -13945,8 +13951,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -14055,8 +14061,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -14202,8 +14208,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
@@ -14416,8 +14422,8 @@ mod live_migration {
             );
         }
 
-        // Check the source vm has been terminated successful (give it '3s' to settle)
-        thread::sleep(std::time::Duration::new(3, 0));
+        // Check the source vm has been terminated successful
+        thread::sleep(std::time::Duration::new(SOURCE_VM_SETTLE_TIMEOUT, 0));
         if !src_child.try_wait().unwrap().is_some_and(|s| s.success()) {
             print_and_panic(
                 src_child,
