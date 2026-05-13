@@ -10033,7 +10033,6 @@ mod common_parallel {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
-    #[ignore = "Bug 62068292: zero-packet assertion fails with internal guest kernel"]
     fn test_vdpa_net() {
         // Before trying to run the test, verify the vdpa_sim_net module is correctly loaded.
         if !exec_host_command_status("lsmod | grep vdpa_sim_net").success() {
@@ -10086,6 +10085,19 @@ mod common_parallel {
                 .unwrap();
             guest
                 .ssh_command("sudo ip addr add 172.16.1.2/24 dev ens6")
+                .unwrap();
+            // Disable IPv6 on the interface before bringing it up to avoid
+            // IPv6 link-local autoconfiguration emitting NDP/RS packets which
+            // would invalidate the "zero packets" precondition checked below
+            // (some guest kernels emit these before our stats query races in).
+            // Use `sysctl -e` so the command is a no-op (rather than an error)
+            // on kernels built without IPv6, where these keys do not exist.
+            guest
+                .ssh_command(
+                    "sudo sysctl -e -w net.ipv6.conf.ens6.disable_ipv6=1 \
+                     net.ipv6.conf.ens6.accept_ra=0 \
+                     net.ipv6.conf.ens6.autoconf=0",
+                )
                 .unwrap();
             guest.ssh_command("sudo ip link set up dev ens6").unwrap();
 
