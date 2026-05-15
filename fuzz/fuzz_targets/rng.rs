@@ -99,11 +99,12 @@ fuzz_target!(|bytes: &[u8]| -> Corpus {
     // Kick the 'queue' event before activate the rng device
     queue_evt.write(1).unwrap();
 
-    rng.activate(
-        guest_memory,
-        Arc::new(NoopVirtioInterrupt {}),
-        vec![(0, q, evt)],
-    )
+    rng.activate(virtio_devices::ActivationContext {
+        mem: guest_memory,
+        interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+        queues: vec![(0, q, evt)],
+        device_status: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+    })
     .ok();
 
     // Wait for the events to finish and rng device worker thread to return

@@ -435,12 +435,13 @@ where
         }
     }
 
-    fn activate(
-        &mut self,
-        mem: GuestMemoryAtomic<GuestMemoryMmap>,
-        interrupt_cb: Arc<dyn VirtioInterrupt>,
-        queues: Vec<(usize, Queue, EventFd)>,
-    ) -> ActivateResult {
+    fn activate(&mut self, context: crate::device::ActivationContext) -> ActivateResult {
+        let crate::device::ActivationContext {
+            mem,
+            interrupt_cb,
+            queues,
+            ..
+        } = context;
         self.common.activate(&queues, interrupt_cb.clone())?;
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
 
@@ -594,9 +595,12 @@ mod tests {
         let memory = GuestMemoryAtomic::new(ctx.mem.clone());
 
         // Test a bad activation.
-        let bad_activate =
-            ctx.device
-                .activate(memory.clone(), Arc::new(NoopVirtioInterrupt {}), Vec::new());
+        let bad_activate = ctx.device.activate(crate::device::ActivationContext {
+            mem: memory.clone(),
+            interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+            queues: Vec::new(),
+            device_status: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        });
         match bad_activate {
             Err(ActivateError::BadActivate) => (),
             other => panic!("{other:?}"),
@@ -604,10 +608,10 @@ mod tests {
 
         // Test a correct activation.
         ctx.device
-            .activate(
-                memory,
-                Arc::new(NoopVirtioInterrupt {}),
-                vec![
+            .activate(crate::device::ActivationContext {
+                mem: memory,
+                interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+                queues: vec![
                     (
                         0,
                         Queue::new(256).unwrap(),
@@ -624,7 +628,8 @@ mod tests {
                         EventFd::new(EFD_NONBLOCK).unwrap(),
                     ),
                 ],
-            )
+                device_status: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            })
             .unwrap();
     }
 

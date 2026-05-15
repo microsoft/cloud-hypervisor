@@ -42,8 +42,8 @@ pub use self::balloon::Balloon;
 pub use self::block::{Block, BlockState};
 pub use self::console::{Console, ConsoleResizer, Endpoint};
 pub use self::device::{
-    DmaRemapping, VirtioCommon, VirtioDevice, VirtioInterrupt, VirtioInterruptType,
-    VirtioSharedMemoryList,
+    ActivationContext, DmaRemapping, VirtioCommon, VirtioDevice, VirtioInterrupt,
+    VirtioInterruptType, VirtioSharedMemoryList,
 };
 pub use self::epoll_helper::{
     EPOLL_HELPER_EVENT_LAST, EpollHelper, EpollHelperError, EpollHelperHandler,
@@ -66,6 +66,7 @@ const DEVICE_ACKNOWLEDGE: u32 = 0x01;
 const DEVICE_DRIVER: u32 = 0x02;
 const DEVICE_DRIVER_OK: u32 = 0x04;
 const DEVICE_FEATURES_OK: u32 = 0x08;
+const DEVICE_NEEDS_RESET: u32 = 0x40;
 const DEVICE_FAILED: u32 = 0x80;
 
 const VIRTIO_F_RING_INDIRECT_DESC: u32 = 28;

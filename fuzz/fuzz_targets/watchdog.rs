@@ -64,11 +64,12 @@ fuzz_target!(|bytes: &[u8]| -> Corpus {
     queue_evt.write(1).unwrap();
 
     watchdog
-        .activate(
-            guest_memory,
-            Arc::new(NoopVirtioInterrupt {}),
-            vec![(0, q, evt)],
-        )
+        .activate(virtio_devices::ActivationContext {
+            mem: guest_memory,
+            interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+            queues: vec![(0, q, evt)],
+            device_status: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        })
         .ok();
 
     // Wait for the events to finish and watchdog device worker thread to return

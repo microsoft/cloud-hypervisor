@@ -107,14 +107,15 @@ fuzz_target!(|bytes: &[u8]| -> Corpus {
     request_queue_evt.write(1).unwrap();
 
     iommu
-        .activate(
-            guest_memory,
-            Arc::new(NoopVirtioInterrupt {}),
-            vec![
+        .activate(virtio_devices::ActivationContext {
+            mem: guest_memory,
+            interrupt_cb: Arc::new(NoopVirtioInterrupt {}),
+            queues: vec![
                 (0, request_queue, request_evt),
                 (0, _event_queue, _event_evt),
             ],
-        )
+            device_status: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        })
         .ok();
 
     // Wait for the events to finish and vIOMMU device worker thread to return
