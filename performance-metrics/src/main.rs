@@ -404,12 +404,21 @@ impl PerformanceTest {
         )
     }
 
-    // Calculate the timeout for each test
-    // Note: To cover the setup/cleanup time, 20s is added for each iteration of the test
+    // Calculate the timeout for each test.
+    // Block tests boot a 4G guest for every iteration, which needs a larger
+    // setup budget on MSHV where the metrics runner reserves most RAM as
+    // hugepages before launching the test.
     pub fn calc_timeout(&self, test_iterations: &Option<u32>, test_timeout: &Option<u32>) -> u64 {
-        let total_iterations = test_iterations.unwrap_or(self.control.test_iterations)
-            + self.control.warmup_iterations;
-        ((test_timeout.unwrap_or(self.control.test_timeout) + 20) * total_iterations) as u64
+        let total_iterations = test_iterations.unwrap_or(self.control.test_iterations) as u64
+            + self.control.warmup_iterations as u64;
+        let iteration_overhead = if self.control.block_control.is_some() {
+            140u64
+        } else {
+            20u64
+        };
+
+        (test_timeout.unwrap_or(self.control.test_timeout) as u64 + iteration_overhead)
+            * total_iterations
     }
 }
 
