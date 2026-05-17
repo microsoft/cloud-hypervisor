@@ -32,6 +32,7 @@ use wait_timeout::ChildExt;
 // Constant taken from the VMM crate.
 const MAX_NUM_PCI_SEGMENTS: u16 = 96;
 const CVM_TIMEOUT: u32 = 140;
+const DIRECT_FIRMWARE_BOOT_TIMEOUT: u32 = 140;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64 {
@@ -5133,7 +5134,9 @@ mod common_parallel {
             if is_guest_vm_type_cvm() {
                 guest.wait_vm_boot_custom_timeout(CVM_TIMEOUT).unwrap()
             } else {
-                guest.wait_vm_boot_custom_timeout(120).unwrap();
+                guest
+                    .wait_vm_boot_custom_timeout(DIRECT_FIRMWARE_BOOT_TIMEOUT)
+                    .unwrap();
             }
         });
 
