@@ -262,7 +262,7 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> Vec<f64> {
 
     let mut cmd = GuestCommand::new(&guest);
     cmd.args(["--cpus", &format!("boot={num_queues}")])
-        .args(["--memory", "size=4G"])
+        .args(["--memory", "size=4G,hugepages=on"])
         .default_disks()
         .args(["--net", net_params.as_str()])
         .capture_output()
