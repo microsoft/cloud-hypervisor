@@ -575,7 +575,7 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
 
     let mut cmd = GuestCommand::new(&guest);
     cmd.args(["--cpus", &format!("boot={num_queues}")])
-        .args(["--memory", "size=4G"])
+        .args(["--memory", "size=4G,hugepages=on"])
         .default_net()
         .args(["--api-socket", &api_socket])
         .capture_output()
@@ -650,7 +650,7 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
         };
         let fio_command = format!(
             "sudo fio --filename=/dev/vdc --name=test --output-format=json \
-            --direct=1 --bs={block_size_kb}k --ioengine=io_uring --iodepth=64 \
+            --direct=1 --bs={block_size_kb}k --ioengine=io_uring --iodepth={queue_size} \
             --rw={fio_ops} --runtime={test_timeout} --numjobs={num_queues}"
         );
         let output = guest
