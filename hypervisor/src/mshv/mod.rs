@@ -331,7 +331,20 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 create_args.pt_cpu_fbanks[i as usize] = disable_proc_features.as_uint64[i as usize];
             }
         }
-        let synthetic_features_mask = make_default_synthetic_features_mask();
+        let mut synthetic_features_mask = make_default_synthetic_features_mask();
+
+        // When nested virtualization is enabled, disable Hyper-V enlightenments
+        // that conflict with KVM's nested SVM management:
+        // - bit 25 (tb_flush_hypercalls): enlightened TLB flush bypasses KVM's
+        //   VMCB TLB state tracking, causing stale translations
+        // - bit 26 (synthetic_cluster_ipi): enlightened IPI delivery bypasses
+        //   KVM's nested SVM interrupt injection, causing missed TLB shootdowns
+        //   between vCPUs and memory corruption in SMP L3 guests
+        #[cfg(target_arch = "x86_64")]
+        if _config.nested {
+            synthetic_features_mask &= !(1u64 << 25);
+            synthetic_features_mask &= !(1u64 << 26);
+        }
         let fd: VmFd;
         loop {
             match self.mshv.create_vm_with_args(&create_args) {
@@ -1004,49 +1017,58 @@ impl cpu::Vcpu for MshvVcpu {
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
                     let info = x.to_msr_info().unwrap();
 
+                    // MSRs that should return 0 on read and silently drop writes
+                    // in nested virtualization to avoid issues in nested KVM guests.
+                    const MSR_K7_HWCR: u32 = 0xc001_0007;
+                    let ignore_msr = matches!(info.msr_number, MSR_K7_HWCR);
+
                     if info.header.intercept_access_type == 0 {
                         // MSR read
                         debug!("msr read: {:x}", { info.msr_number });
-                        let mut msr_entries = vec![MsrEntry {
-                            index: info.msr_number,
-                            data: 0,
-                        }];
-                        if self.get_msrs(&mut msr_entries).is_ok() {
-                            let data = msr_entries[0].data;
-                            let rax = data & 0xffff_ffff;
-                            let rdx = data >> 32;
-                            // Set RAX and RDX with MSR value
-                            let regs = [
-                                (hv_register_name_HV_X64_REGISTER_RAX, rax),
-                                (hv_register_name_HV_X64_REGISTER_RDX, rdx),
-                            ];
-                            for (name, value) in regs {
-                                let reg = hv_register_assoc {
-                                    name,
-                                    value: hv_register_value { reg64: value },
-                                    ..Default::default()
-                                };
-                                self.fd.set_reg(&[reg]).map_err(|e| {
-                                    cpu::HypervisorCpuError::SetRegister(e.into())
-                                })?;
+                        if !ignore_msr {
+                            let mut msr_entries = vec![MsrEntry {
+                                index: info.msr_number,
+                                data: 0,
+                            }];
+                            if self.get_msrs(&mut msr_entries).is_ok() {
+                                let data = msr_entries[0].data;
+                                let rax = data & 0xffff_ffff;
+                                let rdx = data >> 32;
+                                // Set RAX and RDX with MSR value
+                                let regs = [
+                                    (hv_register_name_HV_X64_REGISTER_RAX, rax),
+                                    (hv_register_name_HV_X64_REGISTER_RDX, rdx),
+                                ];
+                                for (name, value) in regs {
+                                    let reg = hv_register_assoc {
+                                        name,
+                                        value: hv_register_value { reg64: value },
+                                        ..Default::default()
+                                    };
+                                    self.fd.set_reg(&[reg]).map_err(|e| {
+                                        cpu::HypervisorCpuError::SetRegister(e.into())
+                                    })?;
+                                }
+                            } else {
+                                debug!("msr read failed for {:x}, returning 0", {
+                                    info.msr_number
+                                });
                             }
-                        } else {
-                            debug!("msr read failed for {:x}, returning 0", {
-                                info.msr_number
-                            });
                         }
                     } else {
                         // MSR write
                         debug!("msr write: {:x}", { info.msr_number });
-                        let data = (info.rax & 0xffff_ffff) | (info.rdx << 32);
-                        let msr_entries = [MsrEntry {
-                            index: info.msr_number,
-                            data,
-                        }];
-                        if self.set_msrs(&msr_entries).is_err() {
-                            debug!("msr write failed for {:x}, ignoring", {
-                                info.msr_number
-                            });
+                        if !ignore_msr {
+                            let data = (info.rax & 0xffff_ffff) | (info.rdx << 32);
+                            let msr_entries = [MsrEntry {
+                                index: info.msr_number,
+                                data,
+                            }];
+                            if self.set_msrs(&msr_entries).is_err() {
+                                debug!("msr write failed for {:x}, ignoring", {
+                                    info.msr_number
+                                });
+                            }
                         }
                     }
                     // Advance RIP past the RDMSR/WRMSR instruction
