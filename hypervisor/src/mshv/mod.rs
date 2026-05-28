@@ -387,16 +387,125 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     ///
     /// Get the supported CpuID
     ///
+    /// MSHV does not allow the root partition to query its own supported
+    /// CPUID via hypercall, so we enumerate via the native CPUID instruction.
+    /// The set of subleaf-enumerated leaves and the hypervisor-reserved range
+    /// to skip mirror what a kernel-side `MSHV_GET_SUPPORTED_CPUID` ioctl
+    /// would return.
+    ///
+    // Older toolchains mark __cpuid/__cpuid_count as unsafe; newer ones don't.
+    // Allow the unused-unsafe lint so the same source compiles on both.
+    #[allow(unused_unsafe)]
     fn get_supported_cpuid(&self) -> hypervisor::Result<Vec<CpuIdEntry>> {
-        let mut cpuid = Vec::new();
-        let functions: [u32; 2] = [0x1, 0xb];
+        use std::arch::x86_64::{__cpuid, __cpuid_count};
 
-        for function in functions {
+        use crate::arch::x86::CPUID_FLAG_VALID_INDEX;
+
+        // Leaves whose enumeration requires walking sub-leaves via ECX.
+        // Mirrors the kernel's cpuid_function_has_subleaves() classification.
+        fn has_subleaves(function: u32) -> bool {
+            matches!(
+                function,
+                0x04        // Deterministic Cache Parameters
+                | 0x07      // Structured Extended Feature Flags
+                | 0x0b      // Extended Topology Enumeration
+                | 0x0d      // Processor Extended State Enumeration
+                | 0x0f      // Intel RDT Monitoring
+                | 0x10      // Intel RDT Allocation
+                | 0x12      // Intel SGX
+                | 0x14      // Intel Processor Trace
+                | 0x17      // SoC Vendor Attribute Enumeration
+                | 0x18      // Deterministic Address Translation Parameters
+                | 0x1d      // Intel AMX Tile Information
+                | 0x1e      // Intel AMX TMUL Information
+                | 0x1f      // V2 Extended Topology Enumeration
+                | 0x23      // Architectural Performance Monitoring Extended
+                | 0x8000_001d // AMD Cache Topology Information
+            )
+        }
+
+        // Skip the entire hypervisor-reserved CPUID range. The Microsoft
+        // Hypervisor owns these synthetic leaves; attempting to register
+        // intercept results for them will fail.
+        fn is_hv_reserved(function: u32) -> bool {
+            (0x4000_0000..=0x4FFF_FFFF).contains(&function)
+        }
+
+        // Cap to a reasonable maximum to match the kernel-side behavior.
+        const MAX_ENTRIES: usize = 256;
+
+        let mut cpuid: Vec<CpuIdEntry> = Vec::new();
+
+        let push_entry = |cpuid: &mut Vec<CpuIdEntry>,
+                          function: u32,
+                          index: u32,
+                          flags: u32,
+                          r: std::arch::x86_64::CpuidResult| {
             cpuid.push(CpuIdEntry {
                 function,
-                ..Default::default()
+                index,
+                flags,
+                eax: r.eax,
+                ebx: r.ebx,
+                ecx: r.ecx,
+                edx: r.edx,
             });
+        };
+
+        let enumerate_range = |cpuid: &mut Vec<CpuIdEntry>, start: u32, end: u32| {
+            for function in start..=end {
+                if cpuid.len() >= MAX_ENTRIES {
+                    return;
+                }
+                if is_hv_reserved(function) {
+                    continue;
+                }
+                if has_subleaves(function) {
+                    for index in 0u32.. {
+                        if cpuid.len() >= MAX_ENTRIES {
+                            return;
+                        }
+                        // SAFETY: __cpuid_count is safe on x86_64 hosts;
+                        // wrapped in unsafe for older toolchains that mark
+                        // these intrinsics as unsafe.
+                        let r = unsafe { __cpuid_count(function, index) };
+                        // Generic termination: stop when the sub-leaf returns
+                        // all zeros, matching the kernel-side enumeration.
+                        if r.eax == 0 && r.ebx == 0 && r.ecx == 0 && r.edx == 0 {
+                            break;
+                        }
+                        push_entry(cpuid, function, index, CPUID_FLAG_VALID_INDEX, r);
+                        // Per-leaf early termination for known shapes.
+                        match function {
+                            // Cache enumeration: EAX[4:0] == 0 means end.
+                            0x04 if (r.eax & 0x1f) == 0 => break,
+                            // Topology enumeration: ECX[15:8] (level type) == 0 means end.
+                            0x0b | 0x1f if ((r.ecx >> 8) & 0xff) == 0 => break,
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // SAFETY: __cpuid is safe on x86_64 hosts; wrapped in
+                    // unsafe for older toolchains that mark these
+                    // intrinsics as unsafe.
+                    let r = unsafe { __cpuid(function) };
+                    push_entry(cpuid, function, 0, 0, r);
+                }
+            }
+        };
+
+        // --- Standard leaves ---
+        // SAFETY: __cpuid is safe on x86_64 hosts.
+        let max_basic = unsafe { __cpuid(0x0) }.eax;
+        enumerate_range(&mut cpuid, 0x0, max_basic);
+
+        // --- Extended leaves ---
+        // SAFETY: __cpuid is safe on x86_64 hosts.
+        let max_ext = unsafe { __cpuid(0x8000_0000) }.eax;
+        if max_ext >= 0x8000_0000 {
+            enumerate_range(&mut cpuid, 0x8000_0000, max_ext);
         }
+
         Ok(cpuid)
     }
 
@@ -1522,13 +1631,53 @@ impl cpu::Vcpu for MshvVcpu {
     /// X86 specific call to setup the CPUID registers.
     ///
     fn set_cpuid2(&self, cpuid: &[CpuIdEntry]) -> cpu::Result<()> {
+        use std::collections::HashSet;
+
         let cpuid: Vec<mshv_bindings::hv_cpuid_entry> = cpuid.iter().map(|e| (*e).into()).collect();
         let mshv_cpuid = <CpuId>::from_entries(&cpuid)
             .map_err(|_| cpu::HypervisorCpuError::SetCpuid(anyhow!("failed to create CpuId")))?;
 
-        self.fd
-            .register_intercept_result_cpuid(&mshv_cpuid)
-            .map_err(|e| cpu::HypervisorCpuError::SetCpuid(e.into()))
+        // Pre-scan: identify functions that have any sub-leaf entries
+        // (index != 0). The hypervisor requires that for a given leaf, the
+        // SubleafSpecific flag is consistent across all registrations;
+        // mixing it causes INVALID_PARAMETER (ImRegisterCpuidResult Check #3).
+        // Register every entry for such a function as subleaf-specific.
+        let functions_with_subleaves: HashSet<u32> = mshv_cpuid
+            .as_slice()
+            .iter()
+            .filter(|e| e.index != 0)
+            .map(|e| e.function)
+            .collect();
+
+        for entry in mshv_cpuid.as_slice().iter() {
+            let mut override_arg = None;
+            let mut subleaf_specific = None;
+
+            match entry.function {
+                // Intel: 0xb / 0x1f extended topology
+                // AMD:   0x8000_001e / 0x8000_0026 processor topology
+                0xb | 0x1f | 0x8000_001e | 0x8000_0026 => {
+                    subleaf_specific = Some(1);
+                }
+                0x0000_0001 | 0x8000_0000 | 0x8000_0001 | 0x8000_0008 => {
+                    override_arg = Some(1);
+                }
+                _ => {}
+            }
+
+            // Force subleaf-specific registration for all entries of a
+            // function that has any sub-leaf entries, to keep registrations
+            // consistent for the leaf.
+            if functions_with_subleaves.contains(&entry.function) {
+                subleaf_specific = Some(1);
+            }
+
+            self.fd
+                .register_intercept_result_cpuid_entry(entry, override_arg, subleaf_specific)
+                .map_err(|e| cpu::HypervisorCpuError::SetCpuid(e.into()))?;
+        }
+
+        Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
