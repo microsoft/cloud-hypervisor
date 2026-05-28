@@ -858,7 +858,37 @@ impl cpu::Vcpu for MshvVcpu {
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
                     let info = x.to_cpuid_info().unwrap();
-                    debug!("cpuid eax: {:x}", { info.rax });
+                    debug!("cpuid intercept: leaf={:x} subleaf={:x}", { info.rax }, {
+                        info.rcx
+                    });
+
+                    // Use the default results provided by the hypervisor
+                    let insn_len = info.header.instruction_length() as u64;
+                    let arr_reg_name_value = [
+                        (
+                            hv_register_name_HV_X64_REGISTER_RAX,
+                            info.default_result_rax,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RBX,
+                            info.default_result_rbx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RCX,
+                            info.default_result_rcx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RDX,
+                            info.default_result_rdx,
+                        ),
+                        (
+                            hv_register_name_HV_X64_REGISTER_RIP,
+                            info.header.rip + insn_len,
+                        ),
+                    ];
+                    set_registers_64!(self.fd, arr_reg_name_value)
+                        .map_err(|e| cpu::HypervisorCpuError::SetRegister(e.into()))?;
+
                     Ok(cpu::VmExit::Ignore)
                 }
                 #[cfg(target_arch = "x86_64")]
