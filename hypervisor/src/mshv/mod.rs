@@ -288,6 +288,10 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     /// let vm = hypervisor.create_vm(config).unwrap();
     /// ```
     fn create_vm(&self, _config: HypervisorVmConfig) -> hypervisor::Result<Arc<dyn vm::Vm>> {
+        warn!(
+            "MERU-DBG: create_vm: nested={} smt={}",
+            _config.nested, _config.smt_enabled
+        );
         #[allow(unused_mut)]
         #[allow(unused_assignments)]
         let mut mshv_vm_type = VmType::Normal; // Create with default platform type
@@ -344,6 +348,10 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         if _config.nested {
             synthetic_features_mask &= !(1u64 << 25);
             synthetic_features_mask &= !(1u64 << 26);
+            warn!(
+                "MERU-DBG: nested: disabled synthetic feature bits 25/26, mask={:#x}",
+                synthetic_features_mask
+            );
         }
         let fd: VmFd;
         loop {
@@ -410,6 +418,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     // Allow the unused-unsafe lint so the same source compiles on both.
     #[allow(unused_unsafe)]
     fn get_supported_cpuid(&self) -> hypervisor::Result<Vec<CpuIdEntry>> {
+        warn!("MERU-DBG: get_supported_cpuid: enumerating host CPUID");
         use std::arch::x86_64::{__cpuid, __cpuid_count};
 
         use crate::arch::x86::CPUID_FLAG_VALID_INDEX;
@@ -518,6 +527,12 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         if max_ext >= 0x8000_0000 {
             enumerate_range(&mut cpuid, 0x8000_0000, max_ext);
         }
+        warn!(
+            "MERU-DBG: get_supported_cpuid: enumerated {} entries (max_basic={:#x}, max_ext={:#x})",
+            cpuid.len(),
+            max_basic,
+            max_ext
+        );
 
         Ok(cpuid)
     }
@@ -738,6 +753,7 @@ impl cpu::Vcpu for MshvVcpu {
         match self.fd.run() {
             Ok(x) => match x.header.message_type {
                 hv_message_type_HVMSG_X64_HALT => {
+                    warn!("MERU-DBG: vp{} HVMSG_X64_HALT", self.vp_index);
                     debug!("HALT");
                     Ok(cpu::VmExit::Reset)
                 }
@@ -757,12 +773,19 @@ impl cpu::Vcpu for MshvVcpu {
                     }
                 }
                 hv_message_type_HVMSG_UNRECOVERABLE_EXCEPTION => {
+                    warn!(
+                        "MERU-DBG: vp{} HVMSG_UNRECOVERABLE_EXCEPTION (TRIPLE FAULT)",
+                        self.vp_index
+                    );
                     warn!("TRIPLE FAULT");
                     Ok(cpu::VmExit::Shutdown)
                 }
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT => {
                     let info = x.to_ioport_info().unwrap();
+                    let port = { info.port_number };
+                    let is_write_dbg = info.header.intercept_access_type == 1;
+
                     let access_info = info.access_info;
                     // SAFETY: access_info is valid, otherwise we won't be here
                     let len = unsafe { access_info.__bindgen_anon_1.access_size() } as usize;
@@ -869,6 +892,10 @@ impl cpu::Vcpu for MshvVcpu {
                     let gva = info.guest_virtual_address;
                     let gpa = info.guest_physical_address;
 
+                    warn!(
+                        "MERU-DBG: vp{} memory exit ({:?}) gva={:#x} gpa={:#x} insn_len={}",
+                        self.vp_index, msg_type, gva, gpa, insn_len
+                    );
                     debug!("Exit ({msg_type:?}) GVA {gva:x} GPA {gpa:x}");
 
                     let mut context = MshvEmulatorContext {
@@ -980,6 +1007,12 @@ impl cpu::Vcpu for MshvVcpu {
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_CPUID_INTERCEPT => {
                     let info = x.to_cpuid_info().unwrap();
+                    warn!(
+                        "MERU-DBG: vp{} HVMSG_X64_CPUID_INTERCEPT leaf={:#x} subleaf={:#x}",
+                        self.vp_index,
+                        { info.rax },
+                        { info.rcx }
+                    );
                     debug!("cpuid intercept: leaf={:x} subleaf={:x}", { info.rax }, {
                         info.rcx
                     });
@@ -1016,6 +1049,13 @@ impl cpu::Vcpu for MshvVcpu {
                 #[cfg(target_arch = "x86_64")]
                 hv_message_type_HVMSG_X64_MSR_INTERCEPT => {
                     let info = x.to_msr_info().unwrap();
+
+                    let msr_num_dbg = { info.msr_number };
+                    let is_write_dbg = info.header.intercept_access_type != 0;
+                    warn!(
+                        "MERU-DBG: vp{} HVMSG_X64_MSR_INTERCEPT msr={:#x} write={}",
+                        self.vp_index, msr_num_dbg, is_write_dbg
+                    );
 
                     // MSRs that should return 0 on read and silently drop writes
                     // in nested virtualization to avoid issues in nested KVM guests.
@@ -1089,6 +1129,11 @@ impl cpu::Vcpu for MshvVcpu {
                 hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT => {
                     //TODO: Handler for VMCALL here.
                     let info = x.to_exception_info().unwrap();
+                    warn!(
+                        "MERU-DBG: vp{} HVMSG_X64_EXCEPTION_INTERCEPT vector={:#x}",
+                        self.vp_index,
+                        { info.exception_vector }
+                    );
                     debug!("Exception Info {:?}", { info.exception_vector });
                     Ok(cpu::VmExit::Ignore)
                 }
@@ -1551,16 +1596,29 @@ impl cpu::Vcpu for MshvVcpu {
 
                     Ok(cpu::VmExit::Ignore)
                 }
-                exit => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                    "Unhandled VCPU exit {exit:?}"
-                ))),
+                exit => {
+                    warn!(
+                        "MERU-DBG: vp{} unhandled VCPU exit message_type={:?}",
+                        self.vp_index, exit
+                    );
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "Unhandled VCPU exit {exit:?}"
+                    )))
+                }
             },
 
             Err(e) => match e.errno() {
                 libc::EAGAIN | libc::EINTR => Ok(cpu::VmExit::Ignore),
-                _ => Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
-                    "VCPU error {e:?}"
-                ))),
+                _ => {
+                    warn!(
+                        "MERU-DBG: vp{} VcpuFd::run errno={} err={e:?}",
+                        self.vp_index,
+                        e.errno()
+                    );
+                    Err(cpu::HypervisorCpuError::RunVcpu(anyhow!(
+                        "VCPU error {e:?}"
+                    )))
+                }
             },
         }
     }
@@ -1655,6 +1713,7 @@ impl cpu::Vcpu for MshvVcpu {
     fn set_cpuid2(&self, cpuid: &[CpuIdEntry]) -> cpu::Result<()> {
         use std::collections::HashSet;
 
+        warn!("MERU-DBG: set_cpuid2: registering {} entries", cpuid.len());
         let cpuid: Vec<mshv_bindings::hv_cpuid_entry> = cpuid.iter().map(|e| (*e).into()).collect();
         let mshv_cpuid = <CpuId>::from_entries(&cpuid)
             .map_err(|_| cpu::HypervisorCpuError::SetCpuid(anyhow!("failed to create CpuId")))?;
@@ -1696,7 +1755,13 @@ impl cpu::Vcpu for MshvVcpu {
 
             self.fd
                 .register_intercept_result_cpuid_entry(entry, override_arg, subleaf_specific)
-                .map_err(|e| cpu::HypervisorCpuError::SetCpuid(e.into()))?;
+                .map_err(|e| {
+                    warn!(
+                        "MERU-DBG: set_cpuid2: register failed function={:#x} index={:#x} subleaf_specific={:?} override_arg={:?}: {e}",
+                        entry.function, entry.index, subleaf_specific, override_arg
+                    );
+                    cpu::HypervisorCpuError::SetCpuid(e.into())
+                })?;
         }
 
         Ok(())
@@ -2228,6 +2293,7 @@ impl vm::Vm for MshvVm {
         id: u32,
         vm_ops: Option<Arc<dyn VmOps>>,
     ) -> vm::Result<Box<dyn cpu::Vcpu>> {
+        warn!("MERU-DBG: create_vcpu id={id}");
         let id: u8 = id.try_into().unwrap();
         let vcpu_fd = self
             .fd
