@@ -411,7 +411,9 @@ impl PerformanceTest {
     pub fn calc_timeout(&self, test_iterations: &Option<u32>, test_timeout: &Option<u32>) -> u64 {
         let total_iterations = test_iterations.unwrap_or(self.control.test_iterations) as u64
             + self.control.warmup_iterations as u64;
-        let iteration_overhead = if self.control.block_control.is_some() {
+        let iteration_overhead = if self.name == "virtio_net_latency_us" {
+            60u64
+        } else if self.control.block_control.is_some() {
             140u64
         } else {
             20u64
