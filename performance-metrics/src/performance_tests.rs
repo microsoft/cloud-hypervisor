@@ -602,7 +602,9 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> Vec<f64> {
         let disk = get_block_io_datadisk().unwrap_or_default();
         // Check if disk exist on host
         if fs::metadata(&disk).is_ok() {
-            test_disk_arg = format!("path={disk},queue_size={queue_size},num_queues={num_queues}");
+            test_disk_arg = format!(
+                "path={disk},queue_size={queue_size},num_queues={num_queues},image_type=raw"
+            );
             if run_block_io_without_cache() {
                 test_disk_arg.push_str(",direct=on");
             }
