@@ -1824,6 +1824,12 @@ impl cpu::Vcpu for MshvVcpu {
                 0x0000_0001 | 0x8000_0000 | 0x8000_0001 | 0x8000_0008 => {
                     override_arg = Some(1);
                 }
+                0x0000_000d => {
+                    // Force leaf 0x0D entries to use our registered values.
+                    // Needed for sparse sub-leaves (e.g. CET 11/12).
+                    override_arg = Some(1);
+                    subleaf_specific = Some(1);
+                }
                 _ => {}
             }
 
