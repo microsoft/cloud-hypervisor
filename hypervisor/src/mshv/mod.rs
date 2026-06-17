@@ -482,6 +482,87 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 if is_hv_reserved(function) {
                     continue;
                 }
+                if function == 0x0d {
+                    // Leaf 0x0D (Processor Extended State Enumeration) has
+                    // SPARSE sub-leaves: sub-leaf 0 reports the XCR0-managed
+                    // (user) state bitmap in EDX:EAX and sub-leaf 1 reports the
+                    // IA32_XSS-managed (supervisor) state bitmap in EDX:ECX.
+                    // Each subsequent valid sub-leaf corresponds to a *set bit*
+                    // in those bitmaps, and supported components are not
+                    // contiguous (e.g. AVX at bit 2, then CET user/supervisor
+                    // at bits 11/12 on AMD with bits 3..10 reading all zero).
+                    // A "stop at first all-zero sub-leaf" rule would skip the
+                    // valid higher sub-leaves; the guest would then under-size
+                    // its XSAVES buffer and XSAVES would overflow guest memory.
+                    // Enumerate strictly by the supported-state bitmaps instead.
+                    // SAFETY: __cpuid_count is safe on x86_64 hosts.
+                    let mut sub0 = unsafe { __cpuid_count(0x0d, 0) };
+                    // SAFETY: __cpuid_count is safe on x86_64 hosts.
+                    let mut sub1 = unsafe { __cpuid_count(0x0d, 1) };
+
+                    let user_mask = ((sub0.edx as u64) << 32) | (sub0.eax as u64);
+                    let supervisor_mask =
+                        ((sub1.edx as u64) << 32) | (sub1.ecx as u64);
+                    let valid_mask = user_mask | supervisor_mask;
+
+                    // Recompute the XSAVE area sizes so they cover EVERY
+                    // supported component, not just the ones currently enabled
+                    // in the host XCR0 / IA32_XSS. The raw host sub-leaf 1 EBX
+                    // (the compacted XSAVES size) reflects only the host current
+                    // supervisor-state enablement, so it under-reports when the
+                    // host has, e.g., CET_U enabled but not CET_S. Advertising a
+                    // too-small size makes the guest under-allocate its XSAVES
+                    // buffer; XSAVES then overflows guest memory and corrupts
+                    // it. This mirrors how KVM synthesizes leaf 0x0D.
+                    const XSAVE_BASE_SIZE: u32 = 512 + 64; // FXSAVE + XSAVE hdr
+
+                    // Standard-format size for all XCR0 (user) states, and the
+                    // compacted XSAVES size for all XCR0|IA32_XSS states.
+                    let mut user_size = XSAVE_BASE_SIZE;
+                    let mut compacted_size = XSAVE_BASE_SIZE;
+                    for bit in 2u32..64 {
+                        if (valid_mask >> bit) & 1 == 0 {
+                            continue;
+                        }
+                        // SAFETY: __cpuid_count is safe on x86_64 hosts.
+                        let comp = unsafe { __cpuid_count(0x0d, bit) };
+                        if (user_mask >> bit) & 1 == 1 {
+                            user_size = user_size.max(comp.ebx.saturating_add(comp.eax));
+                        }
+                        // ECX bit 1 marks a component as 64-byte aligned in the
+                        // compacted format.
+                        if (comp.ecx >> 1) & 1 == 1 {
+                            compacted_size = (compacted_size + 63) & !63;
+                        }
+                        compacted_size = compacted_size.saturating_add(comp.eax);
+                    }
+
+                    // Sub-leaf 0 EBX/ECX: standard-format XSAVE size for XCR0.
+                    sub0.ebx = user_size;
+                    sub0.ecx = user_size;
+                    // Sub-leaf 1 EBX: compacted XSAVES size (EAX bit 3 = XSAVES).
+                    if (sub1.eax & 0x8) != 0 {
+                        sub1.ebx = compacted_size;
+                    }
+
+                    push_entry(cpuid, function, 0, CPUID_FLAG_VALID_INDEX, sub0);
+                    push_entry(cpuid, function, 1, CPUID_FLAG_VALID_INDEX, sub1);
+
+                    // Components 0 (x87) and 1 (SSE) have no separate sub-leaf,
+                    // so emit one sub-leaf per supported state bit starting at 2.
+                    for bit in 2u32..64 {
+                        if cpuid.len() >= MAX_ENTRIES {
+                            return;
+                        }
+                        if (valid_mask >> bit) & 1 == 0 {
+                            continue;
+                        }
+                        // SAFETY: __cpuid_count is safe on x86_64 hosts.
+                        let r = unsafe { __cpuid_count(0x0d, bit) };
+                        push_entry(cpuid, function, bit, CPUID_FLAG_VALID_INDEX, r);
+                    }
+                    continue;
+                }
                 if has_subleaves(function) {
                     for index in 0u32.. {
                         if cpuid.len() >= MAX_ENTRIES {
