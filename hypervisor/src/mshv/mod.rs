@@ -500,6 +500,11 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                     // SAFETY: __cpuid_count is safe on x86_64 hosts.
                     let mut sub1 = unsafe { __cpuid_count(0x0d, 1) };
 
+                    // Mask CET supervisor xstate bits (11/12) for compatibility
+                    // with guests that treat them as inconsistent here.
+                    const XSS_CET_MASK: u32 = (1u32 << 11) | (1u32 << 12);
+                    sub1.ecx &= !XSS_CET_MASK;
+
                     let user_mask = ((sub0.edx as u64) << 32) | (sub0.eax as u64);
                     let supervisor_mask =
                         ((sub1.edx as u64) << 32) | (sub1.ecx as u64);
