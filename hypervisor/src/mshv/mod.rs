@@ -249,6 +249,24 @@ impl MshvHypervisor {
     }
 }
 
+/// Returns true when this VMM is itself running as a nested partition
+/// under another Microsoft Hypervisor. Detected via the Hyper-V
+/// enlightenment-info CPUID leaf (0x4000_0004): EAX bit 12
+/// (HypervisorNested) is set by the host hypervisor when the partition
+/// issuing the CPUID is itself nested.
+#[cfg(target_arch = "x86_64")]
+fn running_under_nested_mshv() -> bool {
+    // SAFETY: `__cpuid` reads CPUID leaf 0x4000_0004 and has no
+    // memory side effects. CPUID is always available on x86_64, so
+    // this call is safe on every supported CPU for this arch. Some
+    // toolchains expose `__cpuid` as a safe intrinsic; the `unsafe`
+    // block is required by older toolchains and harmless on newer
+    // ones, so silence the resulting `unused_unsafe` lint.
+    #[allow(unused_unsafe)]
+    let r = unsafe { core::arch::x86_64::__cpuid(0x4000_0004) };
+    (r.eax & (1 << 12)) != 0
+}
+
 /// Implementation of Hypervisor trait for Mshv
 ///
 /// # Examples
@@ -325,6 +343,27 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 create_args.pt_cpu_fbanks[i as usize] = disable_proc_features.as_uint64[i as usize];
             }
         }
+        // The synthetic cluster IPI hypercall hint is broken when this VMM
+        // runs as an L2 partition under another MSHV: the L3 guests
+        // hypercall page is not serviced correctly, so AP bring-up faults
+        // inside hv_send_ipi(). Clear the bit only in that nested case so
+        // the L3 guest falls back to APIC IPIs, which the L2 emulates
+        // correctly. On bare-metal MSHV the default mask is correct.
+        #[cfg(target_arch = "x86_64")]
+        let synthetic_features_mask = {
+            let default_mask = make_default_synthetic_features_mask();
+            if running_under_nested_mshv() {
+                let mut f: hv_partition_synthetic_processor_features = Default::default();
+                // SAFETY: writing to the bindgen union field.
+                unsafe { f.__bindgen_anon_1.set_synthetic_cluster_ipi(1) };
+                // SAFETY: reading the union back as a u64.
+                let unsupported = unsafe { f.as_uint64[0] };
+                default_mask & !unsupported
+            } else {
+                default_mask
+            }
+        };
+        #[cfg(not(target_arch = "x86_64"))]
         let synthetic_features_mask = make_default_synthetic_features_mask();
         let fd: VmFd;
         loop {
