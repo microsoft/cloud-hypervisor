@@ -343,19 +343,26 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 create_args.pt_cpu_fbanks[i as usize] = disable_proc_features.as_uint64[i as usize];
             }
         }
-        // The synthetic cluster IPI hypercall hint is broken when this VMM
-        // runs as an L2 partition under another MSHV: the L3 guests
-        // hypercall page is not serviced correctly, so AP bring-up faults
-        // inside hv_send_ipi(). Clear the bit only in that nested case so
-        // the L3 guest falls back to APIC IPIs, which the L2 emulates
-        // correctly. On bare-metal MSHV the default mask is correct.
+        // Hyper-V hypercall-based fast paths (cluster IPI, TLB flush)
+        // rely on the guests hypercall page being correctly installed.
+        // When this VMM runs as an L2 partition under another MSHV that
+        // page is not serviced correctly for the L3 guest, so any kernel
+        // path that goes through it - AP bring-up via hv_send_ipi() and
+        // remote TLB shootdowns via hv_flush_remote_tlb*() - faults
+        // inside the hypercall page. Clear those feature bits only in
+        // the nested case so the L3 guest falls back to APIC IPIs and
+        // IPI-based TLB shootdowns, which the L2 emulates correctly.
+        // On bare-metal MSHV the default mask is correct.
         #[cfg(target_arch = "x86_64")]
         let synthetic_features_mask = {
             let default_mask = make_default_synthetic_features_mask();
             if running_under_nested_mshv() {
                 let mut f: hv_partition_synthetic_processor_features = Default::default();
-                // SAFETY: writing to the bindgen union field.
-                unsafe { f.__bindgen_anon_1.set_synthetic_cluster_ipi(1) };
+                // SAFETY: writing to the bindgen union fields.
+                unsafe {
+                    f.__bindgen_anon_1.set_synthetic_cluster_ipi(1);
+                    f.__bindgen_anon_1.set_tb_flush_hypercalls(1);
+                }
                 // SAFETY: reading the union back as a u64.
                 let unsupported = unsafe { f.as_uint64[0] };
                 default_mask & !unsupported
