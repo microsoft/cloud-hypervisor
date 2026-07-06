@@ -344,19 +344,23 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             }
         }
         // Hyper-V hypercall-based fast paths (cluster IPI, TLB flush)
-        // rely on the guests hypercall page being correctly installed.
-        // When this VMM runs as an L2 partition under another MSHV that
-        // page is not serviced correctly for the L3 guest, so any kernel
-        // path that goes through it - AP bring-up via hv_send_ipi() and
-        // remote TLB shootdowns via hv_flush_remote_tlb*() - faults
-        // inside the hypercall page. Clear those feature bits only in
-        // the nested case so the L3 guest falls back to APIC IPIs and
-        // IPI-based TLB shootdowns, which the L2 emulates correctly.
-        // On bare-metal MSHV the default mask is correct.
+        // must be masked out in two situations:
+        //   1. Nested MSHV: this VMM runs as an L2 under another MSHV
+        //      and the L3 guest's hypercall page is not serviced
+        //      correctly, so hv_send_ipi() / hv_flush_remote_tlb*()
+        //      fault inside it.
+        //   2. Bare-metal MSHV creating a nested-capable L2 (nested=on):
+        //      HV_X64_NESTED_ENLIGHTENED_TLB in L2's CPUID leaf
+        //      0x4000_000A makes L2's kvm_amd install the enlightened
+        //      NPT-flush hooks and hit WARN_ON_ONCE in svm_flush_tlb_all
+        //      once L2 runs an L3 KVM guest, followed by SLUB freelist
+        //      corruption. Both symptoms are gated by tb_flush_hypercalls.
+        // Clearing the bits forces the guest to use APIC IPIs and
+        // IPI-based TLB shootdowns, which the parent emulates correctly.
         #[cfg(target_arch = "x86_64")]
         let synthetic_features_mask = {
             let default_mask = make_default_synthetic_features_mask();
-            if running_under_nested_mshv() {
+            if running_under_nested_mshv() || _config.nested {
                 let mut f: hv_partition_synthetic_processor_features = Default::default();
                 // SAFETY: writing to the bindgen union fields.
                 unsafe {
