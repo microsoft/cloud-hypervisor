@@ -974,6 +974,42 @@ fn span_end(addr: u64, size: u64) -> std::result::Result<u64, io::Error> {
     })
 }
 
+/// Translate `[addr, end]` (inclusive end) into a physical address. The span
+/// may cross more than one mapping as long as those mappings are adjacent in
+/// IOVA space and contiguous in GPA space, so a buffer the guest mapped with
+/// several mappings still resolves to a single physical range. Returns None
+/// when `addr` is unmapped, a gap is hit before `end`, or the covered range is
+/// not physically contiguous.
+fn translate_contiguous_range(
+    mappings: &BTreeMap<u64, Mapping>,
+    addr: u64,
+    end: u64,
+) -> Option<u64> {
+    // The mapping containing `addr` is the one with the greatest start <= addr.
+    let (&start_key, start) = mappings.range(..=addr).next_back()?;
+    if addr > inclusive_end(start_key, start.size)? {
+        return None;
+    }
+    let base_gpa = addr - start_key + start.gpa;
+
+    let mut covered = start_key.checked_add(start.size)?;
+    let mut next_gpa = start.gpa.checked_add(start.size)?;
+
+    // Walk forward across adjacent mappings until `end` is covered.
+    for (&key, value) in mappings.range(start_key.checked_add(1)?..) {
+        if end < covered {
+            break;
+        }
+        if key != covered || value.gpa != next_gpa {
+            return None;
+        }
+        covered = key.checked_add(value.size)?;
+        next_gpa = value.gpa.checked_add(value.size)?;
+    }
+
+    (end < covered).then_some(base_gpa)
+}
+
 impl DmaRemapping for IommuMapping {
     fn translate_gva(
         &self,
@@ -991,15 +1027,9 @@ impl DmaRemapping for IommuMapping {
                     return Ok(addr);
                 }
 
-                for (&key, &value) in domain.mappings.iter() {
-                    if let Some(mapping_end) = inclusive_end(key, value.size)
-                        && addr >= key
-                        && end <= mapping_end
-                    {
-                        let new_addr = addr - key + value.gpa;
-                        debug!("Into GPA addr 0x{new_addr:x}");
-                        return Ok(new_addr);
-                    }
+                if let Some(new_addr) = translate_contiguous_range(&domain.mappings, addr, end) {
+                    debug!("Into GPA addr 0x{new_addr:x}");
+                    return Ok(new_addr);
                 }
             }
         } else if self.bypass.load(Ordering::Acquire) {
@@ -1220,6 +1250,14 @@ impl Iommu {
         self.ext_mapping.lock().unwrap().insert(device_id, mapping);
     }
 
+    /// Removes a mapping added with `add_external_mapping`.
+    pub fn remove_external_mapping(
+        &mut self,
+        device_id: u32,
+    ) -> Option<Arc<dyn ExternalDmaMapping>> {
+        self.ext_mapping.lock().unwrap().remove(&device_id)
+    }
+
     #[cfg(fuzzing)]
     pub fn wait_for_epoll_threads(&mut self) {
         self.common.wait_for_epoll_threads();
@@ -1352,3 +1390,135 @@ impl Snapshottable for Iommu {
 }
 impl Transportable for Iommu {}
 impl Migratable for Iommu {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::io;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, RwLock, Weak};
+
+    use seccompiler::SeccompAction;
+    use vm_device::dma_mapping::ExternalDmaMapping;
+    use vmm_sys_util::eventfd::{EFD_NONBLOCK, EventFd};
+
+    use super::{Domain, Iommu, IommuMapping, Mapping};
+    use crate::DmaRemapping;
+
+    /// Test stub for VfioDmaMapping.
+    struct MockMapping;
+
+    impl ExternalDmaMapping for MockMapping {
+        fn map(&self, _iova: u64, _gpa: u64, _size: u64) -> Result<(), io::Error> {
+            Ok(())
+        }
+
+        fn unmap(&self, _iova: u64, _size: u64) -> Result<(), io::Error> {
+            Ok(())
+        }
+    }
+
+    fn new_iommu() -> Iommu {
+        let (iommu, _mapping) = Iommu::new(
+            "test-iommu".to_string(),
+            SeccompAction::Allow,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            (0, 0),
+            64,
+            None,
+        )
+        .unwrap();
+        iommu
+    }
+
+    /// Tests removing a mapping works and releases the ref.
+    #[test]
+    fn remove_external_mapping() {
+        let mut iommu = new_iommu();
+
+        let mapping: Arc<dyn ExternalDmaMapping> = Arc::new(MockMapping);
+        let weak: Weak<dyn ExternalDmaMapping> = Arc::downgrade(&mapping);
+
+        iommu.add_external_mapping(0x100, mapping);
+
+        // Removing the mapping succeeds.
+        let removed = iommu.remove_external_mapping(0x100);
+        assert!(removed.is_some());
+
+        // Dropping the returned Arc drops the last reference.
+        drop(removed);
+        assert!(
+            weak.upgrade().is_none(),
+            "iommu must not retain a reference after removal"
+        );
+
+        // Removing the same id again is a nop.
+        assert!(
+            iommu.remove_external_mapping(0x100).is_none(),
+            "removal is idempotent"
+        );
+
+        // Removing a bogus ID doesn't crash.
+        assert!(iommu.remove_external_mapping(0x999).is_none());
+    }
+
+    /// Build an IommuMapping with endpoint 0 attached to a single domain whose
+    /// mappings are the given `(iova, gpa, size)` tuples.
+    fn iommu_mapping(entries: &[(u64, u64, u64)]) -> IommuMapping {
+        let mut mappings = BTreeMap::new();
+        for &(iova, gpa, size) in entries {
+            mappings.insert(iova, Mapping { gpa, size });
+        }
+        let mut domains = BTreeMap::new();
+        domains.insert(
+            0,
+            Domain {
+                mappings,
+                bypass: false,
+            },
+        );
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(0, 0);
+        IommuMapping {
+            endpoints: Arc::new(RwLock::new(endpoints)),
+            domains: Arc::new(RwLock::new(domains)),
+            bypass: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn translate_within_single_mapping() {
+        let m = iommu_mapping(&[(0x1000, 0x4000, 0x1000)]);
+        assert_eq!(m.translate_gva(0, 0x1200, 0x100).unwrap(), 0x4200);
+    }
+
+    #[test]
+    fn translate_spanning_contiguous_mappings() {
+        // A buffer mapped with two adjacent mappings that resolve to a
+        // contiguous physical range translates as one range.
+        let m = iommu_mapping(&[(0x1000, 0x4000, 0x1000), (0x2000, 0x5000, 0x1000)]);
+        assert_eq!(m.translate_gva(0, 0x1000, 0x2000).unwrap(), 0x4000);
+        // A sub-range that straddles the boundary also resolves.
+        assert_eq!(m.translate_gva(0, 0x1f00, 0x200).unwrap(), 0x4f00);
+    }
+
+    #[test]
+    fn reject_spanning_noncontiguous_mappings() {
+        // Adjacent in IOVA but disjoint in GPA cannot be one range.
+        let m = iommu_mapping(&[(0x1000, 0x4000, 0x1000), (0x2000, 0x9000, 0x1000)]);
+        m.translate_gva(0, 0x1000, 0x2000).unwrap_err();
+    }
+
+    #[test]
+    fn reject_span_across_iova_gap() {
+        // A hole between mappings leaves part of the span unmapped.
+        let m = iommu_mapping(&[(0x1000, 0x4000, 0x1000), (0x3000, 0x6000, 0x1000)]);
+        m.translate_gva(0, 0x1000, 0x2000).unwrap_err();
+    }
+
+    #[test]
+    fn reject_unmapped_base() {
+        let m = iommu_mapping(&[(0x1000, 0x4000, 0x1000)]);
+        m.translate_gva(0, 0x2500, 0x10).unwrap_err();
+    }
+}
