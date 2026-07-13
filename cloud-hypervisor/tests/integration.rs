@@ -1411,7 +1411,7 @@ mod common_parallel {
             ImageType::Qcow2 => ("qcow2", &[]),
             ImageType::FixedVhd => ("vpc", &["-o", "subformat=fixed"]),
             ImageType::Vhdx => ("vhdx", &[]),
-            ImageType::FlatVmdk => panic!("unsupported image_type {image_type}"),
+            ImageType::FlatVmdk => ("vmdk", &["-o", "subformat=monolithicFlat"]),
             ImageType::Unknown => panic!("unsupported image_type {image_type}"),
         };
         let image_type_str = image_type.to_string();
@@ -1546,6 +1546,11 @@ mod common_parallel {
     #[test]
     fn test_virtio_block_direct_io_data_disk_4k_vhdx() {
         _test_virtio_block_direct_io_data_disk_4k(ImageType::Vhdx);
+    }
+
+    #[test]
+    fn test_virtio_block_direct_io_data_disk_4k_vmdk() {
+        _test_virtio_block_direct_io_data_disk_4k(ImageType::FlatVmdk);
     }
 
     #[test]
@@ -1856,6 +1861,42 @@ mod common_parallel {
     fn test_virtio_block_dynamic_vhdx_expand() {
         let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
         _test_virtio_block_dynamic_vhdx_expand(&guest);
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_monolithic_flat() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk(&guest, "monolithicFlat");
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_two_gb_max_extent_flat() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk(&guest, "twoGbMaxExtentFlat");
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_monolithic_flat_enospc() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk_enospc(&guest, "monolithicFlat");
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_two_gb_max_extent_flat_enospc() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk_enospc(&guest, "twoGbMaxExtentFlat");
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_two_gb_max_extent_flat_spanning() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk_extent_spanning(&guest, false);
+    }
+
+    #[test]
+    fn test_virtio_block_vmdk_two_gb_max_extent_flat_spanning_direct() {
+        let guest = basic_regular_guest!(JAMMY_IMAGE_NAME);
+        _test_virtio_block_vmdk_extent_spanning(&guest, true);
     }
 
     #[test]
