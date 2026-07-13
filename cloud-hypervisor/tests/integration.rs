@@ -7813,6 +7813,16 @@ mod ivshmem {
 
     #[test]
     #[cfg(not(feature = "mshv"))]
+    fn test_snapshot_restore_copyonwrite() {
+        snapshot_restore_common::_test_snapshot_restore_with_mode(
+            false,
+            false,
+            Some("copyonwrite"),
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_uffd() {
         snapshot_restore_common::_test_snapshot_restore_uffd("size=2G", &[], 1_920_000);
     }
@@ -7838,7 +7848,7 @@ mod ivshmem {
 
 #[cfg(not(feature = "mshv"))]
 mod snapshot_restore_common {
-    use std::fs::remove_dir_all;
+    use std::fs::{read_to_string, remove_dir_all};
     use std::process::Command;
 
     use crate::*;
@@ -7893,6 +7903,14 @@ mod snapshot_restore_common {
     }
 
     pub(crate) fn _test_snapshot_restore(use_hotplug: bool, use_resume_option: bool) {
+        _test_snapshot_restore_with_mode(use_hotplug, use_resume_option, None);
+    }
+
+    pub(crate) fn _test_snapshot_restore_with_mode(
+        use_hotplug: bool,
+        use_resume_option: bool,
+        memory_restore_mode: Option<&str>,
+    ) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
         let kernel_path = direct_kernel_boot_path();
@@ -8054,7 +8072,13 @@ mod snapshot_restore_common {
             ])
             .args([
                 "--restore",
-                format!("source_url=file://{snapshot_dir},resume={use_resume_option}").as_str(),
+                format!(
+                    "source_url=file://{snapshot_dir},resume={use_resume_option}{}",
+                    memory_restore_mode
+                        .map(|m| format!(",memory_restore_mode={m}"))
+                        .unwrap_or_default()
+                )
+                .as_str(),
             ])
             .capture_output()
             .spawn()
@@ -8122,8 +8146,16 @@ mod snapshot_restore_common {
             None
         )));
 
-        // Remove the snapshot dir
-        let _ = remove_dir_all(snapshot_dir.as_str());
+        if memory_restore_mode == Some("copyonwrite") {
+            // Copy-on-write restore must map the snapshot file itself (a silent
+            // fallback to copy keeps RAM anonymous), and the mapped file must
+            // outlive the VM.
+            let maps = read_to_string(format!("/proc/{}/maps", child.id())).unwrap();
+            assert!(maps.contains(&format!("{snapshot_dir}/memory-ranges")));
+        } else {
+            // Remove the snapshot dir
+            let _ = remove_dir_all(snapshot_dir.as_str());
+        }
 
         let r = std::panic::catch_unwind(|| {
             if use_resume_option {
