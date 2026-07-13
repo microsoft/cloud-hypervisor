@@ -489,6 +489,7 @@ pub fn preallocate_disk<P: AsRef<Path>>(file: &File, path: P) {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ImageType {
+    FlatVmdk,
     FixedVhd,
     Qcow2,
     Raw,
@@ -500,6 +501,7 @@ pub enum ImageType {
 impl fmt::Display for ImageType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ImageType::FlatVmdk => write!(f, "vmdk"),
             ImageType::FixedVhd => write!(f, "vhd"),
             ImageType::Qcow2 => write!(f, "qcow2"),
             ImageType::Raw => write!(f, "raw"),
@@ -518,6 +520,7 @@ impl FromStr for ImageType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "vmdk" => Ok(ImageType::FlatVmdk),
             "vhd" => Ok(ImageType::FixedVhd),
             "qcow2" => Ok(ImageType::Qcow2),
             "raw" => Ok(ImageType::Raw),
@@ -543,7 +546,13 @@ pub fn read_aligned_block_size(f: &mut File) -> io::Result<Vec<u8>> {
             blocksize,
         )
     };
-    f.read_exact(&mut data)?;
+    loop {
+        match f.read(&mut data) {
+            Ok(_) => break,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
     Ok(data)
 }
 
@@ -571,6 +580,11 @@ pub fn detect_image_type(f: &mut File) -> BlockResult<ImageType> {
         ImageType::FixedVhd
     } else if u64::from_le_bytes(block[0..8].try_into().unwrap()) == VHDX_SIGN {
         ImageType::Vhdx
+    } else if formats::vmdk::has_descriptor_header(&block)
+        && formats::vmdk::is_flat_vmdk(f)
+            .map_err(|e| BlockError::new(BlockErrorKind::Io, e).with_op(ErrorOp::DetectImageType))?
+    {
+        ImageType::FlatVmdk
     } else {
         ImageType::Raw
     };
@@ -711,6 +725,18 @@ mod unit_tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
+
+    #[test]
+    fn detect_short_file_is_not_eof_error() {
+        let tmp = TempFile::new().unwrap();
+        let mut f = tmp.into_file();
+        f.write_all(b"not-a-disk-magic-just-some-short-text\n")
+            .unwrap();
+        f.sync_all().unwrap();
+
+        let image_type = detect_image_type(&mut f).unwrap();
+        assert_eq!(image_type, ImageType::Raw);
+    }
 
     #[test]
     fn test_probe_regular_file_returns_valid_alignment() {
