@@ -249,6 +249,24 @@ impl MshvHypervisor {
     }
 }
 
+/// Returns true when this VMM is itself running as a nested partition
+/// under another Microsoft Hypervisor. Detected via the Hyper-V
+/// enlightenment-info CPUID leaf (0x4000_0004): EAX bit 12
+/// (HypervisorNested) is set by the host hypervisor when the partition
+/// issuing the CPUID is itself nested.
+#[cfg(target_arch = "x86_64")]
+fn running_under_nested_mshv() -> bool {
+    // SAFETY: `__cpuid` reads CPUID leaf 0x4000_0004 and has no
+    // memory side effects. CPUID is always available on x86_64, so
+    // this call is safe on every supported CPU for this arch. Some
+    // toolchains expose `__cpuid` as a safe intrinsic; the `unsafe`
+    // block is required by older toolchains and harmless on newer
+    // ones, so silence the resulting `unused_unsafe` lint.
+    #[allow(unused_unsafe)]
+    let r = unsafe { core::arch::x86_64::__cpuid(0x4000_0004) };
+    (r.eax & (1 << 12)) != 0
+}
+
 /// Implementation of Hypervisor trait for Mshv
 ///
 /// # Examples
@@ -325,6 +343,38 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 create_args.pt_cpu_fbanks[i as usize] = disable_proc_features.as_uint64[i as usize];
             }
         }
+        // Hyper-V hypercall-based fast paths (cluster IPI, TLB flush)
+        // must be masked out in two situations:
+        //   1. Nested MSHV: this VMM runs as an L2 under another MSHV
+        //      and the L3 guest's hypercall page is not serviced
+        //      correctly, so hv_send_ipi() / hv_flush_remote_tlb*()
+        //      fault inside it.
+        //   2. Bare-metal MSHV creating a nested-capable L2 (nested=on):
+        //      HV_X64_NESTED_ENLIGHTENED_TLB in L2's CPUID leaf
+        //      0x4000_000A makes L2's kvm_amd install the enlightened
+        //      NPT-flush hooks and hit WARN_ON_ONCE in svm_flush_tlb_all
+        //      once L2 runs an L3 KVM guest, followed by SLUB freelist
+        //      corruption. Both symptoms are gated by tb_flush_hypercalls.
+        // Clearing the bits forces the guest to use APIC IPIs and
+        // IPI-based TLB shootdowns, which the parent emulates correctly.
+        #[cfg(target_arch = "x86_64")]
+        let synthetic_features_mask = {
+            let default_mask = make_default_synthetic_features_mask();
+            if running_under_nested_mshv() || _config.nested {
+                let mut f: hv_partition_synthetic_processor_features = Default::default();
+                // SAFETY: writing to the bindgen union fields.
+                unsafe {
+                    f.__bindgen_anon_1.set_synthetic_cluster_ipi(1);
+                    f.__bindgen_anon_1.set_tb_flush_hypercalls(1);
+                }
+                // SAFETY: reading the union back as a u64.
+                let unsupported = unsafe { f.as_uint64[0] };
+                default_mask & !unsupported
+            } else {
+                default_mask
+            }
+        };
+        #[cfg(not(target_arch = "x86_64"))]
         let synthetic_features_mask = make_default_synthetic_features_mask();
         let fd: VmFd;
         loop {
@@ -355,6 +405,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
                 fd: vm_fd,
                 msrs: ArcSwap::new(Vec::<MsrEntry>::new().into()),
                 dirty_log_slots: RwLock::new(HashMap::new()),
+                nested_enabled: _config.nested,
                 #[cfg(feature = "sev_snp")]
                 sev_snp_enabled: mshv_vm_type == VmType::Snp,
                 #[cfg(feature = "sev_snp")]
@@ -1831,6 +1882,10 @@ pub struct MshvVm {
     #[cfg(target_arch = "x86_64")]
     msrs: ArcSwap<Vec<MsrEntry>>,
     dirty_log_slots: RwLock<HashMap<u64, MshvDirtyLogSlot>>,
+    /// True when the partition was created with `nested=on`; used to gate
+    /// nested-only workarounds applied after `MSHV_INITIALIZE_PARTITION`.
+    #[cfg(target_arch = "x86_64")]
+    nested_enabled: bool,
     #[cfg(feature = "sev_snp")]
     sev_snp_enabled: bool,
     #[cfg(feature = "sev_snp")]
@@ -1858,6 +1913,68 @@ impl MshvVm {
         self.fd
             .set_partition_property(code, value)
             .map_err(|e| anyhow!("Failed to set partition property: {e:?}"))
+    }
+
+    /// Clip `HV_X64_NESTED_ENLIGHTENED_TLB` (leaf 0x4000_000A EAX bit 22)
+    /// from every VP's view via `HvCallRegisterInterceptResult`. Advertising
+    /// that bit to an L2 whose kernel is `kvm_amd` (Linux 6.3+) trips
+    /// `WARN_ON_ONCE` in `svm_flush_tlb_all` and loses NPT/host coherence
+    /// once L2 runs an L3 KVM guest. mshv hard-codes the bit for AMD
+    /// nested-virt partitions in `vpcpuidcommon.c`, so the only way to
+    /// suppress it from user space is to install a partition-wide CPUID
+    /// intercept-result override (`HV_ANY_VP`) with a per-bit mask.
+    /// Best-effort: on kernels/hypervisors that reject the hypercall we
+    /// log and continue, since the existing L2-side workarounds still apply.
+    #[cfg(target_arch = "x86_64")]
+    fn suppress_enlightened_npt_tlb(&self) {
+        // HV_ANY_VP == ((HV_VP_INDEX)-1); see published/hvgdk_mini.w.
+        const HV_ANY_VP: u32 = 0xFFFF_FFFF;
+        // HV_X64_NESTED_ENLIGHTENED_TLB
+        const NESTED_ENLIGHTENED_TLB_MASK: u32 = 1 << 22;
+
+        let cpuid_params = hv_register_x64_cpuid_result_parameters {
+            input: hv_register_x64_cpuid_result_parameters__bindgen_ty_1 {
+                eax: 0x4000_000A,
+                ecx: 0,
+                subleaf_specific: 0,
+                always_override: 1,
+                padding: 0,
+            },
+            result: hv_register_x64_cpuid_result_parameters__bindgen_ty_2 {
+                eax: 0,
+                eax_mask: NESTED_ENLIGHTENED_TLB_MASK,
+                ebx: 0,
+                ebx_mask: 0,
+                ecx: 0,
+                ecx_mask: 0,
+                edx: 0,
+                edx_mask: 0,
+            },
+        };
+
+        let mut input = hv_input_register_intercept_result {
+            partition_id: 0, // populated by kernel driver
+            vp_index: HV_ANY_VP,
+            intercept_type: hv_intercept_type_HV_INTERCEPT_TYPE_X64_CPUID,
+            parameters: hv_register_intercept_result_parameters {
+                cpuid: cpuid_params,
+            },
+        };
+
+        let mut args = mshv_root_hvcall {
+            code: HVCALL_REGISTER_INTERCEPT_RESULT as u16,
+            in_sz: std::mem::size_of::<hv_input_register_intercept_result>() as u16,
+            in_ptr: &mut input as *mut _ as u64,
+            ..Default::default()
+        };
+
+        if let Err(e) = self.fd.hvcall(&mut args) {
+            warn!(
+                "HvCallRegisterInterceptResult for CPUID 0x4000_000A failed: {e:?}; \
+                 L2 will still see HV_X64_NESTED_ENLIGHTENED_TLB and may hit \
+                 svm_flush_tlb_all WARN when running L3 KVM guests"
+            );
+        }
     }
 }
 
@@ -2531,6 +2648,14 @@ impl vm::Vm for MshvVm {
         self.fd
             .initialize()
             .map_err(|e| vm::HypervisorVmError::InitializeVm(e.into()))?;
+
+        // For nested-capable L2 partitions on AMD, force-clear the
+        // HV_X64_NESTED_ENLIGHTENED_TLB bit from the synthetic nested-features
+        // CPUID leaf. See suppress_enlightened_npt_tlb() for the rationale.
+        #[cfg(target_arch = "x86_64")]
+        if self.nested_enabled {
+            self.suppress_enlightened_npt_tlb();
+        }
 
         // Set additional partition property for SEV-SNP partition.
         #[cfg(feature = "sev_snp")]
