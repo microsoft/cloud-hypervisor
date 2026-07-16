@@ -358,6 +358,12 @@ impl QcowMetadata {
     }
 
     #[cfg(test)]
+    pub fn free_list_len(&self) -> usize {
+        let inner = self.inner.read().unwrap();
+        inner.avail_clusters.len() + inner.unref_clusters.len()
+    }
+
+    #[cfg(test)]
     pub fn cluster_refcount(&self, address: u64) -> io::Result<u64> {
         let mut inner = self.inner.write().unwrap();
         let QcowState {
@@ -956,6 +962,7 @@ impl QcowState {
                 }
                 Ok(Some(freed_cluster)) => {
                     let mut freed = self.set_cluster_refcount(freed_cluster, 0)?;
+                    unref_clusters.push(freed_cluster);
                     unref_clusters.append(&mut freed);
                     refcount_set = true;
                 }

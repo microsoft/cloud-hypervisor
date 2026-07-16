@@ -477,6 +477,114 @@ mod unit_tests {
         assert_eq!(result as usize, data.len());
     }
 
+    fn async_fsync(disk: &QcowDisk) {
+        let mut async_io = disk.create_async_io(1).unwrap();
+        async_io.fsync(Some(7)).unwrap();
+        let (user_data, _result) = next_completion(async_io.as_mut());
+        assert_eq!(user_data, 7);
+    }
+
+    // Freed relocation clusters must be reused so committed blocks track
+    // live data.
+    #[test]
+    fn relocated_metadata_clusters_are_reused() {
+        use std::os::unix::fs::MetadataExt;
+        const CL: u64 = 65536;
+        let virtual_size = 512 * 1024 * 1024; // one L2 table
+        let (temp, disk) = create_disk_with_data(virtual_size, &[], 0, false, false);
+        let n: u64 = 400;
+
+        for i in 0..n {
+            let pattern = vec![(i as u8).wrapping_add(1); CL as usize];
+            async_write(&disk, i * CL, &pattern);
+            async_fsync(&disk);
+        }
+
+        temp.as_file().sync_all().unwrap();
+        let committed = (temp.as_file().metadata().unwrap().blocks() * 512) / CL;
+        // Before the fix committed grew to ~2 * n.
+        assert!(
+            committed <= n + 64,
+            "committed {committed} clusters far exceeds {n} live data clusters; \
+             relocated metadata clusters are being stranded instead of reused",
+        );
+
+        for i in 0..n {
+            let got = async_read(&disk, i * CL, CL as usize);
+            assert_eq!(
+                got,
+                vec![(i as u8).wrapping_add(1); CL as usize],
+                "cluster {i} data mismatch",
+            );
+        }
+    }
+
+    // Every refcount==0 cluster in the file must be on the runtime free list.
+    // The bug left relocated refcount-block clusters free on disk yet absent
+    // from the list, so the allocator never reused them.
+    #[test]
+    fn freed_clusters_are_tracked_in_free_list() {
+        const CL: u64 = 65536;
+        let virtual_size = 512 * 1024 * 1024;
+        let (temp, disk) = create_disk_with_data(virtual_size, &[], 0, false, false);
+        let n: u64 = 400;
+
+        for i in 0..n {
+            let pattern = vec![(i as u8).wrapping_add(1); CL as usize];
+            async_write(&disk, i * CL, &pattern);
+            async_fsync(&disk);
+        }
+
+        let file_clusters = temp.as_file().metadata().unwrap().len() / CL;
+        let mut free_on_disk = 0u64;
+        for c in 0..file_clusters {
+            if disk.metadata().cluster_refcount(c * CL).unwrap() == 0 {
+                free_on_disk += 1;
+            }
+        }
+        let tracked = disk.metadata().free_list_len() as u64;
+        assert_eq!(
+            free_on_disk, tracked,
+            "{free_on_disk} free clusters on disk but {tracked} tracked; \
+             relocated clusters are stranded off the free list",
+        );
+    }
+
+    // Reopening rebuilds the free list from the on-disk refcounts. With the
+    // clusters tracked at runtime, a reopen must not discover a pile of them.
+    #[test]
+    fn reopen_discovers_no_stranded_clusters() {
+        const CL: u64 = 65536;
+        let virtual_size = 512 * 1024 * 1024;
+        let (temp, disk) = create_disk_with_data(virtual_size, &[], 0, false, false);
+        let n: u64 = 400;
+
+        for i in 0..n {
+            let pattern = vec![(i as u8).wrapping_add(1); CL as usize];
+            async_write(&disk, i * CL, &pattern);
+            async_fsync(&disk);
+        }
+        let tracked_before = disk.metadata().free_list_len();
+
+        drop(disk);
+        temp.as_file().sync_all().unwrap();
+        let disk = QcowDisk::new(
+            temp.as_file().try_clone().unwrap(),
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let tracked_after = disk.metadata().free_list_len();
+
+        assert!(
+            tracked_after <= tracked_before + 8,
+            "reopen recovered {} clusters the allocator had stranded",
+            tracked_after.saturating_sub(tracked_before),
+        );
+    }
+
     #[test]
     fn test_qcow_sync_rejects_out_of_bounds_allocated_l2_entry_on_read() {
         let data = vec![0x5a; 4096];
