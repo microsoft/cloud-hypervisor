@@ -1,0 +1,8 @@
+schemaVersion: 0.0.1
+isProduction: false
+accountableOwners:
+  service: 1a2c4fe9-ca61-4351-8fea-21bbfe2d816c
+routing:
+  defaultAreaPath:
+    org: microsoft
+    path: OS\Core\LSG\Linux-Virt
