@@ -28,6 +28,7 @@ use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
 };
 use log::{debug, error, info};
+pub use smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};
 use thiserror::Error;
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic,
@@ -958,9 +959,7 @@ pub fn configure_system(
     _num_cpus: u32,
     setup_header: Option<setup_header>,
     rsdp_addr: Option<GuestAddress>,
-    serial_number: Option<&str>,
-    uuid: Option<&str>,
-    oem_strings: Option<&[&str]>,
+    smbios: Option<&SmbiosConfig>,
     topology: Option<(u16, u16, u16, u16)>,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
@@ -968,8 +967,7 @@ pub fn configure_system(
         .write_obj((layout::EBDA_START.0 >> 4) as u16, layout::EBDA_POINTER)
         .map_err(Error::EbdaSetup)?;
 
-    let size = smbios::setup_smbios(guest_mem, serial_number, uuid, oem_strings)
-        .map_err(Error::SmbiosSetup)?;
+    let size = smbios::setup_smbios(guest_mem, smbios).map_err(Error::SmbiosSetup)?;
 
     // Place the MP table after the SMIOS table aligned to 16 bytes
     let offset = GuestAddress(layout::SMBIOS_START).unchecked_add(size);
@@ -1181,7 +1179,7 @@ fn configure_pvh(
     // Write the start_info struct to guest memory.
     guest_mem
         .write_obj(start_info, start_info_addr)
-        .map_err(|_| super::Error::StartInfoSetup)?;
+        .map_err(super::Error::StartInfoSetup)?;
 
     Ok(())
 }
@@ -1514,8 +1512,6 @@ mod unit_tests {
             Some(layout::RSDP_POINTER),
             None,
             None,
-            None,
-            None,
         );
         config_err.unwrap_err();
 
@@ -1534,8 +1530,6 @@ mod unit_tests {
             0,
             &None,
             no_vcpus,
-            None,
-            None,
             None,
             None,
             None,
@@ -1567,8 +1561,6 @@ mod unit_tests {
             None,
             None,
             None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -1578,8 +1570,6 @@ mod unit_tests {
             0,
             &None,
             no_vcpus,
-            None,
-            None,
             None,
             None,
             None,

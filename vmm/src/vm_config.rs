@@ -125,15 +125,27 @@ pub struct PlatformConfig {
     #[serde(default = "default_platformconfig_num_pci_segments")]
     pub num_pci_segments: u16,
     #[serde(default)]
-    pub iommu_segments: Option<Vec<u16>>,
+    pub iommu_segments: Option<Box<[u16]>>,
     #[serde(default = "default_platformconfig_iommu_address_width_bits")]
     pub iommu_address_width_bits: u8,
+    #[serde(default, alias = "serial_number")]
+    pub system_serial_number: Option<String>,
+    #[serde(default, alias = "uuid")]
+    pub system_uuid: Option<String>,
     #[serde(default)]
-    pub serial_number: Option<String>,
+    pub oem_strings: Option<Box<[String]>>,
     #[serde(default)]
-    pub uuid: Option<String>,
+    pub system_manufacturer: Option<String>,
     #[serde(default)]
-    pub oem_strings: Option<Vec<String>>,
+    pub system_product_name: Option<String>,
+    #[serde(default)]
+    pub system_version: Option<String>,
+    #[serde(default)]
+    pub system_family: Option<String>,
+    #[serde(default)]
+    pub system_sku_number: Option<String>,
+    #[serde(default)]
+    pub chassis_asset_tag: Option<String>,
     #[cfg(feature = "tdx")]
     #[serde(default)]
     pub tdx: bool,
@@ -144,6 +156,50 @@ pub struct PlatformConfig {
     pub iommufd: bool,
     #[serde(default = "default_platformconfig_vfio_p2p_dma")]
     pub vfio_p2p_dma: bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl PlatformConfig {
+    /// Returns `None` if no SMBIOS-relevant platform fields are set, otherwise
+    /// `Some` with a [`SmbiosConfig`] built from the populated fields.
+    pub fn smbios_config(&self) -> Option<arch::x86_64::SmbiosConfig> {
+        let has_system = [
+            &self.system_serial_number,
+            &self.system_uuid,
+            &self.system_manufacturer,
+            &self.system_product_name,
+            &self.system_version,
+            &self.system_family,
+            &self.system_sku_number,
+        ]
+        .iter()
+        .any(|v| v.is_some());
+
+        let system = has_system.then_some(arch::x86_64::SmbiosSystem {
+            manufacturer: self.system_manufacturer.clone(),
+            product_name: self.system_product_name.clone(),
+            version: self.system_version.clone(),
+            serial_number: self.system_serial_number.clone(),
+            uuid: self.system_uuid.clone(),
+            sku_number: self.system_sku_number.clone(),
+            family: self.system_family.clone(),
+        });
+
+        let chassis =
+            self.chassis_asset_tag
+                .clone()
+                .map(|asset_tag| arch::x86_64::SmbiosChassisConfig {
+                    asset_tag: Some(asset_tag),
+                });
+
+        let smbios = arch::x86_64::SmbiosConfig {
+            system,
+            chassis,
+            oem_strings: self.oem_strings.clone().unwrap_or_default(),
+        };
+
+        (!smbios.is_empty()).then_some(smbios)
+    }
 }
 
 pub const DEFAULT_PCI_SEGMENT_APERTURE_WEIGHT: u32 = 1;
@@ -273,7 +329,7 @@ pub struct RateLimiterGroupConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VirtQueueAffinity {
     pub queue_index: u16,
-    pub host_cpus: Vec<usize>,
+    pub host_cpus: Box<[usize]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -317,7 +373,7 @@ pub struct DiskConfig {
     #[serde(default)]
     pub serial: Option<String>,
     #[serde(default)]
-    pub queue_affinity: Option<Vec<VirtQueueAffinity>>,
+    pub queue_affinity: Option<Box<[VirtQueueAffinity]>>,
     #[serde(default)]
     pub backing_files: bool,
     #[serde(default = "default_diskconfig_sparse")]
@@ -785,13 +841,13 @@ pub struct NumaDistance {
 pub struct NumaConfig {
     pub guest_numa_id: u32,
     #[serde(default)]
-    pub cpus: Option<Vec<u32>>,
+    pub cpus: Option<Box<[u32]>>,
     #[serde(default)]
-    pub distances: Option<Vec<NumaDistance>>,
+    pub distances: Option<Box<[NumaDistance]>>,
     #[serde(default)]
-    pub memory_zones: Option<Vec<String>>,
+    pub memory_zones: Option<Box<[String]>>,
     #[serde(default)]
-    pub pci_segments: Option<Vec<u16>>,
+    pub pci_segments: Option<Box<[u16]>>,
     #[serde(default)]
     pub device_id: Option<String>,
 }
@@ -1023,7 +1079,7 @@ pub struct VmConfig {
     #[serde(default)]
     pub memory: MemoryConfig,
     pub payload: Option<PayloadConfig>,
-    pub rate_limit_groups: Option<Vec<RateLimiterGroupConfig>>,
+    pub rate_limit_groups: Option<Box<[RateLimiterGroupConfig]>>,
     pub disks: Option<Vec<DiskConfig>>,
     pub net: Option<Vec<NetConfig>>,
     #[serde(default)]
@@ -1050,13 +1106,13 @@ pub struct VmConfig {
     pub pvpanic: bool,
     #[serde(default)]
     pub iommu: bool,
-    pub numa: Option<Vec<NumaConfig>>,
+    pub numa: Option<Box<[NumaConfig]>>,
     #[serde(default)]
     pub watchdog: bool,
     #[cfg(feature = "guest_debug")]
     #[serde(default)]
     pub gdb: bool,
-    pub pci_segments: Option<Vec<PciSegmentConfig>>,
+    pub pci_segments: Option<Box<[PciSegmentConfig]>>,
     pub platform: Option<PlatformConfig>,
     pub tpm: Option<TpmConfig>,
     // Preserved FDs are the ones that share the same life-time as its holding
@@ -1071,7 +1127,7 @@ pub struct VmConfig {
     pub preserved_fds: Option<Vec<i32>>,
     #[serde(default)]
     pub landlock_enable: bool,
-    pub landlock_rules: Option<Vec<LandlockConfig>>,
+    pub landlock_rules: Option<Box<[LandlockConfig]>>,
     #[cfg(feature = "ivshmem")]
     pub ivshmem: Option<IvshmemConfig>,
 }
