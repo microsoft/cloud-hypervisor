@@ -65,6 +65,7 @@ impl Blk {
             num_queues as u64,
             false,
             &exit_evt,
+            |_| Ok(()),
         )?;
 
         let (
