@@ -6,14 +6,13 @@
 // Performance tests
 
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs, panic, thread};
 
 use test_infra::{Error as InfraError, *};
 use thiserror::Error;
 
 use crate::{ImageFormat, PerformanceTestControl, PerformanceTestOverrides, mean};
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 enum Error {
     #[error("boot time could not be parsed")]
@@ -157,7 +156,7 @@ pub fn performance_net_throughput(control: &PerformanceTestControl) -> f64 {
         .spawn()
         .unwrap();
 
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         guest.wait_vm_boot().unwrap();
         measure_virtio_net_throughput(test_timeout, num_queues / 2, &guest, rx, bandwidth).unwrap()
     });
@@ -197,7 +196,7 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
         .spawn()
         .unwrap();
 
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         guest.wait_vm_boot().unwrap();
 
         // 'ethr' tool will measure the latency multiple times with provided test time
@@ -218,7 +217,7 @@ pub fn performance_net_latency(control: &PerformanceTestControl) -> f64 {
 }
 
 fn parse_boot_time_output(output: &[u8]) -> Result<f64, Error> {
-    std::panic::catch_unwind(|| {
+    panic::catch_unwind(|| {
         let l: Vec<String> = String::from_utf8_lossy(output)
             .lines()
             .filter(|l| l.contains("Debug I/O port: Kernel code"))
@@ -322,7 +321,7 @@ fn measure_boot_time(cmd: &mut GuestCommand, guest: &Guest) -> Result<f64, Error
 }
 
 pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         let jammy = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = performance_test_new_guest(Box::new(jammy), control);
         let mut cmd = GuestCommand::new(&guest);
@@ -347,7 +346,7 @@ pub fn performance_boot_time(control: &PerformanceTestControl) -> f64 {
 }
 
 pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         let jammy = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = performance_test_new_guest(Box::new(jammy), control);
         let mut cmd = GuestCommand::new(&guest);
@@ -441,7 +440,7 @@ pub fn performance_block_io(control: &PerformanceTestControl) -> f64 {
         .spawn()
         .unwrap();
 
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         guest.wait_vm_boot().unwrap();
 
         let fio_command = format!(
@@ -529,7 +528,7 @@ fn measure_restore_time(
 }
 
 pub fn performance_restore_latency(control: &PerformanceTestControl) -> f64 {
-    let r = std::panic::catch_unwind(|| {
+    let r = panic::catch_unwind(|| {
         let jammy = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = performance_test_new_guest(Box::new(jammy), control);
         let api_socket_source = String::from(
@@ -554,7 +553,7 @@ pub fn performance_restore_latency(control: &PerformanceTestControl) -> f64 {
 
         thread::sleep(Duration::new((control.test_timeout / 2) as u64, 0));
         let snapshot_dir = String::from(guest.tmp_dir.as_path().join("snapshot").to_str().unwrap());
-        std::fs::create_dir(&snapshot_dir).unwrap();
+        fs::create_dir(&snapshot_dir).unwrap();
         assert!(remote_command(&api_socket_source, "pause", None));
         assert!(remote_command(
             &api_socket_source,
