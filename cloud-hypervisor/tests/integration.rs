@@ -6394,6 +6394,9 @@ mod common_parallel {
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             // Start the live-migration
             let migration_socket = String::from(
                 guest
@@ -6444,6 +6447,9 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
 
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -6755,6 +6761,8 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
             // Start TCP live migration
             assert!(
                 start_live_migration_tcp(&src_api_socket, &dest_api_socket, connections),
@@ -6789,6 +6797,9 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean up the destination VM and ensure it terminates properly
@@ -7044,7 +7055,6 @@ mod common_parallel {
             prepare_virtiofsd(&guest.tmp_dir, shared_dir.to_str().unwrap());
 
         let src_api_socket = temp_api_path(&guest.tmp_dir);
-
         // Start the source VM
         let mut src_child = GuestCommand::new(&guest)
             .args(["--api-socket", &src_api_socket])
@@ -7122,6 +7132,9 @@ mod common_parallel {
                 "pre_migration_data"
             );
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             let migration_socket = String::from(
                 guest
                     .tmp_dir
@@ -7192,6 +7205,9 @@ mod common_parallel {
             let post_content =
                 std::fs::read_to_string(shared_dir.join("post_migration_file")).unwrap();
             assert_eq!(post_content.trim(), "post_migration_data");
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean up
@@ -7446,6 +7462,9 @@ mod ivshmem {
             // Allow some normal time to elapse to check we don't get spurious reboots
             thread::sleep(std::time::Duration::new(40, 0));
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             // Start the live-migration
             let migration_socket = String::from(
                 guest
@@ -7499,6 +7518,9 @@ mod ivshmem {
 
             // Check ivshmem device
             _test_ivshmem(&guest, &ivshmem_file_path, file_size);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -7942,6 +7964,9 @@ mod snapshot_restore_common {
             // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&api_socket_source);
+
             snapshot_restore_common::snapshot_and_check_events(
                 &api_socket_source,
                 &snapshot_dir,
@@ -8115,6 +8140,9 @@ mod snapshot_restore_common {
             }
 
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&api_socket_restored);
         });
         // Shutdown the target VM and check console output
         kill_child(&mut child);
@@ -8934,6 +8962,9 @@ mod common_sequential {
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             // Start the live-migration
             let migration_socket = String::from(
                 guest
@@ -8999,6 +9030,9 @@ mod common_sequential {
             let total_memory = guest.get_total_memory().unwrap_or_default();
             assert!(total_memory > 4_800_000);
             assert!(total_memory < 5_760_000);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -9138,6 +9172,9 @@ mod common_sequential {
                 }
             }
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             // Start the live-migration
             let migration_socket = String::from(
                 guest
@@ -9232,6 +9269,9 @@ mod common_sequential {
                     );
                 }
             }
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
