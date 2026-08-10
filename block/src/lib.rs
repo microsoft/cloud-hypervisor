@@ -568,6 +568,14 @@ pub fn open_disk_image(path: &Path, options: &OpenOptions) -> BlockResult<File> 
 
 /// Determine image type through file parsing.
 pub fn detect_image_type(f: &mut File) -> BlockResult<ImageType> {
+    // Detect VMDK first to avoid "failed to fill whole buffer" errors reading
+    // small descriptor files.
+    if formats::vmdk::is_flat_vmdk(f)
+        .map_err(|e| BlockError::new(BlockErrorKind::Io, e).with_op(ErrorOp::DetectImageType))?
+    {
+        return Ok(ImageType::FlatVmdk);
+    }
+
     let block = read_aligned_block_size(f)
         .map_err(|e| BlockError::new(BlockErrorKind::Io, e).with_op(ErrorOp::DetectImageType))?;
 
@@ -580,11 +588,6 @@ pub fn detect_image_type(f: &mut File) -> BlockResult<ImageType> {
         ImageType::FixedVhd
     } else if u64::from_le_bytes(block[0..8].try_into().unwrap()) == VHDX_SIGN {
         ImageType::Vhdx
-    } else if formats::vmdk::has_descriptor_header(&block)
-        && formats::vmdk::is_flat_vmdk(f)
-            .map_err(|e| BlockError::new(BlockErrorKind::Io, e).with_op(ErrorOp::DetectImageType))?
-    {
-        ImageType::FlatVmdk
     } else {
         ImageType::Raw
     };
@@ -727,15 +730,22 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn detect_short_file_is_not_eof_error() {
+    fn detects_small_vmdk_descriptor() {
         let tmp = TempFile::new().unwrap();
         let mut f = tmp.into_file();
-        f.write_all(b"not-a-disk-magic-just-some-short-text\n")
-            .unwrap();
+        f.write_all(
+            b"# Disk DescriptorFile\n\
+              version=1\n\
+              createType=\"monolithicFlat\"\n\
+              # Extent description\n\
+              RW 2048 FLAT \"disk-flat.vmdk\"\n\
+              # The Disk Data Base\n\
+              ddb.adapterType = \"ide\"\n",
+        )
+        .unwrap();
         f.sync_all().unwrap();
 
-        let image_type = detect_image_type(&mut f).unwrap();
-        assert_eq!(image_type, ImageType::Raw);
+        assert_eq!(detect_image_type(&mut f).unwrap(), ImageType::FlatVmdk);
     }
 
     #[test]
