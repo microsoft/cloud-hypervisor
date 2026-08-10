@@ -71,7 +71,7 @@ For a Flat VMDK, its `path=` points at a small text descriptor whose
 data lives in one or more separate extent files. Granting only the descriptor
 currently leaves those extents unreachable under landlock.
 
-The process launching Cloud-Hypervisor must grant these extent paths explicitly
+The process launching Cloud Hypervisor must grant these extent paths explicitly
 via `--landlock-rules` (or the `landlock_rules` API field). The descriptor file's
 extent section mentions the extent file path which can be either:
 
@@ -79,6 +79,11 @@ extent section mentions the extent file path which can be either:
 file's parent directory
 - absolute, which can live inside the descriptor file's parent directory or in another
 directory
+
+Absolute extent paths are trusted input and are disabled by default. When they
+must be used with an untrusted descriptor, the management stack must validate
+the paths and provide one trusted `extent_anchor_path` directory containing all
+extent images.
 
 For example, a containerd/Kata deployment where the read-only image
 layer resides under `/var/lib/containerd` should add that path:
