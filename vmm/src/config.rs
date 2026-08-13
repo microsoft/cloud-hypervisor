@@ -1368,7 +1368,8 @@ impl DiskConfig {
          rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
-         image_type=<raw,qcow2,vhd,vhdx>,lock_granularity=byte-range|full";
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full,\
+         extent_anchor_path=<path>";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1394,6 +1395,7 @@ impl DiskConfig {
             .add("backing_files")
             .add("sparse")
             .add("image_type")
+            .add("extent_anchor_path")
             .add("lock_granularity")
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
 
@@ -1492,6 +1494,8 @@ impl DiskConfig {
             .map_err(Error::ParseDisk)?
             .unwrap_or_default();
 
+        let extent_anchor_path = parser.get("extent_anchor_path").map(PathBuf::from);
+
         let bw_tb_config = if bw_size != 0 && bw_refill_time != 0 {
             Some(TokenBucketConfig {
                 size: bw_size,
@@ -1545,6 +1549,7 @@ impl DiskConfig {
             sparse,
             image_type,
             lock_granularity,
+            extent_anchor_path,
         })
     }
 
@@ -4067,7 +4072,24 @@ mod unit_tests {
             sparse: true,
             image_type: ImageType::Unknown,
             lock_granularity: LockGranularityChoice::default(),
+            extent_anchor_path: None,
         }
+    }
+
+    #[test]
+    fn test_disk_extent_anchor_path_parsing() -> Result<()> {
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file,extent_anchor_path=/var/lib/containerd")?
+                .extent_anchor_path,
+            Some(PathBuf::from("/var/lib/containerd"))
+        );
+
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file")?.extent_anchor_path,
+            None
+        );
+
+        Ok(())
     }
 
     #[test]

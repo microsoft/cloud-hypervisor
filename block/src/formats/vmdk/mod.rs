@@ -31,8 +31,14 @@ pub struct VmdkDisk {
 
 impl VmdkDisk {
     /// Builds a Flat VMDK disk backend.
-    pub fn new(file: File, path: &Path, readonly: bool, direct: bool) -> Result<Self, BlockError> {
-        let inner = FlatVmdk::new(file, path, readonly, direct)?;
+    pub fn new(
+        file: File,
+        path: &Path,
+        readonly: bool,
+        direct: bool,
+        extent_anchor_path: Option<&Path>,
+    ) -> Result<Self, BlockError> {
+        let inner = FlatVmdk::new(file, path, readonly, direct, extent_anchor_path)?;
         Ok(VmdkDisk { inner })
     }
 }
@@ -203,7 +209,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 2048)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         assert_eq!(disk.logical_size().unwrap(), 2048 * SECTOR);
         // The extent is created sparse (`set_len`), so no blocks are allocated
@@ -219,7 +225,7 @@ mod tests {
             "twoGbMaxExtentFlat",
             &[("s001.vmdk", "RW", 2048), ("s002.vmdk", "RW", 1024)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         assert_eq!(disk.logical_size().unwrap(), (2048 + 1024) * SECTOR);
         // Sparse extents: no blocks are allocated, so physical size is 0.
@@ -234,7 +240,7 @@ mod tests {
             "twoGbMaxExtentFlat",
             &[("s001.vmdk", "RW", 2048), ("s002.vmdk", "RW", 1024)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         // Fully pre-allocated extents: host allocation (st_blocks) equals the
         // declared logical size.
@@ -253,7 +259,7 @@ mod tests {
         let file = open_descriptor(&path);
         let expected = file.as_raw_fd();
 
-        let disk = VmdkDisk::new(file, &path, false, false).unwrap();
+        let disk = VmdkDisk::new(file, &path, false, false, None).unwrap();
 
         assert_eq!(disk.fd().as_raw_fd(), expected);
     }
@@ -274,7 +280,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        let disk = VmdkDisk::new(file, &path, false, false).unwrap();
+        let disk = VmdkDisk::new(file, &path, false, false, None).unwrap();
         let mut io = disk.create_async_io(1).unwrap();
 
         let buffer = OwnedIoBuffer::from_vec(vec![0u8; 512]);
@@ -293,7 +299,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 8)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, true, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, true, false, None).unwrap();
 
         let extents = disk.inner.extents();
         assert_eq!(extents.len(), 1);
@@ -319,7 +325,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 8)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         let extents = disk.inner.extents();
         assert_eq!(extents[0].access, ExtentAccess::ReadWrite);
@@ -336,7 +342,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RDONLY", 8)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         let extents = disk.inner.extents();
         assert_eq!(extents[0].access, ExtentAccess::ReadOnly);
@@ -355,7 +361,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 64)],
         );
-        let mut disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let mut disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         let err = disk.resize(4096).unwrap_err();
         assert_eq!(err.kind(), BlockErrorKind::UnsupportedFeature);
@@ -369,7 +375,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 2048)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         let cloned = disk.try_clone().unwrap();
         assert_eq!(cloned.logical_size().unwrap(), disk.logical_size().unwrap());
@@ -383,7 +389,7 @@ mod tests {
             "monolithicFlat",
             &[("disk-flat.vmdk", "RW", 2048)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         // Ring depth is ignored by the synchronous VMDK worker.
         disk.create_async_io(0).unwrap();
@@ -397,7 +403,7 @@ mod tests {
             "twoGbMaxExtentFlat",
             &[("s001.vmdk", "RW", 2048), ("s002.vmdk", "RW", 2048)],
         );
-        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false).unwrap();
+        let disk = VmdkDisk::new(open_descriptor(&path), &path, false, false, None).unwrap();
 
         disk.create_async_io(32).unwrap();
     }
@@ -411,7 +417,7 @@ mod tests {
             &["RW 0 FLAT \"disk-flat.vmdk\""],
         );
 
-        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false).unwrap_err();
+        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false, None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -422,7 +428,7 @@ mod tests {
         let line = format!("RW {} FLAT \"disk-flat.vmdk\"", u64::MAX);
         let path = write_descriptor(dir.as_path(), "monolithicFlat", &[line.as_str()]);
 
-        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false).unwrap_err();
+        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false, None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -433,7 +439,7 @@ mod tests {
         let line = format!("RW 1 FLAT \"disk-flat.vmdk\" {}", u64::MAX);
         let path = write_descriptor(dir.as_path(), "monolithicFlat", &[line.as_str()]);
 
-        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false).unwrap_err();
+        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false, None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -448,7 +454,7 @@ mod tests {
         let line = format!("RW 1 FLAT \"disk-flat.vmdk\" {offset}");
         let path = write_descriptor(dir.as_path(), "monolithicFlat", &[line.as_str()]);
 
-        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false).unwrap_err();
+        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false, None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -467,7 +473,7 @@ mod tests {
             &[l1.as_str(), l2.as_str()],
         );
 
-        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false).unwrap_err();
+        let err = FlatVmdk::new(open_descriptor(&path), &path, false, false, None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
