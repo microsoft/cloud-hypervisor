@@ -20,9 +20,7 @@ use log::{debug, warn};
 use mshv_bindings::*;
 #[cfg(target_arch = "x86_64")]
 use mshv_ioctls::InterruptRequest;
-use mshv_ioctls::{
-    Mshv, NoDatamatch, VcpuFd, VmFd, VmType, make_default_synthetic_features_mask, set_registers_64,
-};
+use mshv_ioctls::{Mshv, NoDatamatch, VcpuFd, VmFd, VmType, set_registers_64};
 use vfio_ioctls::VfioDeviceFd;
 use vm::DataMatch;
 #[cfg(feature = "sev_snp")]
@@ -359,7 +357,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
         // IPI-based TLB shootdowns, which the parent emulates correctly.
         #[cfg(target_arch = "x86_64")]
         let synthetic_features_mask = {
-            let default_mask = make_default_synthetic_features_mask();
+            let default_mask = self.mshv.make_default_synthetic_features_mask();
             if running_under_nested_mshv() || _config.nested {
                 let mut f: hv_partition_synthetic_processor_features = Default::default();
                 // SAFETY: writing to the bindgen union fields.
@@ -375,7 +373,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             }
         };
         #[cfg(not(target_arch = "x86_64"))]
-        let synthetic_features_mask = make_default_synthetic_features_mask();
+        let synthetic_features_mask = self.mshv.make_default_synthetic_features_mask();
         let fd: VmFd;
         loop {
             match self.mshv.create_vm_with_args(&create_args) {
