@@ -373,8 +373,8 @@ pub enum ValidationError {
     /// Number of FDs passed during Restore are incorrect to the NetConfig
     #[error("Number of Net FDs passed for '{0}' during Restore: {1}. Expected: {2}")]
     RestoreNetFdCountMismatch(String, usize, usize),
-    /// Prefault cannot be combined with on-demand restore
-    #[error("'prefault' cannot be combined with 'memory_restore_mode=ondemand'")]
+    /// Prefault requires the eager-copy restore mode
+    #[error("'prefault' requires 'memory_restore_mode=copy'")]
     InvalidRestorePrefaultWithOnDemand,
     /// Path provided in landlock-rules doesn't exist
     #[error("Path {0:?} provided in landlock-rules does not exist")]
@@ -1368,7 +1368,8 @@ impl DiskConfig {
          rate_limit_group=<group_id>,\
          queue_affinity=<list_of_queue_indices_with_their_associated_cpuset>,\
          serial=<serial_number>,backing_files=on|off,sparse=on|off,\
-         image_type=<raw,qcow2,vhd,vhdx>,lock_granularity=byte-range|full";
+         image_type=<raw,qcow2,vhd,vhdx,vmdk>,lock_granularity=byte-range|full,\
+         extent_anchor_path=<path>";
 
     pub fn parse(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1394,6 +1395,7 @@ impl DiskConfig {
             .add("backing_files")
             .add("sparse")
             .add("image_type")
+            .add("extent_anchor_path")
             .add("lock_granularity")
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
 
@@ -1492,6 +1494,8 @@ impl DiskConfig {
             .map_err(Error::ParseDisk)?
             .unwrap_or_default();
 
+        let extent_anchor_path = parser.get("extent_anchor_path").map(PathBuf::from);
+
         let bw_tb_config = if bw_size != 0 && bw_refill_time != 0 {
             Some(TokenBucketConfig {
                 size: bw_size,
@@ -1545,6 +1549,7 @@ impl DiskConfig {
             sparse,
             image_type,
             lock_granularity,
+            extent_anchor_path,
         })
     }
 
@@ -2662,6 +2667,9 @@ pub enum MemoryRestoreMode {
     Copy,
     /// Restore lazily by faulting snapshot pages into guest RAM on demand.
     OnDemand,
+    /// Restore by mapping the snapshot memory file copy-on-write, sharing the
+    /// page cache across VMs restored from the same snapshot.
+    CopyOnWrite,
 }
 
 #[derive(Debug, Error)]
@@ -2677,6 +2685,7 @@ impl FromStr for MemoryRestoreMode {
         match s.to_lowercase().as_str() {
             "copy" => Ok(Self::Copy),
             "ondemand" => Ok(Self::OnDemand),
+            "copyonwrite" => Ok(Self::CopyOnWrite),
             _ => Err(MemoryRestoreModeParseError::InvalidValue(s.to_owned())),
         }
     }
@@ -2697,11 +2706,11 @@ pub struct RestoreConfig {
 
 impl RestoreConfig {
     pub const SYNTAX: &'static str = "Restore from a VM snapshot. \
-        \nRestore parameters \"source_url=<source_url>,prefault=on|off,memory_restore_mode=copy|ondemand,\
-        net_fds=<list_of_net_ids_with_their_associated_fds>,resume=true|false\" \
+        \nRestore parameters \"source_url=<source_url>,prefault=on|off,memory_restore_mode=copy|ondemand|copyonwrite,\
+    net_fds=<list_of_net_ids_with_their_associated_fds>,resume=true|false\" \
         \n`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) \
         \n`prefault` controls eager prefaulting for the copy-based restore path (disabled by default) \
-        \n`memory_restore_mode=copy` preserves the existing eager read-copy restore behavior, while `memory_restore_mode=ondemand` enables lazy demand paging and fails restore if userfaultfd support is unavailable \
+        \n`memory_restore_mode=copy` preserves the existing eager read-copy restore behavior, `memory_restore_mode=ondemand` enables lazy demand paging and fails restore if userfaultfd support is unavailable, and `memory_restore_mode=copyonwrite` maps the snapshot file copy-on-write (plain private RAM only; falls back to copy otherwise) \
         \n`net_fds` is a list of net ids with new file descriptors. \
         Only net devices backed by FDs directly are needed as input.\
         \n `resume` controls whether the VM will be directly resumed after restore ";
@@ -2760,7 +2769,7 @@ impl RestoreConfig {
     // corresponding 'RestoreNetConfig' with a matched 'id' and expected
     // number of FDs.
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if self.memory_restore_mode == MemoryRestoreMode::OnDemand && self.prefault {
+        if self.memory_restore_mode != MemoryRestoreMode::Copy && self.prefault {
             return Err(ValidationError::InvalidRestorePrefaultWithOnDemand);
         }
 
@@ -4063,7 +4072,24 @@ mod unit_tests {
             sparse: true,
             image_type: ImageType::Unknown,
             lock_granularity: LockGranularityChoice::default(),
+            extent_anchor_path: None,
         }
+    }
+
+    #[test]
+    fn test_disk_extent_anchor_path_parsing() -> Result<()> {
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file,extent_anchor_path=/var/lib/containerd")?
+                .extent_anchor_path,
+            Some(PathBuf::from("/var/lib/containerd"))
+        );
+
+        assert_eq!(
+            DiskConfig::parse("path=/path/to_file")?.extent_anchor_path,
+            None
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -5046,6 +5072,18 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
         };
         assert_eq!(
             invalid_restore_mode.validate(&snapshot_vm_config),
+            Err(ValidationError::InvalidRestorePrefaultWithOnDemand)
+        );
+
+        let invalid_cow_prefault = RestoreConfig {
+            source_url: PathBuf::from("/path/to/snapshot"),
+            prefault: true,
+            memory_restore_mode: MemoryRestoreMode::CopyOnWrite,
+            net_fds: None,
+            resume: false,
+        };
+        assert_eq!(
+            invalid_cow_prefault.validate(&snapshot_vm_config),
             Err(ValidationError::InvalidRestorePrefaultWithOnDemand)
         );
     }

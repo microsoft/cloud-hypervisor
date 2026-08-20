@@ -24,6 +24,7 @@ use crate::formats::qcow::QcowDisk;
 use crate::formats::raw::{RawBackend, RawDisk};
 use crate::formats::vhd::VhdDisk;
 use crate::formats::vhdx::VhdxDisk;
+use crate::formats::vmdk::VmdkDisk;
 use crate::{
     ImageType, block_aio_is_supported, detect_image_type, open_disk_image, preallocate_disk,
 };
@@ -37,6 +38,7 @@ pub struct DiskOpenOptions<'a> {
     pub backing_files: bool,
     pub disable_io_uring: bool,
     pub disable_aio: bool,
+    pub extent_anchor_path: Option<&'a Path>,
 }
 
 /// Result of [`open_disk`], carrying the detected image type alongside
@@ -98,6 +100,7 @@ pub fn open_disk(options: &DiskOpenOptions<'_>) -> BlockResult<OpenedDisk> {
         ImageType::Raw => open_raw(file, options)?,
         ImageType::Qcow2 => open_qcow2(file, options)?,
         ImageType::Vhdx => open_vhdx(file, options)?,
+        ImageType::FlatVmdk => open_flat_vmdk(file, options)?,
         ImageType::Unknown => {
             return Err(
                 BlockError::from_kind(BlockErrorKind::UnsupportedFeature).with_path(options.path)
@@ -215,6 +218,23 @@ fn open_qcow2(
     ))
 }
 
+fn open_flat_vmdk(
+    file: fs::File,
+    options: &DiskOpenOptions<'_>,
+) -> BlockResult<Box<dyn AsyncFullDiskFile>> {
+    info!("Opening VMDK disk file with synchronous backend");
+    Ok(Box::new(
+        VmdkDisk::new(
+            file,
+            options.path,
+            options.readonly,
+            options.direct,
+            options.extent_anchor_path,
+        )
+        .map_err(|e| e.with_path(options.path))?,
+    ))
+}
+
 #[cfg(test)]
 mod unit_tests {
     use std::path::Path;
@@ -233,6 +253,7 @@ mod unit_tests {
             backing_files: false,
             disable_io_uring: true,
             disable_aio: true,
+            extent_anchor_path: None,
         }
     }
 
@@ -292,6 +313,7 @@ mod unit_tests {
             backing_files: false,
             disable_io_uring: true,
             disable_aio: true,
+            extent_anchor_path: None,
         };
         let opened = open_disk(&options).unwrap();
         assert_eq!(opened.image_type, ImageType::Raw);

@@ -7,7 +7,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::result;
+use std::{result, slice};
 
 use vmm_sys_util::file_traits::FileSync;
 use vmm_sys_util::seek_hole::SeekHole;
@@ -23,6 +23,17 @@ fn is_aligned(alignment: usize, buf_ptr: usize, len: usize, offset: u64) -> bool
         || (buf_ptr.is_multiple_of(alignment)
             && len.is_multiple_of(alignment)
             && offset.is_multiple_of(alignment as u64))
+}
+
+/// True when `offset` and every iovec base/length satisfy `alignment`
+/// (`alignment == 0` means no O_DIRECT, so everything is "aligned").
+fn iovecs_are_aligned(alignment: usize, iovecs: &[libc::iovec], offset: u64) -> bool {
+    alignment == 0
+        || (offset.is_multiple_of(alignment as u64)
+            && iovecs.iter().all(|iov| {
+                (iov.iov_base as usize).is_multiple_of(alignment)
+                    && iov.iov_len.is_multiple_of(alignment)
+            }))
 }
 
 /// A `File` that transparently satisfies O_DIRECT alignment requirements.
@@ -112,6 +123,119 @@ impl AlignedFile {
             position: 0,
         }
     }
+
+    /// Read `len` bytes at `offset` through an aligned bounce buffer.
+    pub(crate) fn read_unaligned(
+        &self,
+        offset: u64,
+        len: usize,
+        scatter: impl FnOnce(&[u8]) -> io::Result<()>,
+    ) -> io::Result<usize> {
+        let mut abuf = AlignedBuffer::new(offset, len, self.alignment)?;
+        let n = abuf.read_from(&self.file)?;
+        scatter(&abuf.as_slice()[..n])?;
+        Ok(n)
+    }
+
+    /// Write `len` bytes at `offset` through an aligned bounce buffer.
+    pub(crate) fn write_unaligned(
+        &self,
+        offset: u64,
+        len: usize,
+        gather: impl FnOnce(&mut [u8]) -> io::Result<()>,
+    ) -> io::Result<usize> {
+        let mut abuf = AlignedBuffer::new(offset, len, self.alignment)?;
+        abuf.read_from(&self.file)?; // RMW: preserve head/tail padding
+        gather(abuf.as_mut_slice())?;
+        abuf.write_to(&self.file)?;
+        Ok(len)
+    }
+
+    /// Read into the buffers described by `iovecs`, starting at `offset`.
+    ///
+    /// # Safety
+    /// Every iovec must describe valid, writable memory of `iov_len` bytes.
+    pub(crate) unsafe fn read_vectored_at(
+        &self,
+        iovecs: &[libc::iovec],
+        offset: u64,
+    ) -> io::Result<usize> {
+        if iovecs.is_empty() {
+            return Ok(0);
+        }
+        if iovecs_are_aligned(self.alignment, iovecs, offset) {
+            // SAFETY: upheld by this fn contract.
+            let ret = unsafe {
+                libc::preadv(
+                    self.file.as_raw_fd(),
+                    iovecs.as_ptr(),
+                    iovecs.len() as libc::c_int,
+                    offset as libc::off_t,
+                )
+            };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(ret as usize);
+        }
+        let total_len = iovecs.iter().map(|iov| iov.iov_len).sum();
+        self.read_unaligned(offset, total_len, |mut data| {
+            for iov in iovecs {
+                if data.is_empty() {
+                    break;
+                }
+                let n = data.len().min(iov.iov_len);
+                // SAFETY: upheld by this fn contract.
+                let dst = unsafe { slice::from_raw_parts_mut(iov.iov_base as *mut u8, n) };
+                dst.copy_from_slice(&data[..n]);
+                data = &data[n..];
+            }
+            Ok(())
+        })
+    }
+
+    /// Write the buffers described by `iovecs`, starting at `offset`.
+    ///
+    /// # Safety
+    /// Every iovec must describe valid, readable memory of `iov_len` bytes.
+    pub(crate) unsafe fn write_vectored_at(
+        &self,
+        iovecs: &[libc::iovec],
+        offset: u64,
+    ) -> io::Result<usize> {
+        if iovecs.is_empty() {
+            return Ok(0);
+        }
+        if iovecs_are_aligned(self.alignment, iovecs, offset) {
+            // SAFETY: upheld by this fn contract.
+            let ret = unsafe {
+                libc::pwritev(
+                    self.file.as_raw_fd(),
+                    iovecs.as_ptr(),
+                    iovecs.len() as libc::c_int,
+                    offset as libc::off_t,
+                )
+            };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(ret as usize);
+        }
+        let total_len = iovecs.iter().map(|iov| iov.iov_len).sum();
+        self.write_unaligned(offset, total_len, |mut dst| {
+            for iov in iovecs {
+                if dst.is_empty() {
+                    break;
+                }
+                let n = dst.len().min(iov.iov_len);
+                // SAFETY: upheld by this fn contract.
+                let src = unsafe { slice::from_raw_parts(iov.iov_base as *const u8, n) };
+                dst[..n].copy_from_slice(src);
+                dst = &mut dst[n..];
+            }
+            Ok(())
+        })
+    }
 }
 
 impl FileExt for AlignedFile {
@@ -122,10 +246,10 @@ impl FileExt for AlignedFile {
         if is_aligned(self.alignment, buf.as_ptr() as usize, buf.len(), offset) {
             return self.file.read_at(buf, offset);
         }
-        let mut abuf = AlignedBuffer::new(offset, buf.len(), self.alignment)?;
-        let n = abuf.read_from(&self.file)?;
-        buf[..n].copy_from_slice(&abuf.as_slice()[..n]);
-        Ok(n)
+        self.read_unaligned(offset, buf.len(), |data| {
+            buf[..data.len()].copy_from_slice(data);
+            Ok(())
+        })
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
@@ -135,11 +259,10 @@ impl FileExt for AlignedFile {
         if is_aligned(self.alignment, buf.as_ptr() as usize, buf.len(), offset) {
             return self.file.write_at(buf, offset);
         }
-        let mut abuf = AlignedBuffer::new(offset, buf.len(), self.alignment)?;
-        abuf.read_from(&self.file)?; // RMW: preserve head/tail padding
-        abuf.as_mut_slice().copy_from_slice(buf);
-        abuf.write_to(&self.file)?;
-        Ok(buf.len())
+        self.write_unaligned(offset, buf.len(), |dst| {
+            dst.copy_from_slice(buf);
+            Ok(())
+        })
     }
 }
 
