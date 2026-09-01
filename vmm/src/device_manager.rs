@@ -2653,7 +2653,7 @@ impl DeviceManager {
         self.make_vdpa_devices()?;
 
         // Add virtio-rtc device
-        self.make_virtio_rtc_devices(snapshot)?;
+        self.make_virtio_rtc_devices()?;
 
         Ok(())
     }
@@ -3113,7 +3113,7 @@ impl DeviceManager {
         Ok(())
     }
 
-    fn make_virtio_rtc_devices(&mut self, snapshot: Option<&Snapshot>) -> DeviceManagerResult<()> {
+    fn make_virtio_rtc_devices(&mut self) -> DeviceManagerResult<()> {
         let Some(mut rtc_config) = self.config.lock().unwrap().rtc.clone() else {
             return Ok(());
         };
@@ -3137,7 +3137,7 @@ impl DeviceManager {
                 self.exit_evt
                     .try_clone()
                     .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(snapshot, id.as_str())
+                state_from_id(self.snapshot.as_ref(), id.as_str())
                     .map_err(DeviceManagerError::RestoreGetState)?,
             )
             .map_err(DeviceManagerError::CreateVirtioRtc)?,
