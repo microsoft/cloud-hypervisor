@@ -139,6 +139,7 @@ const DEBUGCON_DEVICE_NAME: &str = "__debug_console";
 #[cfg(target_arch = "aarch64")]
 const GPIO_DEVICE_NAME: &str = "__gpio";
 const RNG_DEVICE_NAME: &str = "__rng";
+const RTC_DEVICE_NAME: &str = "__rtc";
 const IOMMU_DEVICE_NAME: &str = "__iommu";
 #[cfg(feature = "pvmemcontrol")]
 const PVMEMCONTROL_DEVICE_NAME: &str = "__pvmemcontrol";
@@ -192,6 +193,10 @@ pub enum DeviceManagerError {
     /// Cannot create virtio-rng device
     #[error("Cannot create virtio-rng device")]
     CreateVirtioRng(#[source] io::Error),
+
+    /// Cannot create virtio-rtc device
+    #[error("Cannot create virtio-rtc device")]
+    CreateVirtioRtc(#[source] io::Error),
 
     /// Cannot create generic vhost-user device
     #[error("Cannot create generic vhost-user device")]
@@ -2647,6 +2652,9 @@ impl DeviceManager {
         // Add vDPA devices if required
         self.make_vdpa_devices()?;
 
+        // Add virtio-rtc device
+        self.make_virtio_rtc_devices()?;
+
         Ok(())
     }
     /// Creates a [`MetaVirtioDevice`] from the provided [`DiskConfig`].
@@ -3101,6 +3109,53 @@ impl DeviceManager {
                 .unwrap()
                 .insert(id.clone(), device_node!(id, virtio_rng_device));
         }
+
+        Ok(())
+    }
+
+    fn make_virtio_rtc_devices(&mut self) -> DeviceManagerResult<()> {
+        let Some(mut rtc_config) = self.config.lock().unwrap().rtc.clone() else {
+            return Ok(());
+        };
+
+        info!("Creating virtio-rtc device: {rtc_config:?}");
+
+        let id = match rtc_config.pci_common.id.as_ref() {
+            Some(id) => id.clone(),
+            None => rtc_config
+                .pci_common
+                .id
+                .insert(RTC_DEVICE_NAME.to_string())
+                .clone(),
+        };
+
+        let virtio_rtc_device = Arc::new(Mutex::new(
+            virtio_devices::Rtc::new(
+                id.clone(),
+                self.force_access_platform | rtc_config.pci_common.iommu,
+                self.seccomp_action.clone(),
+                self.exit_evt
+                    .try_clone()
+                    .map_err(DeviceManagerError::EventFd)?,
+                state_from_id(self.snapshot.as_ref(), id.as_str())
+                    .map_err(DeviceManagerError::RestoreGetState)?,
+            )
+            .map_err(DeviceManagerError::CreateVirtioRtc)?,
+        ));
+        self.virtio_devices.push(MetaVirtioDevice {
+            virtio_device: Arc::clone(&virtio_rtc_device)
+                as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+            pci_common: rtc_config.pci_common.clone(),
+            dma_handler: None,
+        });
+
+        // Fill the device tree with a new node. In case of restore, we
+        // know there is nothing to do, so we can simply override the
+        // existing entry.
+        self.device_tree
+            .lock()
+            .unwrap()
+            .insert(id.clone(), device_node!(id, virtio_rtc_device));
 
         Ok(())
     }
@@ -3882,7 +3937,7 @@ impl DeviceManager {
             // Register DMA mapping in IOMMU.
             // Do not register virtio-mem regions, as they are handled directly by
             // virtio-mem device itself.
-            for (_, zone) in self.memory_manager.lock().unwrap().memory_zones().iter() {
+            for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
                 for region in zone.regions() {
                     // vfio_dma_map is unsound and ought to be marked as unsafe
                     #[allow(unused_unsafe)]
@@ -4147,7 +4202,7 @@ impl DeviceManager {
                 .map_err(DeviceManagerError::AddDmaMappingHandlerVirtioMem)?;
         }
 
-        for (_, zone) in self.memory_manager.lock().unwrap().memory_zones().iter() {
+        for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
             for region in zone.regions() {
                 vfio_user_pci_device
                     .dma_map(region)
@@ -4284,7 +4339,7 @@ impl DeviceManager {
 
                 // Do not register virtio-mem regions, as they are handled directly by
                 // virtio-mem devices.
-                for (_, zone) in self.memory_manager.lock().unwrap().memory_zones().iter() {
+                for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
                     for region in zone.regions() {
                         let gpa = region.start_addr().0;
                         let size = region.len();
@@ -4863,7 +4918,7 @@ impl DeviceManager {
                 if let Some(dma_handler) = dev.dma_handler()
                     && !iommu_attached
                 {
-                    for (_, zone) in self.memory_manager.lock().unwrap().memory_zones().iter() {
+                    for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
                         for region in zone.regions() {
                             let iova = region.start_addr().0;
                             let size = region.len();
@@ -4883,7 +4938,7 @@ impl DeviceManager {
             }
             PciDeviceHandle::VfioUser(vfio_user_pci_device) => {
                 let mut dev = vfio_user_pci_device.lock().unwrap();
-                for (_, zone) in self.memory_manager.lock().unwrap().memory_zones().iter() {
+                for zone in self.memory_manager.lock().unwrap().memory_zones().values() {
                     for region in zone.regions() {
                         // On error, log, but continue so the loop below removing the mapping from
                         // the devices runs.
