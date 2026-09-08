@@ -36,12 +36,12 @@ jobs:
             experimental: true
     steps:
       - name: Code checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain (${{ matrix.rust }})
-        uses: actions-rs/toolchain@v1
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: ${{ matrix.rust }}
           target: ${{ matrix.target }}
@@ -60,35 +60,35 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy (kvm)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
           args: --target=${{ matrix.target }} --locked --all --all-targets --no-default-features --tests --examples --features "kvm" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Clippy (default features)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
           args: --target=${{ matrix.target }} --locked --all --all-targets --tests --examples -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Clippy (default features + guest_debug)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
           args: --target=${{ matrix.target }} --locked --all --all-targets --tests --examples --features "guest_debug" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Clippy (default features + pvmemcontrol)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
           args: --target=${{ matrix.target }} --locked --all --all-targets --tests --examples --features "pvmemcontrol" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Clippy (default features + tracing)
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -96,7 +96,7 @@ jobs:
 
       - name: Clippy (mshv)
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -104,7 +104,7 @@ jobs:
 
       - name: Clippy (mshv + kvm)
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -112,7 +112,7 @@ jobs:
 
       - name: Clippy (sev_snp)
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -120,7 +120,7 @@ jobs:
 
       - name: Clippy (igvm)
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -128,7 +128,7 @@ jobs:
 
       - name: Clippy (kvm + tdx)
         if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
         with:
           use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
           command: clippy
@@ -142,6 +142,6 @@ jobs:
     name: Typos / Spellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Executes "typos ."
-      - uses: crate-ci/typos@v1.16.11
+      - uses: crate-ci/typos@7c89b528fdb59c3cdee63aa37cd51e786786f3ed # v1.16.11
