@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
     - name: Run the shell script checkers
-      uses: luizm/action-sh-checker@master
+      uses: luizm/action-sh-checker@883217215b11c1fabbf00eb1a9a041f62d74c744 # v0.10.0
       env:
         SHFMT_OPTS: -i 4 -d
         SHELLCHECK_OPTS: -x --source-path scripts
