@@ -154,7 +154,8 @@ if [ "$hypervisor" = "mshv" ]; then
             "$CH_RELEASE_DIR" || exit 1
     fi
     pushd "$CH_RELEASE_DIR" || exit
-    time cargo build --locked --release --no-default-features --features mshv \
+    # Match the destination's default features, which affect migration state.
+    time cargo build --locked --release --features mshv \
         --target "$BUILD_TARGET" --target-dir "$CH_RELEASE_DIR/target" \
         --bin cloud-hypervisor || exit 1
     cp "target/$BUILD_TARGET/release/cloud-hypervisor" \
