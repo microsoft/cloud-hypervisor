@@ -135,13 +135,30 @@ else
 fi
 popd || exit
 
-# Download Cloud Hypervisor binary from its last stable release for live-upgrade tests
-CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${migratable_version}/cloud-hypervisor-static"
+# Prepare the release binary for live-upgrade tests.
 CH_RELEASE_NAME="cloud-hypervisor-static"
-pushd "$WORKLOADS_DIR" || exit
-time wget --quiet $CH_RELEASE_URL -O "$CH_RELEASE_NAME" || exit 1
-chmod +x $CH_RELEASE_NAME
-popd || exit
+if [ "$hypervisor" = "mshv" ]; then
+    # Older upstream release binaries only include KVM support.
+    CH_RELEASE_DIR="$WORKLOADS_DIR/cloud-hypervisor-${migratable_version}-mshv"
+    if [ ! -d "$CH_RELEASE_DIR" ]; then
+        git clone --depth 1 --branch "$migratable_version" \
+            https://github.com/cloud-hypervisor/cloud-hypervisor.git \
+            "$CH_RELEASE_DIR" || exit 1
+    fi
+    pushd "$CH_RELEASE_DIR" || exit
+    time cargo build --locked --release --no-default-features --features mshv \
+        --target "$BUILD_TARGET" --target-dir "$CH_RELEASE_DIR/target" \
+        --bin cloud-hypervisor || exit 1
+    cp "target/$BUILD_TARGET/release/cloud-hypervisor" \
+        "$WORKLOADS_DIR/$CH_RELEASE_NAME" || exit 1
+    popd || exit
+else
+    CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${migratable_version}/${CH_RELEASE_NAME}"
+    pushd "$WORKLOADS_DIR" || exit
+    time wget --quiet "$CH_RELEASE_URL" -O "$CH_RELEASE_NAME" || exit 1
+    chmod +x "$CH_RELEASE_NAME"
+    popd || exit
+fi
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux-x86_64"

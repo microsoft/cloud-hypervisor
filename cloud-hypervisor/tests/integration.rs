@@ -6995,7 +6995,6 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_tcp_timeout_cancel() {
         _test_live_migration_tcp_timeout(TimeoutStrategy::Cancel);
     }
