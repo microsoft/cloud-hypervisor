@@ -8908,6 +8908,7 @@ mod common_sequential {
             // Check the guest RAM
             assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
             // Increase the guest RAM
+            guest.enable_memory_hotplug();
             resize_command(&src_api_socket, None, Some(6 << 30), None, None);
             assert!(wait_until(Duration::from_secs(30), || {
                 guest.get_total_memory().unwrap_or_default() > 5_760_000

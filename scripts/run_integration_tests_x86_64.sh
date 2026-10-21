@@ -20,21 +20,16 @@ if [ "$hypervisor" = "mshv" ]; then
     test_features="--features mshv"
     # Older baselines use incompatible MSHV IOCTLs.
     migratable_version=v50.2
-fi
-
-# if migratable version is set to override the default
-if [ -n "${MIGRATABLE_VERSION}" ]; then
+    if [ -n "${MIGRATABLE_VERSION}" ] && [ "$MIGRATABLE_VERSION" != "$migratable_version" ]; then
+        echo "Ignoring MIGRATABLE_VERSION=$MIGRATABLE_VERSION: MSHV live-upgrade tests require $migratable_version"
+    fi
+elif [ -n "${MIGRATABLE_VERSION}" ]; then
     # Validate the release tag format.
     if ! [[ "${MIGRATABLE_VERSION}" =~ ^v[0-9]{2,}\.[0-9]$ ]]; then
         echo "MIGRATABLE_VERSION should be a release tag, e.g. v47.0 or v50.2"
         exit 1
     fi
     migratable_version=${MIGRATABLE_VERSION}
-fi
-
-if [ "$hypervisor" = "mshv" ] && [ "$migratable_version" != "v50.2" ]; then
-    echo "MSHV live-upgrade tests require MIGRATABLE_VERSION=v50.2"
-    exit 1
 fi
 
 cp scripts/sha1sums-x86_64* "$WORKLOADS_DIR"
