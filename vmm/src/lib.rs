@@ -89,6 +89,8 @@ pub mod memory_manager;
 pub mod migration;
 pub mod migration_transport;
 mod pci_segment;
+#[cfg(target_arch = "x86_64")]
+mod pvh_debug;
 pub mod seccomp_filters;
 mod serial_manager;
 #[cfg(all(
@@ -1716,7 +1718,15 @@ impl Vmm {
                     EpollDispatch::Reset => {
                         info!("VM reset event");
                         // Consume the event.
-                        self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        let reset_count = self.reset_evt.read().map_err(Error::EventFdRead)?;
+                        #[cfg(target_arch = "x86_64")]
+                        if std::env::var("PVH_DEBUG").as_deref() == Ok("1")
+                            && crate::pvh_debug::enabled()
+                        {
+                            warn!("PVH_DEBUG stage=reset_event eventfd_count={reset_count}");
+                        }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        let _ = reset_count;
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::GuestExit => {
@@ -2006,15 +2016,25 @@ impl RequestHandler for Vmm {
 
     fn vm_reboot(&mut self) -> result::Result<(), VmError> {
         event!("vm", "rebooting");
+        #[cfg(target_arch = "x86_64")]
+        let reboot_trace = crate::pvh_debug::RebootTrace::new();
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("reboot_begin");
 
         // First we stop the current VM
         let config = if let Some(mut vm) = self.vm.take() {
             let config = vm.get_config();
+            #[cfg(target_arch = "x86_64")]
+            reboot_trace.stage("old_vm_shutdown_begin");
             vm.shutdown()?;
+            #[cfg(target_arch = "x86_64")]
+            reboot_trace.stage("old_vm_shutdown_complete");
             config
         } else {
             return Err(VmError::VmNotCreated);
         };
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("old_vm_dropped");
 
         // vm.shutdown() closes all the console devices, so set console_info to None
         // so that the closed FD #s are not reused.
@@ -2039,14 +2059,24 @@ impl RequestHandler for Vmm {
         // The Linux kernel fires off an i8042 reset after doing the ACPI reset so there may be
         // an event sitting in the shared reset_evt. Without doing this we get very early reboots
         // during the boot process.
-        if self.reset_evt.read().is_ok() {
+        if let Ok(reset_count) = self.reset_evt.read() {
             warn!("Spurious second reset event received. Ignoring.");
+            #[cfg(target_arch = "x86_64")]
+            if std::env::var("PVH_DEBUG").as_deref() == Ok("1")
+                && crate::pvh_debug::enabled()
+            {
+                warn!("PVH_DEBUG stage=drain_second_reset eventfd_count={reset_count}");
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            let _ = reset_count;
         }
 
         self.console_info =
             Some(pre_create_console_devices(self).map_err(VmError::CreateConsoleDevices)?);
 
         // Then we create the new VM
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("new_vm_create_begin");
         let mut vm = Vm::new(
             config,
             exit_evt,
@@ -2065,13 +2095,21 @@ impl RequestHandler for Vmm {
             None,
             None,
         )?;
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("new_vm_create_complete");
 
         // And we boot it
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("new_vm_boot_begin");
         vm.boot()?;
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("new_vm_boot_complete");
 
         self.vm = Some(vm);
 
         event!("vm", "rebooted");
+        #[cfg(target_arch = "x86_64")]
+        reboot_trace.stage("reboot_complete");
 
         Ok(())
     }

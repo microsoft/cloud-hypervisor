@@ -1886,6 +1886,9 @@ impl Vm {
             topology,
         )
         .map_err(Error::ConfigureSystem)?;
+        if entry_addr.setup_header.is_none() {
+            self.log_pvh_debug("after_configure_system");
+        }
         Ok(())
     }
 
@@ -2067,6 +2070,9 @@ impl Vm {
             .unwrap()
             .shutdown()
             .map_err(Error::CpuManager)?;
+
+        #[cfg(target_arch = "x86_64")]
+        self.log_pvh_debug("shutdown");
 
         // Wait for all the threads to finish
         for thread in self.threads.drain(..) {
@@ -2976,6 +2982,9 @@ impl Vm {
             self.vm.tdx_finalize().map_err(Error::FinalizeTdx)?;
         }
 
+        #[cfg(target_arch = "x86_64")]
+        self.log_pvh_debug("before_vcpu_start");
+
         // Resume the vm for MSHV
         if current_state == VmState::Created {
             self.vm.resume().map_err(Error::ResumeVm)?;
@@ -3010,6 +3019,27 @@ impl Vm {
 
         event!("vm", "restored");
         Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn log_pvh_debug(&self, stage: &str) {
+        if !crate::pvh_debug::enabled() {
+            return;
+        }
+        #[cfg(feature = "tdx")]
+        if self.config.lock().unwrap().is_tdx_enabled() {
+            return;
+        }
+        #[cfg(feature = "sev_snp")]
+        if self.config.lock().unwrap().is_sev_snp_enabled() {
+            return;
+        }
+        let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
+        crate::pvh_debug::log_memory(&mem, stage);
+        let vcpus = self.cpu_manager.lock().unwrap().vcpus();
+        for vcpu in vcpus {
+            vcpu.lock().unwrap().log_pvh_registers(stage);
+        }
     }
 
     /// Gets a thread-safe reference counted pointer to the VM configuration.
@@ -3271,6 +3301,9 @@ impl Pausable for Vm {
             .map_err(|e| MigratableError::Pause(anyhow!("Could not pause the VM: {e}")))?;
 
         self.state = new_state;
+
+        #[cfg(target_arch = "x86_64")]
+        self.log_pvh_debug("paused");
 
         event!("vm", "paused");
         Ok(())
