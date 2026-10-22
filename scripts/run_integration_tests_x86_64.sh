@@ -18,13 +18,15 @@ test_features=""
 
 if [ "$hypervisor" = "mshv" ]; then
     test_features="--features mshv"
-fi
-
-# if migratable version is set to override the default
-if [ -n "${MIGRATABLE_VERSION}" ]; then
-    # validate the version if matched with vxx.0
+    # Older baselines use incompatible MSHV IOCTLs.
+    migratable_version=v50.2
+    if [ -n "${MIGRATABLE_VERSION}" ] && [ "$MIGRATABLE_VERSION" != "$migratable_version" ]; then
+        echo "Ignoring MIGRATABLE_VERSION=$MIGRATABLE_VERSION: MSHV live-upgrade tests require $migratable_version"
+    fi
+elif [ -n "${MIGRATABLE_VERSION}" ]; then
+    # Validate the release tag format.
     if ! [[ "${MIGRATABLE_VERSION}" =~ ^v[0-9]{2,}\.[0-9]$ ]]; then
-        echo "MIGRATABLE_VERSION should be in format vxx.0, e.g. v47.0"
+        echo "MIGRATABLE_VERSION should be a release tag, e.g. v47.0 or v50.2"
         exit 1
     fi
     migratable_version=${MIGRATABLE_VERSION}
@@ -135,13 +137,32 @@ else
 fi
 popd || exit
 
-# Download Cloud Hypervisor binary from its last stable release for live-upgrade tests
-CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${migratable_version}/cloud-hypervisor-static"
+# Prepare the release binary for live-upgrade tests.
 CH_RELEASE_NAME="cloud-hypervisor-static"
-pushd "$WORKLOADS_DIR" || exit
-time wget --quiet $CH_RELEASE_URL -O "$CH_RELEASE_NAME" || exit 1
-chmod +x $CH_RELEASE_NAME
-popd || exit
+if [ "$hypervisor" = "mshv" ]; then
+    CH_RELEASE_NAME="cloud-hypervisor-static-mshv"
+    # Older upstream release binaries only include KVM support.
+    CH_RELEASE_DIR="$WORKLOADS_DIR/cloud-hypervisor-${migratable_version}-mshv"
+    if [ ! -d "$CH_RELEASE_DIR" ]; then
+        git clone --depth 1 --branch "$migratable_version" \
+            https://github.com/cloud-hypervisor/cloud-hypervisor.git \
+            "$CH_RELEASE_DIR" || exit 1
+    fi
+    pushd "$CH_RELEASE_DIR" || exit
+    # Match the destination's default features, which affect migration state.
+    time cargo build --locked --release --features mshv \
+        --target "$BUILD_TARGET" --target-dir "$CH_RELEASE_DIR/target" \
+        --bin cloud-hypervisor || exit 1
+    cp "target/$BUILD_TARGET/release/cloud-hypervisor" \
+        "$WORKLOADS_DIR/$CH_RELEASE_NAME" || exit 1
+    popd || exit
+else
+    CH_RELEASE_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${migratable_version}/${CH_RELEASE_NAME}"
+    pushd "$WORKLOADS_DIR" || exit
+    time wget --quiet "$CH_RELEASE_URL" -O "$CH_RELEASE_NAME" || exit 1
+    chmod +x "$CH_RELEASE_NAME"
+    popd || exit
+fi
 
 # Build custom kernel based on virtio-pmem and virtio-fs upstream patches
 VMLINUX_IMAGE="$WORKLOADS_DIR/vmlinux-x86_64"

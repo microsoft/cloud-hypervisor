@@ -10,7 +10,6 @@
 #![allow(dead_code)]
 use std::fs::{File, OpenOptions, copy};
 use std::io::{Read, Seek, Write};
-#[cfg(not(feature = "mshv"))]
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -39,12 +38,10 @@ macro_rules! basic_regular_guest {
 
 mod common_parallel {
     use std::io::{self, SeekFrom};
-    #[cfg(not(feature = "mshv"))]
     use std::num::NonZeroU32;
     use std::process::Command;
 
     use test_infra::GuestFactory;
-    #[cfg(not(feature = "mshv"))]
     use vmm::api::TimeoutStrategy;
 
     use crate::*;
@@ -6318,7 +6315,6 @@ mod common_parallel {
     // 4. The destination VM is functional (including various virtio-devices are working properly) after
     //    live migration;
     // Note: This test does not use vsock as we can't create two identical vsock on the same host.
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration(upgrade_test: bool, local: bool, paused: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -6394,28 +6390,8 @@ mod common_parallel {
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
-            // x86_64: Following what's done in the `test_snapshot_restore`, we need
-            // to make sure that removing and adding back the virtio-net device does
-            // not break the live-migration support for virtio-pci.
             #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                assert!(wait_until(Duration::from_secs(10), || {
-                    guest.wait_for_ssh(Duration::from_secs(1)).is_err()
-                }));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                guest.wait_for_ssh(Duration::from_secs(10)).unwrap();
-            }
+            guest.add_test_disk(&src_api_socket);
 
             // Start the live-migration
             let migration_socket = String::from(
@@ -6467,6 +6443,9 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
 
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -6491,7 +6470,6 @@ mod common_parallel {
     // 5. The destination VM is functional after live migration;
     // 6. Ensure Landlock is enabled on destination VM by hotplugging a disk. As the path for
     //    this disk is not known to the destination VM this step will fail.
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_with_landlock() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -6620,7 +6598,6 @@ mod common_parallel {
     }
 
     // Function to get an available port
-    #[cfg(not(feature = "mshv"))]
     fn get_available_port() -> u16 {
         TcpListener::bind("127.0.0.1:0")
             .expect("Failed to bind to address")
@@ -6629,7 +6606,6 @@ mod common_parallel {
             .port()
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn start_live_migration_tcp(
         src_api_socket: &str,
         dest_api_socket: &str,
@@ -6714,7 +6690,6 @@ mod common_parallel {
         send_success && receive_success
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_tcp(connections: NonZeroU32) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -6778,25 +6753,8 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
-            // On x86_64 architecture, remove and re-add the virtio-net device
             #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                assert!(wait_until(Duration::from_secs(10), || {
-                    guest.wait_for_ssh(Duration::from_secs(1)).is_err()
-                }));
-                // Re-add the virtio-net device
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                guest.wait_for_ssh(Duration::from_secs(10)).unwrap();
-            }
+            guest.add_test_disk(&src_api_socket);
             // Start TCP live migration
             assert!(
                 start_live_migration_tcp(&src_api_socket, &dest_api_socket, connections),
@@ -6831,6 +6789,9 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), boot_vcpus);
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean up the destination VM and ensure it terminates properly
@@ -6845,7 +6806,6 @@ mod common_parallel {
         handle_child_output(r, &dest_output);
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_tcp_timeout(timeout_strategy: TimeoutStrategy) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -6984,7 +6944,9 @@ mod common_parallel {
 
                     thread::sleep(Duration::from_secs(3));
                     assert!(
-                        src_child.try_wait().unwrap().is_some(),
+                        wait_until(Duration::from_secs(30), || {
+                            matches!(src_child.try_wait(), Ok(Some(_)))
+                        }),
                         "Source VM should have terminated after a forced migration"
                     );
 
@@ -7003,49 +6965,41 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_basic() {
         _test_live_migration(false, false, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_local() {
         _test_live_migration(false, true, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_basic_paused() {
         _test_live_migration(false, false, true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_local_paused() {
         _test_live_migration(false, true, true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_tcp() {
         _test_live_migration_tcp(NonZeroU32::new(1).unwrap());
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_tcp_parallel_connections() {
         _test_live_migration_tcp(NonZeroU32::new(8).unwrap());
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_tcp_timeout_cancel() {
         _test_live_migration_tcp_timeout(TimeoutStrategy::Cancel);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_tcp_timeout_ignore() {
         _test_live_migration_tcp_timeout(TimeoutStrategy::Ignore);
     }
@@ -7053,25 +7007,21 @@ mod common_parallel {
     // TODO: Add test of live upgrade paused vm after cloud-hypervisor-static
     // version is updated.
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_basic() {
         _test_live_migration(true, false, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_local() {
         _test_live_migration(true, true, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     #[cfg(target_arch = "x86_64")]
     fn test_live_migration_with_landlock() {
         _test_live_migration_with_landlock();
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_virtio_fs(local: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -7084,7 +7034,6 @@ mod common_parallel {
             prepare_virtiofsd(&guest.tmp_dir, shared_dir.to_str().unwrap());
 
         let src_api_socket = temp_api_path(&guest.tmp_dir);
-
         // Start the source VM
         let mut src_child = GuestCommand::new(&guest)
             .args(["--api-socket", &src_api_socket])
@@ -7162,6 +7111,9 @@ mod common_parallel {
                 "pre_migration_data"
             );
 
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
+
             let migration_socket = String::from(
                 guest
                     .tmp_dir
@@ -7232,6 +7184,9 @@ mod common_parallel {
             let post_content =
                 std::fs::read_to_string(shared_dir.join("post_migration_file")).unwrap();
             assert_eq!(post_content.trim(), "post_migration_data");
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean up
@@ -7248,13 +7203,11 @@ mod common_parallel {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_virtio_fs() {
         _test_live_migration_virtio_fs(false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_virtio_fs_local() {
         _test_live_migration_virtio_fs(true);
     }
@@ -7378,7 +7331,6 @@ mod dbus_api {
 }
 
 mod ivshmem {
-    #[cfg(not(feature = "mshv"))]
     use std::fs::remove_dir_all;
     use std::process::Command;
 
@@ -7386,7 +7338,6 @@ mod ivshmem {
 
     use crate::*;
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_ivshmem(local: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -7480,31 +7431,14 @@ mod ivshmem {
             assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
-            // x86_64: Following what's done in the `test_snapshot_restore`, we need
-            // to make sure that removing and adding back the virtio-net device does
-            // not break the live-migration support for virtio-pci.
-            #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                thread::sleep(Duration::new(10, 0));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                thread::sleep(Duration::new(10, 0));
-            }
 
             // Check ivshmem device in src guest.
             _test_ivshmem(&guest, &ivshmem_file_path, file_size);
             // Allow some normal time to elapse to check we don't get spurious reboots
             thread::sleep(std::time::Duration::new(40, 0));
+
+            #[cfg(target_arch = "x86_64")]
+            guest.add_test_disk(&src_api_socket);
 
             // Start the live-migration
             let migration_socket = String::from(
@@ -7559,6 +7493,9 @@ mod ivshmem {
 
             // Check ivshmem device
             _test_ivshmem(&guest, &ivshmem_file_path, file_size);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -7629,7 +7566,6 @@ mod ivshmem {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_ivshmem() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -7782,31 +7718,26 @@ mod ivshmem {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_ivshmem() {
         _test_live_migration_ivshmem(false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_ivshmem_local() {
         _test_live_migration_ivshmem(true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_hotplug_virtiomem() {
         snapshot_restore_common::_test_snapshot_restore(true, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))] // See issue #7437
     fn test_snapshot_restore_basic() {
         snapshot_restore_common::_test_snapshot_restore(false, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_with_resume() {
         snapshot_restore_common::_test_snapshot_restore(false, true);
     }
@@ -7834,7 +7765,6 @@ mod ivshmem {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))] // See issue #7437
     #[cfg(target_arch = "x86_64")]
     fn test_snapshot_restore_pvpanic() {
         snapshot_restore_common::_test_snapshot_restore_devices(true);
@@ -7846,7 +7776,6 @@ mod ivshmem {
     }
 }
 
-#[cfg(not(feature = "mshv"))]
 mod snapshot_restore_common {
     use std::fs::{read_to_string, remove_dir_all};
     use std::process::Command;
@@ -8002,38 +7931,8 @@ mod snapshot_restore_common {
             // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
 
-            // x86_64: We check that removing and adding back the virtio-net device
-            // does not break the snapshot/restore support for virtio-pci.
-            // This is an important thing to test as the hotplug will
-            // trigger a PCI BAR reprogramming, which is a good way of
-            // checking if the stored resources are correctly restored.
-            // Unplug the virtio-net device
-            // AArch64: Device hotplug is currently not supported, skipping here.
             #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &api_socket_source,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                let latest_events = [&MetaEvent {
-                    event: "device-removed".to_string(),
-                    device_id: Some(net_id.to_string()),
-                }];
-                assert!(wait_for_latest_events_exact(
-                    Duration::from_secs(30),
-                    &latest_events,
-                    &event_path
-                ));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &api_socket_source,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                thread::sleep(std::time::Duration::new(10, 0));
-            }
+            guest.add_test_disk(&api_socket_source);
 
             snapshot_restore_common::snapshot_and_check_events(
                 &api_socket_source,
@@ -8208,6 +8107,9 @@ mod snapshot_restore_common {
             }
 
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&api_socket_restored);
         });
         // Shutdown the target VM and check console output
         kill_child(&mut child);
@@ -8221,6 +8123,7 @@ mod snapshot_restore_common {
         handle_child_output(r, &output);
     }
 
+    #[cfg(not(feature = "mshv"))]
     pub(crate) fn _test_snapshot_restore_uffd(
         memory_config: &str,
         memory_zone_config: &[&str],
@@ -8500,7 +8403,6 @@ mod snapshot_restore_common {
 }
 
 mod common_sequential {
-    #[cfg(not(feature = "mshv"))]
     use std::fs::remove_dir_all;
 
     use crate::*;
@@ -8531,7 +8433,6 @@ mod common_sequential {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))] // See issue #7437
     #[ignore = "See #6970"]
     fn test_snapshot_restore_with_fd() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
@@ -8765,7 +8666,6 @@ mod common_sequential {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_snapshot_restore_virtio_fs() {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -8926,7 +8826,6 @@ mod common_sequential {
         let _ = std::fs::remove_file(shared_dir.join("post_restore_file"));
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_balloon(upgrade_test: bool, local: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -9009,6 +8908,7 @@ mod common_sequential {
             // Check the guest RAM
             assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
             // Increase the guest RAM
+            guest.enable_memory_hotplug();
             resize_command(&src_api_socket, None, Some(6 << 30), None, None);
             assert!(wait_until(Duration::from_secs(30), || {
                 guest.get_total_memory().unwrap_or_default() > 5_760_000
@@ -9027,28 +8927,8 @@ mod common_sequential {
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
 
-            // x86_64: Following what's done in the `test_snapshot_restore`, we need
-            // to make sure that removing and adding back the virtio-net device does
-            // not break the live-migration support for virtio-pci.
             #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                assert!(wait_until(Duration::from_secs(10), || {
-                    guest.wait_for_ssh(Duration::from_secs(1)).is_err()
-                }));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                guest.wait_for_ssh(Duration::from_secs(10)).unwrap();
-            }
+            guest.add_test_disk(&src_api_socket);
 
             // Start the live-migration
             let migration_socket = String::from(
@@ -9115,6 +8995,9 @@ mod common_sequential {
             let total_memory = guest.get_total_memory().unwrap_or_default();
             assert!(total_memory > 4_800_000);
             assert!(total_memory < 5_760_000);
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -9129,7 +9012,6 @@ mod common_sequential {
         handle_child_output(r, &dest_output);
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_numa(upgrade_test: bool, local: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -9254,28 +9136,8 @@ mod common_sequential {
                 }
             }
 
-            // x86_64: Following what's done in the `test_snapshot_restore`, we need
-            // to make sure that removing and adding back the virtio-net device does
-            // not break the live-migration support for virtio-pci.
             #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                assert!(wait_until(Duration::from_secs(10), || {
-                    guest.wait_for_ssh(Duration::from_secs(1)).is_err()
-                }));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                guest.wait_for_ssh(Duration::from_secs(10)).unwrap();
-            }
+            guest.add_test_disk(&src_api_socket);
 
             // Start the live-migration
             let migration_socket = String::from(
@@ -9371,6 +9233,9 @@ mod common_sequential {
                     );
                 }
             }
+
+            #[cfg(target_arch = "x86_64")]
+            guest.remove_test_disk(&dest_api_socket);
         });
 
         // Clean-up the destination VM and make sure it terminated correctly
@@ -9493,49 +9358,41 @@ mod common_sequential {
     // NUMA and balloon live migration tests run sequentially
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_balloon() {
         _test_live_migration_balloon(false, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_balloon_local() {
         _test_live_migration_balloon(false, true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_balloon() {
         _test_live_migration_balloon(true, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_balloon_local() {
         _test_live_migration_balloon(true, true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_numa() {
         _test_live_migration_numa(false, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_numa_local() {
         _test_live_migration_numa(false, true);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_numa() {
         _test_live_migration_numa(true, false);
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_upgrade_numa_local() {
         _test_live_migration_numa(true, true);
     }
@@ -9573,7 +9430,6 @@ mod common_sequential {
         _test_live_migration_ovs_dpdk(true, true);
     }
 
-    #[cfg(not(feature = "mshv"))]
     fn _test_live_migration_watchdog(upgrade_test: bool, local: bool) {
         let disk_config = UbuntuDiskConfig::new(JAMMY_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(disk_config));
@@ -9647,28 +9503,6 @@ mod common_sequential {
             assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
             // Check the guest virtio-devices, e.g. block, rng, console, and net
             guest.check_devices_common(None, Some(&console_text), Some(&pmem_path));
-            // x86_64: Following what's done in the `test_snapshot_restore`, we need
-            // to make sure that removing and adding back the virtio-net device does
-            // not break the live-migration support for virtio-pci.
-            #[cfg(target_arch = "x86_64")]
-            {
-                assert!(remote_command(
-                    &src_api_socket,
-                    "remove-device",
-                    Some(net_id),
-                ));
-                assert!(wait_until(Duration::from_secs(10), || {
-                    guest.wait_for_ssh(Duration::from_secs(1)).is_err()
-                }));
-
-                // Plug the virtio-net device again
-                assert!(remote_command(
-                    &src_api_socket,
-                    "add-net",
-                    Some(net_params.as_str()),
-                ));
-                guest.wait_for_ssh(Duration::from_secs(10)).unwrap();
-            }
 
             // Enable watchdog and ensure its functional
             let expected_reboot_count = 1;
@@ -9788,7 +9622,6 @@ mod common_sequential {
     }
 
     #[test]
-    #[cfg(not(feature = "mshv"))]
     fn test_live_migration_watchdog() {
         _test_live_migration_watchdog(false, false);
     }
