@@ -149,6 +149,40 @@ Any UEFI capable image can be booted using the Cloud Hypervisor specific firmwar
 
 To make Cloud Hypervisor use UEFI boot, pass the `CLOUDHV.fd` (for x86-64) or `CLOUDHV_EFI.fd` (for AArch64) file path as an argument to the `--firmware` option, which opens the firmware file in read-only mode.
 
+## Diagnosing x86-64 PVH resets in unattended tests
+
+PVH diagnostics are disabled by default. Set `CHV_PVH_DEBUG=1` in the
+**cloud-hypervisor process environment** to enable them. Retain INFO-level
+output, including all rotated CHV stdout, CHV events and guest serial logs.
+Unset the variable or use any other value to disable diagnostics.
+The instrumentation is read-only;
+TDX and SEV-SNP guests skip the memory/register snapshots.
+
+No manual pause or snapshot is required for reset-path logging. Search for
+`PVH_DEBUG` to correlate:
+
+- Reset eventfd counts and any drained second reset.
+- Numbered reboot stages and elapsed microseconds: old VM shutdown/destruction,
+  replacement VM creation/boot, and reboot completion.
+- Memory/register snapshots after PVH system configuration, before starting the
+  boot vCPUs, and after stopping the old vCPUs during shutdown/reboot.
+- Registers of a vCPU returning `VmExit::Reset`. ACPI/i8042 resets instead have
+  their existing `ACPI Reboot signalled` / `i8042 reset signalled` source logs;
+  they need not generate a `VmExit::Reset`.
+
+Snapshots include expected PVH start-info at `0x6000`, its magic and RSDP
+pointer, the CloudHv EDK II saved pointer at `0x80f000`, bounded ACPI table
+reads/checksums, and vCPU registers. Normally the pre-start magic is
+`0x336ec578`, RBX is `0x6000`, and the CHV-created RSDP is at `0xa0000`.
+The firmware-specific scratch word at `0x80f000` can be zero before firmware
+entry. Low-memory boot structures may legitimately be reused by the guest OS,
+so changed contents at shutdown alone are not proof of corruption.
+
+This logs the reset lifecycle, not the exact instant of a firmware exception
+that never exits to CHV. Retaining output through teardown captures a final
+`shutdown` snapshot, but it cannot establish when memory changed. The diagnostic
+logs expose guest memory/register contents and should be handled accordingly.
+
 # Links
 
 - [OVMF wiki](https://github.com/tianocore/tianocore.github.io/wiki/OVMF)

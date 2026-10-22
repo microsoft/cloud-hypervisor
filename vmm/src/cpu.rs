@@ -504,6 +504,34 @@ pub struct Vcpu {
 }
 
 impl Vcpu {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn log_pvh_registers(&self, stage: &str) {
+        match self.vcpu.get_regs() {
+            Ok(regs) => warn!(
+                "PVH_DEBUG stage={stage} cpu={} rip={:#x} rax={:#x} rbx={:#x} rsp={:#x}",
+                self.id,
+                regs.get_rip(),
+                regs.get_rax(),
+                regs.get_rbx(),
+                regs.get_rsp()
+            ),
+            Err(e) => warn!(
+                "PVH_DEBUG stage={stage} cannot read cpu={} registers: {e}",
+                self.id
+            ),
+        }
+        match self.vcpu.get_sregs() {
+            Ok(regs) => warn!(
+                "PVH_DEBUG stage={stage} cpu={} cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x}",
+                self.id, regs.cr0, regs.cr3, regs.cr4, regs.efer
+            ),
+            Err(e) => warn!(
+                "PVH_DEBUG stage={stage} cannot read cpu={} special registers: {e}",
+                self.id
+            ),
+        }
+    }
+
     /// Constructs a new VCPU for `vm`.
     ///
     /// # Arguments
@@ -1382,6 +1410,10 @@ impl CpuManager {
                                     VmExit::Hyperv => {}
                                     VmExit::Reset => {
                                         info!("VmExit::Reset");
+                                        #[cfg(target_arch = "x86_64")]
+                                        if crate::pvh_debug::enabled() {
+                                            vcpu.log_pvh_registers("vcpu_reset_exit");
+                                        }
                                         vcpu_run_interrupted.store(true, Ordering::SeqCst);
                                         reset_evt.write(1).unwrap();
                                         break;
