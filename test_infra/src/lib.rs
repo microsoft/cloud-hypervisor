@@ -2679,8 +2679,12 @@ pub fn edk2_path() -> PathBuf {
     edk2_path
 }
 
+// IPv6 is disabled to match the reference guest kernel, which is built
+// without it. With IPv6 enabled, systemd-networkd-wait-online holds up the
+// boot of the Ubuntu images for ~13s while it waits for IPv6 router
+// discovery on the test network.
 pub const DIRECT_KERNEL_BOOT_CMDLINE: &str =
-    "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1";
+    "root=/dev/vda1 console=hvc0 rw systemd.journald.forward_to_console=1 ipv6.disable=1";
 
 pub const CONSOLE_TEST_STRING: &str = "Started OpenBSD Secure Shell server";
 
