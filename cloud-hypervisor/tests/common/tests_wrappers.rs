@@ -3290,6 +3290,14 @@ pub(crate) fn _test_net_hotplug(
                 .is_ok_and(|s| s.trim().parse::<u32>().unwrap_or_default() == 3)
         }));
 
+        // udev renames the hot-added NIC while systemd-networkd is still
+        // querying its permanent MAC, so networkd can fail the lookup and leave
+        // the NIC unmanaged (its netplan config matches PermanentMACAddress).
+        // Restart networkd so it re-enumerates the link with its final name.
+        guest
+            .ssh_command("sudo systemctl restart systemd-networkd")
+            .unwrap();
+
         // Test the same using the added network interface's IP
         assert_eq!(
             ssh_command_ip(
