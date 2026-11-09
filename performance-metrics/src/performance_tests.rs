@@ -355,7 +355,10 @@ pub fn performance_boot_time_pmem(control: &PerformanceTestControl) -> f64 {
             .default_cpus()
             .args(["--memory", "size=1G,hugepages=on"])
             .args(["--kernel", direct_kernel_boot_path().to_str().unwrap()])
-            .args(["--cmdline", "root=/dev/pmem0p1 console=ttyS0 quiet rw"])
+            .args([
+                "--cmdline",
+                "root=/dev/pmem0p1 console=ttyS0 quiet rw ipv6.disable=1",
+            ])
             .args(["--console", "off"])
             .default_net()
             .args(["--disk", format!("path={cloud_init}").as_str()])
